@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.13"
+version: "1.0.14"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -36,6 +36,10 @@ options:
   entity_battery_soc: "sensor.solinteg_inverter_battery_soc"
   entity_spot_price: "sensor.nord_pool_se4_aktuellt_pris"
 
+  pv_capacity_kw: 12.0
+  pv_tilt_deg: ""
+  pv_azimuth_deg: ""
+
   battery_capacity_kwh: 19.6
   hard_min_soc_pct: 5
   preferred_min_soc_pct: 15
@@ -64,6 +68,10 @@ schema:
   entity_battery_power: str
   entity_battery_soc: str
   entity_spot_price: str
+
+  pv_capacity_kw: "float(0.1,100)"
+  pv_tilt_deg: str
+  pv_azimuth_deg: str
 
   battery_capacity_kwh: float
   hard_min_soc_pct: "float(0,50)"
