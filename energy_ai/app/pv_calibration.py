@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+from .solar_geometry import solar_features
 from .training import DATASET_PATH, TRAINING_DIR
 
 MODEL_PATH = TRAINING_DIR / "pv_calibration_v1.pkl"
@@ -26,6 +27,11 @@ FEATURE_NAMES = [
     "hour_cos",
     "doy_sin",
     "doy_cos",
+    "solar_elevation_deg",
+    "daily_max_solar_elevation_deg",
+    "daylight_hours",
+    "solar_azimuth_sin",
+    "solar_azimuth_cos",
     "physical_baseline_kw",
 ]
 
@@ -39,13 +45,22 @@ def _number(value: Any) -> float | None:
         return None
 
 
-def feature_vector(timestamp: datetime, gti_w_m2: float, temperature_c: float | None, cloud_cover_pct: float | None, capacity_kw: float) -> list[float]:
+def feature_vector(
+    timestamp: datetime,
+    gti_w_m2: float,
+    temperature_c: float | None,
+    cloud_cover_pct: float | None,
+    capacity_kw: float,
+    latitude_deg: float,
+    longitude_deg: float,
+) -> list[float]:
     ts = timestamp.astimezone(STOCKHOLM)
     hour = ts.hour + ts.minute / 60.0
     doy = ts.timetuple().tm_yday
     hour_angle = 2.0 * math.pi * hour / 24.0
     doy_angle = 2.0 * math.pi * doy / 365.25
     baseline = min(capacity_kw, max(0.0, capacity_kw * gti_w_m2 / 1000.0))
+    solar = solar_features(timestamp, latitude_deg, longitude_deg)
     return [
         float(gti_w_m2),
         float(temperature_c if temperature_c is not None else 15.0),
@@ -54,11 +69,16 @@ def feature_vector(timestamp: datetime, gti_w_m2: float, temperature_c: float | 
         math.cos(hour_angle),
         math.sin(doy_angle),
         math.cos(doy_angle),
+        float(solar["solar_elevation_deg"]),
+        float(solar["daily_max_solar_elevation_deg"]),
+        float(solar["daylight_hours"]),
+        float(solar["solar_azimuth_sin"]),
+        float(solar["solar_azimuth_cos"]),
         baseline,
     ]
 
 
-def _load_rows(capacity_kw: float) -> list[dict[str, Any]]:
+def _load_rows(capacity_kw: float, latitude_deg: float, longitude_deg: float) -> list[dict[str, Any]]:
     if not DATASET_PATH.exists():
         raise RuntimeError(f"Training dataset not found: {DATASET_PATH}")
     rows: list[dict[str, Any]] = []
@@ -69,7 +89,6 @@ def _load_rows(capacity_kw: float) -> list[dict[str, Any]]:
             gti = _number(row.get("gti_w_m2"))
             if pv is None or gti is None:
                 continue
-            # Train on daylight observations. Night-time is deterministically zeroed in inference.
             if gti < 5.0:
                 continue
             try:
@@ -80,7 +99,7 @@ def _load_rows(capacity_kw: float) -> list[dict[str, Any]]:
                 continue
             temp = _number(row.get("temperature_c"))
             cloud = _number(row.get("cloud_cover_pct"))
-            x = feature_vector(ts, gti, temp, cloud, capacity_kw)
+            x = feature_vector(ts, gti, temp, cloud, capacity_kw, latitude_deg, longitude_deg)
             rows.append({"ts": ts.astimezone(timezone.utc), "x": x, "y": max(0.0, pv), "gti": gti})
     rows.sort(key=lambda r: r["ts"])
     if len(rows) < 500:
@@ -132,9 +151,11 @@ def _quantile(values: list[float], q: float) -> float:
     return values[lo] * (1.0 - frac) + values[hi] * frac
 
 
-def train_pv_model(capacity_kw: float = 10.0) -> dict[str, Any]:
+def train_pv_model(capacity_kw: float = 10.0, latitude_deg: float | None = None, longitude_deg: float | None = None) -> dict[str, Any]:
+    if latitude_deg is None or longitude_deg is None:
+        raise RuntimeError("PV calibration requires latitude and longitude")
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
-    rows = _load_rows(capacity_kw)
+    rows = _load_rows(capacity_kw, float(latitude_deg), float(longitude_deg))
     train, validation, test, periods = _split(rows)
     model = HistGradientBoostingRegressor(
         loss="squared_error",
@@ -167,9 +188,10 @@ def train_pv_model(capacity_kw: float = 10.0) -> dict[str, Any]:
     }
     report = {
         "ok": True,
-        "model": "pv_hist_gradient_boosting_v1",
+        "model": "pv_hist_gradient_boosting_v2_solar_geometry",
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "capacity_kw": capacity_kw,
+        "site": {"latitude": float(latitude_deg), "longitude": float(longitude_deg)},
         "features": FEATURE_NAMES,
         "rows": {"all_daylight": len(rows), "train": len(train), "validation": len(validation), "test": len(test)},
         "periods": periods,
@@ -180,7 +202,14 @@ def train_pv_model(capacity_kw: float = 10.0) -> dict[str, Any]:
         },
         "uncertainty": uncertainty,
     }
-    payload = {"model": model, "report": report, "feature_names": FEATURE_NAMES, "capacity_kw": capacity_kw}
+    payload = {
+        "model": model,
+        "report": report,
+        "feature_names": FEATURE_NAMES,
+        "capacity_kw": capacity_kw,
+        "latitude_deg": float(latitude_deg),
+        "longitude_deg": float(longitude_deg),
+    }
     with MODEL_PATH.open("wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
     REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -209,9 +238,16 @@ def load_model() -> dict[str, Any] | None:
 
 def predict_calibrated(payload: dict[str, Any], timestamp: datetime, gti_w_m2: float, temperature_c: float | None, cloud_cover_pct: float | None) -> tuple[float, float]:
     capacity_kw = float(payload.get("capacity_kw", 10.0))
+    latitude_deg = payload.get("latitude_deg")
+    longitude_deg = payload.get("longitude_deg")
+    if latitude_deg is None or longitude_deg is None:
+        raise RuntimeError("Stored PV calibration model lacks solar-geometry site coordinates; retrain model")
     if gti_w_m2 < 2.0:
         return 0.0, 0.0
-    x = feature_vector(timestamp, gti_w_m2, temperature_c, cloud_cover_pct, capacity_kw)
+    solar = solar_features(timestamp, float(latitude_deg), float(longitude_deg))
+    if solar["solar_elevation_deg"] <= -1.0:
+        return 0.0, 0.0
+    x = feature_vector(timestamp, gti_w_m2, temperature_c, cloud_cover_pct, capacity_kw, float(latitude_deg), float(longitude_deg))
     pred = float(payload["model"].predict([x])[0])
     pred = max(0.0, min(capacity_kw * 1.2, pred))
     report = payload.get("report") or {}
