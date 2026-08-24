@@ -10,7 +10,7 @@ from .training import build_dataset, dataset_preview, save_upload, training_stat
 router = APIRouter(prefix="/training", tags=["training"])
 
 
-@router.get("", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse)
 async def training_page():
     status = training_status()
     files = status["files"]
