@@ -1,5 +1,6 @@
 fastapi>=0.116,<1
 uvicorn[standard]>=0.35,<1
 httpx>=0.28,<1
+websockets>=15,<16
 pydantic>=2.11,<3
 openai>=1.100,<3
