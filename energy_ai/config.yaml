@@ -1,0 +1,76 @@
+name: "Energy AI"
+version: "1.0.0"
+slug: "energy_ai"
+description: "Read-only energy AI, forecasts, history and LLM analysis for Home Assistant."
+stage: experimental
+init: false
+
+arch:
+  - aarch64
+  - amd64
+
+homeassistant_api: true
+
+ingress: true
+ingress_port: 8099
+panel_icon: "mdi:home-lightning-bolt"
+panel_title: "Energy AI"
+panel_admin: true
+
+map:
+  - type: addon_config
+    read_only: false
+
+backup: hot
+
+options:
+  poll_seconds: 60
+  stale_after_seconds: 180
+
+  entity_pv_power: "sensor.energy_pv_power"
+  entity_house_load: "sensor.energy_house_load"
+  entity_grid_power: "sensor.energy_grid_power"
+  entity_battery_power: "sensor.energy_battery_power"
+  entity_battery_soc: "sensor.energy_battery_soc"
+  entity_spot_price: "sensor.energy_spot_price"
+
+  battery_capacity_kwh: 19.6
+  hard_min_soc_pct: 5
+  preferred_min_soc_pct: 15
+  preferred_max_soc_pct: 90
+  normal_reserve_soc_pct: 20
+  high_uncertainty_reserve_soc_pct: 28
+
+  import_overhead_ore_kwh: 0
+  export_overhead_ore_kwh: 0
+  minimum_arbitrage_margin_ore_kwh: 20
+
+  llm_enabled: true
+  openai_api_key: ""
+  openai_model: "gpt-5.6-luna"
+
+schema:
+  poll_seconds: "int(15,900)"
+  stale_after_seconds: "int(30,3600)"
+
+  entity_pv_power: str
+  entity_house_load: str
+  entity_grid_power: str
+  entity_battery_power: str
+  entity_battery_soc: str
+  entity_spot_price: str
+
+  battery_capacity_kwh: float
+  hard_min_soc_pct: "float(0,50)"
+  preferred_min_soc_pct: "float(5,60)"
+  preferred_max_soc_pct: "float(50,100)"
+  normal_reserve_soc_pct: "float(5,70)"
+  high_uncertainty_reserve_soc_pct: "float(5,80)"
+
+  import_overhead_ore_kwh: float
+  export_overhead_ore_kwh: float
+  minimum_arbitrage_margin_ore_kwh: "float(0,500)"
+
+  llm_enabled: bool
+  openai_api_key: password
+  openai_model: str
