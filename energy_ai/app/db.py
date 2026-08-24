@@ -1,8 +1,19 @@
 import json, os, sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 
 DB_PATH=Path(os.getenv("ENERGY_AI_DB","/data/energy_ai.db"))
+
+CORE_KEYS=("pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","battery_soc_pct")
+LEGACY_MARKERS=(
+    "sensor.energy_pv_power",
+    "sensor.energy_house_load",
+    "sensor.energy_grid_power",
+    "sensor.energy_battery_power",
+    "sensor.energy_battery_soc",
+    "sensor.energy_spot_price",
+)
 
 
 def init_db():
@@ -15,6 +26,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,event_type TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS llm_explanations(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,model TEXT NOT NULL,request_json TEXT NOT NULL,explanation TEXT NOT NULL);
         ''')
+        for marker in LEGACY_MARKERS:
+            c.execute("DELETE FROM state_15m WHERE payload_json LIKE ?",(f"%{marker}%",))
 
 
 def insert_raw(ts,payload):
@@ -38,6 +51,10 @@ def _numeric_state(payload, key):
         return None
 
 
+def _usable_core_sample(payload):
+    return any(_numeric_state(payload,key) is not None for key in CORE_KEYS)
+
+
 def rebuild_15m_bucket(bucket_start, bucket_end, expected_samples=None):
     with sqlite3.connect(DB_PATH) as c:
         cur=c.execute(
@@ -50,29 +67,39 @@ def rebuild_15m_bucket(bucket_start, bucket_end, expected_samples=None):
         return None
 
     parsed=[(ts,json.loads(payload_json)) for ts,payload_json in rows]
+    usable=[(ts,p) for ts,p in parsed if _usable_core_sample(p)]
+    if not usable:
+        return None
+
     avg_keys=["pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","spot_price_ore_kwh"]
     means={}
     mins={}
     maxs={}
+    counts={}
     for key in avg_keys:
-        values=[v for _,p in parsed if (v:=_numeric_state(p,key)) is not None]
+        values=[v for _,p in usable if (v:=_numeric_state(p,key)) is not None]
         means[key]=mean(values) if values else None
         mins[key]=min(values) if values else None
         maxs[key]=max(values) if values else None
+        counts[key]=len(values)
 
-    soc_values=[v for _,p in parsed if (v:=_numeric_state(p,"battery_soc_pct")) is not None]
-    last_ts,last_payload=parsed[-1]
-    samples=len(parsed)
+    soc_values=[v for _,p in usable if (v:=_numeric_state(p,"battery_soc_pct")) is not None]
+    last_ts,last_payload=usable[-1]
+    samples_raw=len(parsed)
+    samples_valid=len(usable)
     completeness=None
     if expected_samples:
-        completeness=min(1.0,samples/float(expected_samples))
+        completeness=min(1.0,samples_valid/float(expected_samples))
 
     payload={
+        "schema_version":2,
         "bucket_start":bucket_start,
         "bucket_end":bucket_end,
-        "samples":samples,
+        "samples":samples_valid,
+        "samples_raw":samples_raw,
         "expected_samples":expected_samples,
         "completeness":completeness,
+        "value_counts":counts,
         "mean":means,
         "min":mins,
         "max":maxs,
@@ -83,6 +110,27 @@ def rebuild_15m_bucket(bucket_start, bucket_end, expected_samples=None):
     }
     upsert_15m(bucket_start,last_ts,payload)
     return payload
+
+
+def rebuild_recent_15m(poll_seconds, lookback_hours=48):
+    expected_samples=max(1,round(900/int(poll_seconds)))
+    cutoff=(datetime.now(timezone.utc)-timedelta(hours=lookback_hours)).isoformat()
+    with sqlite3.connect(DB_PATH) as c:
+        cur=c.execute("SELECT collected_at FROM raw_state WHERE collected_at>=? ORDER BY collected_at ASC",(cutoff,))
+        timestamps=[r[0] for r in cur.fetchall()]
+
+    buckets=set()
+    for ts in timestamps:
+        d=datetime.fromisoformat(ts.replace("Z","+00:00")).astimezone(timezone.utc)
+        start=d.replace(minute=(d.minute//15)*15,second=0,microsecond=0)
+        buckets.add(start)
+
+    rebuilt=0
+    for start in sorted(buckets):
+        result=rebuild_15m_bucket(start.isoformat(),(start+timedelta(minutes=15)).isoformat(),expected_samples)
+        if result is not None:
+            rebuilt+=1
+    return rebuilt
 
 
 def upsert_prices(area, rows, fetched_at):
