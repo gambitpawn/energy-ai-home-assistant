@@ -10,8 +10,18 @@ from .models import EnergyState, StateValue
 
 class HomeAssistantClient:
     def __init__(self, cfg: dict[str, Any]):
-        self.base_url = "http://supervisor/core/api"
-        self.token = os.getenv("SUPERVISOR_TOKEN")
+        supervisor_token = os.getenv("SUPERVISOR_TOKEN") or ""
+        fallback_token = os.getenv("HA_ACCESS_TOKEN") or ""
+
+        if supervisor_token:
+            self.base_url = "http://supervisor/core/api"
+            self.token = supervisor_token
+            self.auth_mode = "supervisor"
+        else:
+            self.base_url = (os.getenv("HA_BASE_URL") or "http://homeassistant:8123/api").rstrip("/")
+            self.token = fallback_token
+            self.auth_mode = "long_lived_token" if fallback_token else "none"
+
         self.entities = cfg.get("entities", {})
         self.timeout = 10.0
 
@@ -29,7 +39,10 @@ class HomeAssistantClient:
 
     async def all_states(self) -> list[dict[str, Any]]:
         if not self.token:
-            raise RuntimeError("SUPERVISOR_TOKEN is not available")
+            raise RuntimeError(
+                "No Home Assistant API token is available. "
+                "SUPERVISOR_TOKEN was not injected and ha_access_token is empty."
+            )
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{self.base_url}/states",
