@@ -1,7 +1,9 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 import os
+import socket
 
 import httpx
 
@@ -36,6 +38,57 @@ class HomeAssistantClient:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
+
+    async def diagnostics(self) -> dict[str, Any]:
+        parsed = urlparse(self.base_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        result: dict[str, Any] = {
+            "base_url": self.base_url,
+            "auth_mode": self.auth_mode,
+            "token_present": bool(self.token),
+            "scheme": parsed.scheme,
+            "host": host,
+            "port": port,
+            "dns": None,
+            "tcp": None,
+            "http": None,
+        }
+
+        if host:
+            try:
+                result["dns"] = socket.gethostbyname_ex(host)
+            except Exception as exc:
+                result["dns"] = {"error": repr(exc)}
+
+            try:
+                reader, writer = await __import__("asyncio").wait_for(
+                    __import__("asyncio").open_connection(host, port),
+                    timeout=5.0,
+                )
+                writer.close()
+                await writer.wait_closed()
+                result["tcp"] = "ok"
+            except Exception as exc:
+                result["tcp"] = {"error": repr(exc)}
+
+        if self.token:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        f"{self.base_url}/",
+                        headers=self._headers(),
+                        timeout=self.timeout,
+                    )
+                result["http"] = {
+                    "status_code": response.status_code,
+                    "content_type": response.headers.get("content-type"),
+                    "body_preview": response.text[:300],
+                }
+            except Exception as exc:
+                result["http"] = {"error": repr(exc)}
+
+        return result
 
     async def all_states(self) -> list[dict[str, Any]]:
         if not self.token:
