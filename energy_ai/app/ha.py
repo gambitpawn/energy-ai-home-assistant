@@ -19,20 +19,36 @@ class HomeAssistantClient:
     def authenticated(self) -> bool:
         return bool(self.token)
 
+    def _headers(self) -> dict[str, str]:
+        if not self.token:
+            return {}
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+
+    async def all_states(self) -> list[dict[str, Any]]:
+        if not self.token:
+            raise RuntimeError("SUPERVISOR_TOKEN is not available")
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/states",
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+
     async def _get_entity(self, client: httpx.AsyncClient, entity_id: str | None) -> StateValue:
         if not entity_id:
             return StateValue(entity_id=None, available=False)
-
         if not self.token:
             return StateValue(entity_id=entity_id, available=False, state=None)
 
         try:
             response = await client.get(
                 f"{self.base_url}/states/{entity_id}",
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "Content-Type": "application/json",
-                },
+                headers=self._headers(),
                 timeout=self.timeout,
             )
             if response.status_code == 404:
