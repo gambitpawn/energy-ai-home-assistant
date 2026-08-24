@@ -11,7 +11,7 @@ ENTITY_DEFAULTS = {
     "grid_power": "sensor.solinteg_inverter_meter_active_power",
     "battery_power": "sensor.solinteg_inverter_battery_power",
     "battery_soc": "sensor.solinteg_inverter_battery_soc",
-    "spot_price": None,
+    "spot_price": "sensor.nord_pool_se4_aktuellt_pris",
     "sauna_reserve": "input_boolean.energy_ai_sauna_reserve",
     "sauna_reserve_until": "input_datetime.energy_ai_sauna_reserve_until",
     "ev_mode": "input_select.energy_ai_ev_mode",
