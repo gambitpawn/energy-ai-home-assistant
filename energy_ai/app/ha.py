@@ -1,6 +1,8 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 from typing import Any
 import os
+
 import httpx
 
 from .models import EnergyState, StateValue
@@ -9,16 +11,23 @@ from .models import EnergyState, StateValue
 class HomeAssistantClient:
     def __init__(self, cfg: dict[str, Any]):
         self.base_url = "http://supervisor/core/api"
-        self.token = os.environ["SUPERVISOR_TOKEN"]
+        self.token = os.getenv("SUPERVISOR_TOKEN")
         self.entities = cfg.get("entities", {})
         self.timeout = 10.0
+
+    @property
+    def authenticated(self) -> bool:
+        return bool(self.token)
 
     async def _get_entity(self, client: httpx.AsyncClient, entity_id: str | None) -> StateValue:
         if not entity_id:
             return StateValue(entity_id=None, available=False)
 
+        if not self.token:
+            return StateValue(entity_id=entity_id, available=False, state=None)
+
         try:
-            r = await client.get(
+            response = await client.get(
                 f"{self.base_url}/states/{entity_id}",
                 headers={
                     "Authorization": f"Bearer {self.token}",
@@ -26,17 +35,17 @@ class HomeAssistantClient:
                 },
                 timeout=self.timeout,
             )
-            if r.status_code == 404:
+            if response.status_code == 404:
                 return StateValue(entity_id=entity_id, available=False, state=None)
-            r.raise_for_status()
-            d = r.json()
-            raw = d.get("state")
+            response.raise_for_status()
+            data = response.json()
+            raw = data.get("state")
             available = raw not in (None, "unknown", "unavailable", "")
             return StateValue(
                 entity_id=entity_id,
                 state=raw if available else None,
                 available=available,
-                last_updated=d.get("last_updated"),
+                last_updated=data.get("last_updated"),
             )
         except Exception:
             return StateValue(entity_id=entity_id, available=False, state=None)
@@ -66,10 +75,10 @@ class HomeAssistantClient:
             values = {}
             for output_key, config_key in keys.items():
                 values[output_key] = await self._get_entity(
-                    client, self.entities.get(config_key)
+                    client,
+                    self.entities.get(config_key),
                 )
 
-        from datetime import datetime, timezone
         return EnergyState(
             collected_at=datetime.now(timezone.utc).isoformat(),
             **values,
