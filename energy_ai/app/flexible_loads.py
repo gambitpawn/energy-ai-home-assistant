@@ -91,8 +91,6 @@ def sauna_state(cfg: dict[str, Any]) -> dict[str, Any]:
     if len(rows) < 5:
         return {"active": False, "confidence": "insufficient_history", "nominal_peak_kw": nominal, "detected_start": None, "excess_kw": 0.0}
 
-    # Conservative first pass: subtract current Zaptec draw from the newest point.
-    # Historical per-quarter EV subtraction is introduced as Zaptec history accumulates.
     net = [max(0.0, float(r["house_load_kw"]) - (ev_now if i == len(rows) - 1 else 0.0)) for i, r in enumerate(rows)]
     detected_idx = None
     detected_excess = 0.0
@@ -130,13 +128,9 @@ def flexible_load_forecast(cfg: dict[str, Any], starts: list[datetime]) -> dict[
 
     rows = []
     for stamp in starts:
-        # Zaptec gives actual current charge power. Until target SOC/ready-by is wired,
-        # active charging is persisted only over a short 2h horizon.
         lead_h = max(0.0, (stamp - now).total_seconds() / 3600.0)
         ev_kw = ev_power if lead_h <= 2.0 else 0.0
 
-        # Initial sauna signature supplied by the household: ~6 kW for about an hour,
-        # then a lower plateau/cycling load. Online evaluation will calibrate this shape.
         sauna_kw = 0.0
         if sauna_start is not None:
             age_h = (stamp - sauna_start).total_seconds() / 3600.0
@@ -165,20 +159,23 @@ async def discover_flexible_load_entities(ha_client) -> dict[str, Any]:
         text = f"{entity_id} {name}".lower()
         row = {"entity_id": entity_id, "friendly_name": name, "state": entity.get("state"), "unit": attrs.get("unit_of_measurement"), "device_class": device_class}
 
+        is_zaptec = "zaptec" in text or "zap361270" in text
+        looks_non_ev = any(k in text for k in ("solinteg", "inverter", "battery", "battctrl", "discharge_power_target"))
         ev_score = 0
-        if "zaptec" in text: ev_score += 10
-        if "total_charge_power" in text or "total charge power" in text: ev_score += 20
-        if any(k in text for k in ("charger", "charge power", "charging power", "ladd")): ev_score += 4
-        if device_class == "power" or unit in {"w", "kw"}: ev_score += 8
-        if ev_score >= 12 and (device_class == "power" or unit in {"w", "kw"}):
+        if is_zaptec: ev_score += 20
+        if any(k in text for k in ("total_charge_power", "total charge power", "laddeffekt", "charge power", "charging power")): ev_score += 15
+        elif any(k in text for k in ("charger", "charge", "charging", "ladd")): ev_score += 4
+        if device_class == "power" or unit in {"w", "kw"}: ev_score += 6
+        if looks_non_ev: ev_score -= 30
+        if is_zaptec and ev_score >= 20 and (device_class == "power" or unit in {"w", "kw"}):
             ranked["ev_power"].append({**row, "score": ev_score})
 
         conn_score = 0
-        if "zaptec" in text: conn_score += 10
-        if "charger_mode" in text or "charger mode" in text: conn_score += 20
+        if is_zaptec: conn_score += 20
+        if "charger_mode" in text or "charger mode" in text or "laddstatus" in text: conn_score += 20
         if state in {"connected_charging", "connected_requesting", "connected_finished", "disconnected"}: conn_score += 20
         if any(k in text for k in ("connected", "connection", "plug", "charging", "status", "mode", "ladd")): conn_score += 5
-        if entity_id.startswith(("binary_sensor.", "sensor.")) and conn_score >= 12:
+        if is_zaptec and entity_id.startswith(("binary_sensor.", "sensor.")) and conn_score >= 20:
             ranked["ev_connected"].append({**row, "score": conn_score})
 
         sauna_score = 0
