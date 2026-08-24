@@ -63,6 +63,7 @@ async def _refresh_pv_forecast():
         "radiation_feature": forecast["radiation_feature"],
         "orientation_configured": forecast["orientation_configured"],
         "model": forecast["model"],
+        "calibrated_model_active": forecast.get("calibrated_model_active", False),
     }
 
 
@@ -92,7 +93,7 @@ async def lifespan(app):
 
 app = FastAPI(
     title="Energy AI",
-    version="0.1.17",
+    version="0.1.20",
     description="Read-only HA energy data, forecasts, training data and LLM analysis",
     lifespan=lifespan,
     docs_url=None,
@@ -183,7 +184,7 @@ def _table(rows: list[dict], show_score: bool = True) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return """<!doctype html><html lang="sv"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Energy AI</title><style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:760px}.ok{color:#188038}.warn{color:#b06000}code{background:#8882;padding:.15rem .3rem;border-radius:4px}li{margin:.45rem 0}</style></head><body><h1>Energy AI</h1><p>Home Assistant-appen körs.</p><p id="health">Kontrollerar status…</p><ul><li><a href="training">Training data</a></li><li><a href="forecast/pv/refresh">Refresh PV forecast</a></li><li><a href="forecast/pv">PV forecast</a></li><li><a href="prices/refresh">Refresh 15-minute prices</a></li><li><a href="prices">15-minute prices</a></li><li><a href="ha-diagnostics">HA connection diagnostics</a></li><li><a href="discover">Discover HA entities</a></li><li><a href="health">Health</a></li><li><a href="state">Current state</a></li><li><a href="history?resolution=15m&limit=96">15-minute history</a></li><li><a href="history?resolution=raw&limit=100">Raw history</a></li><li><a href="config">Configuration</a></li><li><a href="docs">API docs</a></li></ul><p>Version <code>0.1.17</code>. Fysisk styrning är avstängd.</p><script>fetch('health').then(r=>r.json()).then(h=>{const e=document.getElementById('health');e.className=h.ok?'ok':'warn';e.textContent=h.ok?'HA-datainsamling fungerar.':'Appen körs, men datainsamlingen behöver konfigureras: '+(h.last_error||'okänt fel')})</script></body></html>"""
+    return """<!doctype html><html lang="sv"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Energy AI</title><style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:760px}.ok{color:#188038}.warn{color:#b06000}code{background:#8882;padding:.15rem .3rem;border-radius:4px}li{margin:.45rem 0}</style></head><body><h1>Energy AI</h1><p>Home Assistant-appen körs.</p><p id="health">Kontrollerar status…</p><ul><li><a href="training">Training data</a></li><li><a href="forecast/pv/refresh">Refresh PV forecast</a></li><li><a href="forecast/pv">PV forecast</a></li><li><a href="prices/refresh">Refresh 15-minute prices</a></li><li><a href="prices">15-minute prices</a></li><li><a href="ha-diagnostics">HA connection diagnostics</a></li><li><a href="discover">Discover HA entities</a></li><li><a href="health">Health</a></li><li><a href="state">Current state</a></li><li><a href="history?resolution=15m&limit=96">15-minute history</a></li><li><a href="history?resolution=raw&limit=100">Raw history</a></li><li><a href="config">Configuration</a></li><li><a href="docs">API docs</a></li></ul><p>Version <code>0.1.20</code>. Fysisk styrning är avstängd.</p><script>fetch('health').then(r=>r.json()).then(h=>{const e=document.getElementById('health');e.className=h.ok?'ok':'warn';e.textContent=h.ok?'HA-datainsamling fungerar.':'Appen körs, men datainsamlingen behöver konfigureras: '+(h.last_error||'okänt fel')})</script></body></html>"""
 
 
 @app.get("/docs", include_in_schema=False)
