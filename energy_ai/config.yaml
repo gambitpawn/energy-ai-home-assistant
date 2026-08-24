@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.9"
+version: "1.0.10"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -51,9 +51,7 @@ options:
   openai_api_key: ""
   openai_model: "gpt-5.6-luna"
 
-  # Fallback only if Supervisor does not inject SUPERVISOR_TOKEN.
   ha_access_token: ""
-  # Base Home Assistant URL; /api is appended automatically when missing.
   ha_base_url: "http://homeassistant.local"
 
 schema:
