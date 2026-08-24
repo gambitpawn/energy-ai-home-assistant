@@ -5,6 +5,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 
 from .collector import Collector
@@ -57,7 +58,14 @@ async def lifespan(app):
         task.cancel()
 
 
-app = FastAPI(title="Energy AI", version="0.1.12", description="Read-only HA energy data + LLM analysis", lifespan=lifespan)
+app = FastAPI(
+    title="Energy AI",
+    version="0.1.13",
+    description="Read-only HA energy data + LLM analysis",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+)
 
 POWER_CATEGORIES = {"pv_power", "house_load", "grid_power", "battery_power"}
 KEYWORDS = {
@@ -123,7 +131,15 @@ def _table(rows: list[dict], show_score: bool = True) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return """<!doctype html><html lang="sv"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Energy AI</title><style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:760px}.ok{color:#188038}.warn{color:#b06000}code{background:#8882;padding:.15rem .3rem;border-radius:4px}li{margin:.45rem 0}</style></head><body><h1>Energy AI</h1><p>Home Assistant-appen körs.</p><p id="health">Kontrollerar status…</p><ul><li><a href="prices/refresh">Refresh 15-minute prices</a></li><li><a href="prices">15-minute prices</a></li><li><a href="ha-diagnostics">HA connection diagnostics</a></li><li><a href="discover">Discover HA entities</a></li><li><a href="health">Health</a></li><li><a href="state">Current state</a></li><li><a href="history">History</a></li><li><a href="config">Configuration</a></li><li><a href="docs">API docs</a></li></ul><p>Version <code>0.1.12</code>. Fysisk styrning är avstängd.</p><script>fetch('health').then(r=>r.json()).then(h=>{const e=document.getElementById('health');e.className=h.ok?'ok':'warn';e.textContent=h.ok?'HA-datainsamling fungerar.':'Appen körs, men datainsamlingen behöver konfigureras: '+(h.last_error||'okänt fel')})</script></body></html>"""
+    return """<!doctype html><html lang="sv"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Energy AI</title><style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:760px}.ok{color:#188038}.warn{color:#b06000}code{background:#8882;padding:.15rem .3rem;border-radius:4px}li{margin:.45rem 0}</style></head><body><h1>Energy AI</h1><p>Home Assistant-appen körs.</p><p id="health">Kontrollerar status…</p><ul><li><a href="prices/refresh">Refresh 15-minute prices</a></li><li><a href="prices">15-minute prices</a></li><li><a href="ha-diagnostics">HA connection diagnostics</a></li><li><a href="discover">Discover HA entities</a></li><li><a href="health">Health</a></li><li><a href="state">Current state</a></li><li><a href="history?resolution=15m&limit=96">15-minute history</a></li><li><a href="history?resolution=raw&limit=100">Raw history</a></li><li><a href="config">Configuration</a></li><li><a href="docs">API docs</a></li></ul><p>Version <code>0.1.13</code>. Fysisk styrning är avstängd.</p><script>fetch('health').then(r=>r.json()).then(h=>{const e=document.getElementById('health');e.className=h.ok?'ok':'warn';e.textContent=h.ok?'HA-datainsamling fungerar.':'Appen körs, men datainsamlingen behöver konfigureras: '+(h.last_error||'okänt fel')})</script></body></html>"""
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_docs():
+    return get_swagger_ui_html(
+        openapi_url="openapi.json",
+        title="Energy AI API docs",
+    )
 
 
 @app.get("/prices/refresh")
