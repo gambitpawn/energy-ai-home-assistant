@@ -58,17 +58,26 @@ def ev_state(cfg: dict[str, Any]) -> dict[str, Any]:
     raw = _latest_raw_payload()
     power = _state_value(raw.get("ev_power_kw"))
     connected_item = raw.get("ev_connected") or {}
-    connected_raw = connected_item.get("state") if isinstance(connected_item, dict) and connected_item.get("available") else None
+    mode = connected_item.get("state") if isinstance(connected_item, dict) and connected_item.get("available") else None
+    mode_norm = str(mode).strip().lower() if mode is not None else None
+
     connected = None
-    if connected_raw is not None:
-        connected = str(connected_raw).strip().lower() in {"on", "true", "1", "connected", "charging", "yes"}
-    active = bool(power is not None and power > 0.25)
+    charging_from_mode = False
+    if mode_norm is not None:
+        if mode_norm in {"connected_charging", "connected_requesting", "connected_finished", "connected", "charging", "on", "true", "1", "yes"}:
+            connected = True
+        elif mode_norm in {"disconnected", "off", "false", "0", "no"}:
+            connected = False
+        charging_from_mode = mode_norm in {"connected_charging", "charging"}
+
+    active = bool((power is not None and power > 0.25) or charging_from_mode)
     return {
         "configured": bool((cfg.get("entities") or {}).get("ev_power")),
         "power_kw": round(power, 4) if power is not None else None,
         "connected": connected,
+        "charger_mode": mode_norm,
         "active": active,
-        "source": "home_assistant_entity" if power is not None else "unavailable",
+        "source": "home_assistant_zaptec" if power is not None or mode_norm is not None else "unavailable",
     }
 
 
@@ -82,8 +91,8 @@ def sauna_state(cfg: dict[str, Any]) -> dict[str, Any]:
     if len(rows) < 5:
         return {"active": False, "confidence": "insufficient_history", "nominal_peak_kw": nominal, "detected_start": None, "excess_kw": 0.0}
 
-    # Work with house load net of current EV draw. This is intentionally conservative;
-    # exact historical EV subtraction is added once Zaptec history is available.
+    # Conservative first pass: subtract current Zaptec draw from the newest point.
+    # Historical per-quarter EV subtraction is introduced as Zaptec history accumulates.
     net = [max(0.0, float(r["house_load_kw"]) - (ev_now if i == len(rows) - 1 else 0.0)) for i, r in enumerate(rows)]
     detected_idx = None
     detected_excess = 0.0
@@ -98,8 +107,6 @@ def sauna_state(cfg: dict[str, Any]) -> dict[str, Any]:
 
     start = rows[detected_idx]["ts"]
     age_min = (datetime.now(timezone.utc) - start).total_seconds() / 60.0
-    # Do not keep an inferred sauna event alive indefinitely. The initial signature is
-    # deliberately broad; learned event durations can replace it later.
     active = age_min <= 180
     confidence = "high" if detected_excess >= nominal * 0.75 else "medium"
     return {
@@ -119,14 +126,17 @@ def flexible_load_forecast(cfg: dict[str, Any], starts: list[datetime]) -> dict[
     ev_power = float(ev.get("power_kw") or 0.0) if ev.get("active") else 0.0
     sauna_start = _parse_ts(sauna["detected_start"]) if sauna.get("active") and sauna.get("detected_start") else None
     nominal = float(sauna.get("nominal_peak_kw") or 6.0)
+    now = datetime.now(timezone.utc)
 
     rows = []
     for stamp in starts:
-        # EV: short-horizon persistence only. We deliberately stop after 2h until
-        # target SOC / ready-by scheduling is connected.
-        lead_h = max(0.0, (stamp - datetime.now(timezone.utc)).total_seconds() / 3600.0)
+        # Zaptec gives actual current charge power. Until target SOC/ready-by is wired,
+        # active charging is persisted only over a short 2h horizon.
+        lead_h = max(0.0, (stamp - now).total_seconds() / 3600.0)
         ev_kw = ev_power if lead_h <= 2.0 else 0.0
 
+        # Initial sauna signature supplied by the household: ~6 kW for about an hour,
+        # then a lower plateau/cycling load. Online evaluation will calibrate this shape.
         sauna_kw = 0.0
         if sauna_start is not None:
             age_h = (stamp - sauna_start).total_seconds() / 3600.0
@@ -151,19 +161,23 @@ async def discover_flexible_load_entities(ha_client) -> dict[str, Any]:
         name = str(attrs.get("friendly_name") or "")
         unit = str(attrs.get("unit_of_measurement") or "").lower()
         device_class = str(attrs.get("device_class") or "").lower()
+        state = str(entity.get("state") or "").lower()
         text = f"{entity_id} {name}".lower()
         row = {"entity_id": entity_id, "friendly_name": name, "state": entity.get("state"), "unit": attrs.get("unit_of_measurement"), "device_class": device_class}
 
         ev_score = 0
         if "zaptec" in text: ev_score += 10
-        if any(k in text for k in ("charger", "charge", "charging", "ladd")): ev_score += 4
-        if device_class == "power" or unit in {"w", "kw"}: ev_score += 6
-        if ev_score >= 10 and (device_class == "power" or unit in {"w", "kw"}):
+        if "total_charge_power" in text or "total charge power" in text: ev_score += 20
+        if any(k in text for k in ("charger", "charge power", "charging power", "ladd")): ev_score += 4
+        if device_class == "power" or unit in {"w", "kw"}: ev_score += 8
+        if ev_score >= 12 and (device_class == "power" or unit in {"w", "kw"}):
             ranked["ev_power"].append({**row, "score": ev_score})
 
         conn_score = 0
         if "zaptec" in text: conn_score += 10
-        if any(k in text for k in ("connected", "connection", "plug", "charging", "status", "ladd")): conn_score += 5
+        if "charger_mode" in text or "charger mode" in text: conn_score += 20
+        if state in {"connected_charging", "connected_requesting", "connected_finished", "disconnected"}: conn_score += 20
+        if any(k in text for k in ("connected", "connection", "plug", "charging", "status", "mode", "ladd")): conn_score += 5
         if entity_id.startswith(("binary_sensor.", "sensor.")) and conn_score >= 12:
             ranked["ev_connected"].append({**row, "score": conn_score})
 
