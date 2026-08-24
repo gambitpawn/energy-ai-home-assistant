@@ -1,0 +1,13 @@
+configuration:
+  poll_seconds:
+    name: Poll interval
+    description: Seconds between Home Assistant state snapshots.
+  stale_after_seconds:
+    name: Stale data threshold
+    description: Age in seconds after which telemetry is considered stale.
+  openai_api_key:
+    name: OpenAI API key
+    description: Used only for the LLM explanation layer.
+  openai_model:
+    name: OpenAI model
+    description: Model used for explanations and analysis.
