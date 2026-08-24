@@ -4,7 +4,7 @@ import csv
 import json
 import math
 import pickle
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from statistics import mean, median
 from typing import Any
@@ -18,7 +18,7 @@ from .training import DATASET_PATH, TRAINING_DIR
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 MODEL_PATH = TRAINING_DIR / "load_forecast_v2.pkl"
 REPORT_PATH = TRAINING_DIR / "load_forecast_report.json"
-MODEL_NAME = "load_adaptive_profile_residual_gradient_boosting_v2"
+MODEL_NAME = "load_adaptive_profile_residual_gradient_boosting_v2_1"
 
 FEATURE_NAMES = [
     "adaptive_baseline_kw",
@@ -54,6 +54,11 @@ def _slot(ts: datetime) -> int:
     return local.hour * 4 + local.minute // 15
 
 
+def _weekday_slot_key(ts: datetime) -> tuple[int, int]:
+    local = ts.astimezone(STOCKHOLM)
+    return local.weekday(), _slot(ts)
+
+
 def _build_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_weekday_slot: dict[tuple[int, int], list[float]] = defaultdict(list)
     by_slot: dict[int, list[float]] = defaultdict(list)
@@ -84,15 +89,15 @@ def profile_baseline(profile: dict[str, Any], ts: datetime) -> float:
 
 
 def _recent_context(profile: dict[str, Any], history: list[dict[str, Any]], ts: datetime, window_days: int = 28) -> dict[str, float]:
+    """Simple context builder used for live inference where history is small (~28 days)."""
     cutoff = ts - timedelta(days=window_days)
     recent = [r for r in history if cutoff <= r["ts"] < ts]
     long_base = profile_baseline(profile, ts)
     if not recent:
         return {"long_profile_kw": long_base, "recent_slot_kw": long_base, "recent_level_factor": 1.0, "adaptive_baseline_kw": long_base}
 
-    local = ts.astimezone(STOCKHOLM)
-    target_slot = _slot(ts)
-    same_slot = [float(r["y"]) for r in recent if r["ts"].astimezone(STOCKHOLM).weekday() == local.weekday() and _slot(r["ts"]) == target_slot]
+    target_key = _weekday_slot_key(ts)
+    same_slot = [float(r["y"]) for r in recent if _weekday_slot_key(r["ts"]) == target_key]
     recent_slot = median(same_slot) if same_slot else long_base
 
     level_cutoff = ts - timedelta(days=7)
@@ -105,7 +110,6 @@ def _recent_context(profile: dict[str, Any], history: list[dict[str, Any]], ts: 
         level_factor = 1.0
     level_factor = max(0.60, min(1.80, level_factor))
 
-    # Recent same-slot history captures changed routines; level factor captures broad shifts.
     shaped = 0.55 * long_base + 0.45 * recent_slot
     adaptive = max(0.0, shaped * level_factor)
     return {
@@ -193,13 +197,64 @@ def _validation_weight(y_true: list[float], baseline: list[float], corrected: li
 
 
 def _walk_contexts(profile: dict[str, Any], seed_history: list[dict[str, Any]], part: list[dict[str, Any]]):
-    history = list(seed_history)
+    """O(n) walk-forward adaptive contexts.
+
+    Old implementation rescanned 7/28 days of history for every row. On a Raspberry Pi
+    that made training appear hung. Here rolling queues maintain the same information
+    incrementally; only the target weekday/slot median (normally <=4 values) is computed.
+    """
+    slot_queues: dict[tuple[int, int], deque[tuple[datetime, float]]] = defaultdict(deque)
+    level_queue: deque[tuple[datetime, float, float]] = deque()
+    level_actual_sum = 0.0
+    level_expected_sum = 0.0
+
+    def add_row(r: dict[str, Any]) -> None:
+        nonlocal level_actual_sum, level_expected_sum
+        ts = r["ts"]; y = float(r["y"]); expected = profile_baseline(profile, ts)
+        slot_queues[_weekday_slot_key(ts)].append((ts, y))
+        level_queue.append((ts, y, expected))
+        level_actual_sum += y
+        level_expected_sum += expected
+
+    seed = sorted(seed_history, key=lambda r: r["ts"])
+    if part:
+        seed_cutoff = part[0]["ts"] - timedelta(days=28)
+        seed = [r for r in seed if seed_cutoff <= r["ts"] < part[0]["ts"]]
+    for r in seed:
+        add_row(r)
+
     contexts = []
     for r in part:
-        contexts.append(_recent_context(profile, history, r["ts"]))
-        history.append(r)
-        cutoff = r["ts"] - timedelta(days=29)
-        history = [h for h in history if h["ts"] >= cutoff]
+        ts = r["ts"]
+        cutoff28 = ts - timedelta(days=28)
+        cutoff7 = ts - timedelta(days=7)
+
+        key = _weekday_slot_key(ts)
+        sq = slot_queues[key]
+        while sq and sq[0][0] < cutoff28:
+            sq.popleft()
+
+        while level_queue and level_queue[0][0] < cutoff7:
+            _, y_old, expected_old = level_queue.popleft()
+            level_actual_sum -= y_old
+            level_expected_sum -= expected_old
+
+        long_base = profile_baseline(profile, ts)
+        recent_slot = median([v for _, v in sq]) if sq else long_base
+        if level_queue and level_expected_sum / len(level_queue) > 0.05:
+            level_factor = level_actual_sum / level_expected_sum
+        else:
+            level_factor = 1.0
+        level_factor = max(0.60, min(1.80, level_factor))
+        shaped = 0.55 * long_base + 0.45 * recent_slot
+        contexts.append({
+            "long_profile_kw": long_base,
+            "recent_slot_kw": max(0.0, recent_slot),
+            "recent_level_factor": level_factor,
+            "adaptive_baseline_kw": max(0.0, shaped * level_factor),
+        })
+        add_row(r)
+
     return contexts
 
 
@@ -208,7 +263,7 @@ def train_load_model() -> dict[str, Any]:
     rows = _load_rows(); train, val, test, periods = _split(rows)
     profile = _build_profile(train)
 
-    train_contexts = _walk_contexts(profile, train[:0], train)
+    train_contexts = _walk_contexts(profile, [], train)
     x_train = [_features(ctx, r["ts"], r.get("temperature_c")) for r, ctx in zip(train, train_contexts)]
     baseline_train = [ctx["adaptive_baseline_kw"] for ctx in train_contexts]
     residual_train = [r["y"] - b for r, b in zip(train, baseline_train)]
@@ -240,16 +295,18 @@ def train_load_model() -> dict[str, Any]:
         "baseline": "adaptive 28d weekday-slot profile + 7d level factor, anchored to long-term profile",
         "features": FEATURE_NAMES, "temperature_training_rows": temperature_rows,
         "rows": {"all": len(rows), "train": len(train), "validation": len(val), "test": len(test)}, "periods": periods,
-        "adaptive_baseline": {"recent_window_days": 28, "level_window_days": 7, "recent_slot_weight": 0.45, "level_factor_clip": [0.60, 1.80], "validation_mode": "walk_forward_no_future_leakage"},
+        "adaptive_baseline": {"recent_window_days": 28, "level_window_days": 7, "recent_slot_weight": 0.45,
+                              "level_factor_clip": [0.60, 1.80], "validation_mode": "walk_forward_no_future_leakage",
+                              "implementation": "rolling_queues_v2_1"},
         "validation_gate": gate,
         "metrics": {"validation_hybrid": _metrics(val_true, val_pred), "validation_adaptive_baseline": _metrics(val_true, val_base),
                     "test_hybrid": _metrics(test_true, test_pred), "test_adaptive_baseline": _metrics(test_true, test_base)},
         "uncertainty": uncertainty,
     }
-    # Long profile is stable; recent context is rebuilt from live HA history at forecast time.
     payload = {"model": model, "profile": profile, "report": report, "feature_names": FEATURE_NAMES,
-               "correction_weight": weight, "model_version": 2}
-    with MODEL_PATH.open("wb") as f: pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+               "correction_weight": weight, "model_version": 21}
+    with MODEL_PATH.open("wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
     REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
 
@@ -257,7 +314,8 @@ def train_load_model() -> dict[str, Any]:
 def load_model() -> dict[str, Any] | None:
     if not MODEL_PATH.exists(): return None
     with MODEL_PATH.open("rb") as f: payload = pickle.load(f)
-    if not isinstance(payload, dict) or "model" not in payload or "profile" not in payload: raise RuntimeError("Invalid load forecast model payload")
+    if not isinstance(payload, dict) or "model" not in payload or "profile" not in payload:
+        raise RuntimeError("Invalid load forecast model payload")
     return payload
 
 
@@ -271,7 +329,8 @@ def model_status() -> dict[str, Any]:
 
 def predict_load(payload: dict[str, Any], ts: datetime, history: list[dict[str, Any]] | None = None,
                  temperature_c: float | None = None) -> tuple[float, float, dict[str, float]]:
-    if int(payload.get("model_version", 0)) < 2: raise RuntimeError("Stored load model predates v2; retrain")
+    if int(payload.get("model_version", 0)) < 2:
+        raise RuntimeError("Stored load model predates v2; retrain")
     profile = payload["profile"]
     ctx = _recent_context(profile, history or [], ts)
     correction = float(payload["model"].predict([_features(ctx, ts, temperature_c)])[0])
