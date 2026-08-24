@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.33"
+version: "1.0.34"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -36,6 +36,17 @@ options:
   entity_battery_soc: "sensor.solinteg_inverter_battery_soc"
   entity_spot_price: "sensor.nord_pool_se4_aktuellt_pris"
 
+  entity_ev_power: ""
+  entity_ev_connected: ""
+  entity_ev_soc: ""
+  entity_ev_target_soc: ""
+  entity_ev_ready_by: ""
+  entity_sauna_power: ""
+
+  ev_max_power_kw: 11.0
+  sauna_nominal_peak_kw: 6.0
+  sauna_detection_step_kw: 4.0
+
   pv_capacity_kw: 10.0
   pv_tilt_deg: "35.5"
   pv_azimuth_deg: "-79"
@@ -68,6 +79,17 @@ schema:
   entity_battery_power: str
   entity_battery_soc: str
   entity_spot_price: str
+
+  entity_ev_power: str
+  entity_ev_connected: str
+  entity_ev_soc: str
+  entity_ev_target_soc: str
+  entity_ev_ready_by: str
+  entity_sauna_power: str
+
+  ev_max_power_kw: "float(0,22)"
+  sauna_nominal_peak_kw: "float(0,15)"
+  sauna_detection_step_kw: "float(0,15)"
 
   pv_capacity_kw: "float(0.1,100)"
   pv_tilt_deg: str
