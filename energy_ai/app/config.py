@@ -25,6 +25,22 @@ ENTITY_DEFAULTS = {
     "export_power_target_kw": "input_number.energy_ai_export_power_target_kw",
 }
 
+LEGACY_PLACEHOLDERS = {
+    "pv_power": "sensor.energy_pv_power",
+    "house_load": "sensor.energy_house_load",
+    "grid_power": "sensor.energy_grid_power",
+    "battery_power": "sensor.energy_battery_power",
+    "battery_soc": "sensor.energy_battery_soc",
+    "spot_price": "sensor.energy_spot_price",
+}
+
+
+def _entity_option(options: dict[str, Any], key: str) -> str | None:
+    raw = options.get(f"entity_{key}")
+    if not raw or raw == LEGACY_PLACEHOLDERS.get(key):
+        return ENTITY_DEFAULTS[key]
+    return str(raw)
+
 
 def load_config() -> dict[str, Any]:
     options = {}
@@ -38,12 +54,12 @@ def load_config() -> dict[str, Any]:
         },
         "entities": {
             **ENTITY_DEFAULTS,
-            "pv_power": options.get("entity_pv_power") or ENTITY_DEFAULTS["pv_power"],
-            "house_load": options.get("entity_house_load") or ENTITY_DEFAULTS["house_load"],
-            "grid_power": options.get("entity_grid_power") or ENTITY_DEFAULTS["grid_power"],
-            "battery_power": options.get("entity_battery_power") or ENTITY_DEFAULTS["battery_power"],
-            "battery_soc": options.get("entity_battery_soc") or ENTITY_DEFAULTS["battery_soc"],
-            "spot_price": options.get("entity_spot_price") or ENTITY_DEFAULTS["spot_price"],
+            "pv_power": _entity_option(options, "pv_power"),
+            "house_load": _entity_option(options, "house_load"),
+            "grid_power": _entity_option(options, "grid_power"),
+            "battery_power": _entity_option(options, "battery_power"),
+            "battery_soc": _entity_option(options, "battery_soc"),
+            "spot_price": _entity_option(options, "spot_price"),
         },
         "policy": {
             "battery": {
