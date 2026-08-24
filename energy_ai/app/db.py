@@ -23,10 +23,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS raw_state(id INTEGER PRIMARY KEY AUTOINCREMENT,collected_at TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS state_15m(bucket_start TEXT PRIMARY KEY,collected_at TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS price_15m(area TEXT NOT NULL,start_utc TEXT NOT NULL,end_utc TEXT NOT NULL,price_ore_kwh REAL NOT NULL,source_currency TEXT NOT NULL,source_price_per_mwh REAL NOT NULL,fetched_at TEXT NOT NULL,PRIMARY KEY(area,start_utc));
-        CREATE TABLE IF NOT EXISTS pv_forecast_15m(generated_at TEXT NOT NULL,start_utc TEXT NOT NULL,forecast_kw REAL NOT NULL,uncertainty_kw REAL NOT NULL,irradiance_w_m2 REAL NOT NULL,cloud_cover_pct REAL,temperature_c REAL,model TEXT NOT NULL,radiation_feature TEXT NOT NULL,PRIMARY KEY(generated_at,start_utc));
+        CREATE TABLE IF NOT EXISTS pv_forecast_15m(generated_at TEXT NOT NULL,start_utc TEXT NOT NULL,forecast_kw REAL NOT NULL,uncertainty_kw REAL NOT NULL,irradiance_w_m2 REAL NOT NULL,cloud_cover_pct REAL,temperature_c REAL,model TEXT NOT NULL,radiation_feature TEXT NOT NULL,payload_json TEXT,PRIMARY KEY(generated_at,start_utc));
+        CREATE TABLE IF NOT EXISTS pv_remaining_day_forecast(generated_at TEXT PRIMARY KEY,local_date TEXT NOT NULL,remaining_energy_kwh REAL NOT NULL,p80_kwh REAL,p95_kwh REAL,model TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS pv_forecast_eval(start_utc TEXT NOT NULL,horizon_label TEXT NOT NULL,generated_at TEXT NOT NULL,model TEXT NOT NULL,forecast_kw REAL NOT NULL,actual_kw REAL NOT NULL,error_kw REAL NOT NULL,abs_error_kw REAL NOT NULL,lead_minutes REAL NOT NULL,payload_json TEXT,created_at TEXT NOT NULL,PRIMARY KEY(start_utc,horizon_label));
+        CREATE TABLE IF NOT EXISTS pv_day_eval(generated_at TEXT PRIMARY KEY,local_date TEXT NOT NULL,model TEXT NOT NULL,forecast_remaining_kwh REAL NOT NULL,actual_remaining_kwh REAL NOT NULL,error_kwh REAL NOT NULL,abs_error_kwh REAL NOT NULL,p80_kwh REAL,p95_kwh REAL,created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,event_type TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS llm_explanations(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,model TEXT NOT NULL,request_json TEXT NOT NULL,explanation TEXT NOT NULL);
         ''')
+        cols={r[1] for r in c.execute("PRAGMA table_info(pv_forecast_15m)").fetchall()}
+        if "payload_json" not in cols:
+            c.execute("ALTER TABLE pv_forecast_15m ADD COLUMN payload_json TEXT")
         for marker in LEGACY_MARKERS:
             c.execute("DELETE FROM state_15m WHERE payload_json LIKE ?",(f"%{marker}%",))
 
@@ -58,42 +64,21 @@ def _usable_core_sample(payload):
 
 def rebuild_15m_bucket(bucket_start, bucket_end, expected_samples=None):
     with sqlite3.connect(DB_PATH) as c:
-        cur=c.execute(
-            "SELECT collected_at,payload_json FROM raw_state WHERE collected_at>=? AND collected_at<? ORDER BY collected_at ASC",
-            (bucket_start,bucket_end),
-        )
+        cur=c.execute("SELECT collected_at,payload_json FROM raw_state WHERE collected_at>=? AND collected_at<? ORDER BY collected_at ASC",(bucket_start,bucket_end))
         rows=cur.fetchall()
-
-    if not rows:
-        return None
-
+    if not rows: return None
     parsed=[(ts,json.loads(payload_json)) for ts,payload_json in rows]
     usable=[(ts,p) for ts,p in parsed if _usable_core_sample(p)]
-    if not usable:
-        return None
-
+    if not usable: return None
     avg_keys=["pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","spot_price_ore_kwh"]
     means={}; mins={}; maxs={}; counts={}
     for key in avg_keys:
         values=[v for _,p in usable if (v:=_numeric_state(p,key)) is not None]
-        means[key]=mean(values) if values else None
-        mins[key]=min(values) if values else None
-        maxs[key]=max(values) if values else None
-        counts[key]=len(values)
-
+        means[key]=mean(values) if values else None; mins[key]=min(values) if values else None; maxs[key]=max(values) if values else None; counts[key]=len(values)
     soc_values=[v for _,p in usable if (v:=_numeric_state(p,"battery_soc_pct")) is not None]
-    last_ts,last_payload=usable[-1]
-    samples_raw=len(parsed); samples_valid=len(usable)
+    last_ts,last_payload=usable[-1]; samples_raw=len(parsed); samples_valid=len(usable)
     completeness=min(1.0,samples_valid/float(expected_samples)) if expected_samples else None
-
-    payload={
-        "schema_version":2,"bucket_start":bucket_start,"bucket_end":bucket_end,
-        "samples":samples_valid,"samples_raw":samples_raw,"expected_samples":expected_samples,
-        "completeness":completeness,"value_counts":counts,"mean":means,"min":mins,"max":maxs,
-        "battery_soc_end_pct":soc_values[-1] if soc_values else None,
-        "battery_soc_start_pct":soc_values[0] if soc_values else None,
-        "last_sample_at":last_ts,"last_state":last_payload,
-    }
+    payload={"schema_version":2,"bucket_start":bucket_start,"bucket_end":bucket_end,"samples":samples_valid,"samples_raw":samples_raw,"expected_samples":expected_samples,"completeness":completeness,"value_counts":counts,"mean":means,"min":mins,"max":maxs,"battery_soc_end_pct":soc_values[-1] if soc_values else None,"battery_soc_start_pct":soc_values[0] if soc_values else None,"last_sample_at":last_ts,"last_state":last_payload}
     upsert_15m(bucket_start,last_ts,payload)
     return payload
 
@@ -102,17 +87,13 @@ def rebuild_recent_15m(poll_seconds, lookback_hours=48):
     expected_samples=max(1,round(900/int(poll_seconds)))
     cutoff=(datetime.now(timezone.utc)-timedelta(hours=lookback_hours)).isoformat()
     with sqlite3.connect(DB_PATH) as c:
-        cur=c.execute("SELECT collected_at FROM raw_state WHERE collected_at>=? ORDER BY collected_at ASC",(cutoff,))
-        timestamps=[r[0] for r in cur.fetchall()]
+        timestamps=[r[0] for r in c.execute("SELECT collected_at FROM raw_state WHERE collected_at>=? ORDER BY collected_at ASC",(cutoff,)).fetchall()]
     buckets=set()
     for ts in timestamps:
-        d=datetime.fromisoformat(ts.replace("Z","+00:00")).astimezone(timezone.utc)
-        start=d.replace(minute=(d.minute//15)*15,second=0,microsecond=0)
-        buckets.add(start)
+        d=datetime.fromisoformat(ts.replace("Z","+00:00")).astimezone(timezone.utc); buckets.add(d.replace(minute=(d.minute//15)*15,second=0,microsecond=0))
     rebuilt=0
     for start in sorted(buckets):
-        result=rebuild_15m_bucket(start.isoformat(),(start+timedelta(minutes=15)).isoformat(),expected_samples)
-        if result is not None: rebuilt+=1
+        if rebuild_15m_bucket(start.isoformat(),(start+timedelta(minutes=15)).isoformat(),expected_samples) is not None: rebuilt+=1
     return rebuilt
 
 
@@ -124,33 +105,38 @@ def upsert_prices(area, rows, fetched_at):
 def get_prices(area, limit=192):
     limit=max(1,min(int(limit),500))
     with sqlite3.connect(DB_PATH) as c:
-        cur=c.execute("SELECT area,start_utc,end_utc,price_ore_kwh,source_currency,source_price_per_mwh,fetched_at FROM price_15m WHERE area=? ORDER BY start_utc ASC LIMIT ?",(area,limit))
-        names=[d[0] for d in cur.description]
+        cur=c.execute("SELECT area,start_utc,end_utc,price_ore_kwh,source_currency,source_price_per_mwh,fetched_at FROM price_15m WHERE area=? ORDER BY start_utc ASC LIMIT ?",(area,limit)); names=[d[0] for d in cur.description]
         return [dict(zip(names,row)) for row in cur.fetchall()]
 
 
 def insert_pv_forecast(forecast):
-    rows=forecast.get("rows") or []
-    generated_at=forecast["generated_at"]
-    model=forecast["model"]
-    radiation_feature=forecast["radiation_feature"]
+    rows=forecast.get("rows") or []; generated_at=forecast["generated_at"]; model=forecast["model"]; radiation_feature=forecast["radiation_feature"]
     with sqlite3.connect(DB_PATH) as c:
-        c.executemany('''INSERT OR REPLACE INTO pv_forecast_15m(generated_at,start_utc,forecast_kw,uncertainty_kw,irradiance_w_m2,cloud_cover_pct,temperature_c,model,radiation_feature) VALUES (?,?,?,?,?,?,?,?,?)''',[
-            (generated_at,r["start"],r["pv_power_forecast_kw"],r["pv_power_uncertainty_kw"],r["irradiance_w_m2"],r.get("cloud_cover_pct"),r.get("temperature_c"),model,radiation_feature)
-            for r in rows
+        c.executemany('''INSERT OR REPLACE INTO pv_forecast_15m(generated_at,start_utc,forecast_kw,uncertainty_kw,irradiance_w_m2,cloud_cover_pct,temperature_c,model,radiation_feature,payload_json) VALUES (?,?,?,?,?,?,?,?,?,?)''',[
+            (generated_at,r["start"],r["pv_power_forecast_kw"],r["pv_power_uncertainty_kw"],r["irradiance_w_m2"],r.get("cloud_cover_pct"),r.get("temperature_c"),model,radiation_feature,json.dumps(r,ensure_ascii=False)) for r in rows
         ])
-        c.execute('''DELETE FROM pv_forecast_15m WHERE generated_at < ?''',((datetime.now(timezone.utc)-timedelta(days=14)).isoformat(),))
+        remaining=forecast.get("pv_remaining_energy_today_kwh")
+        if remaining is not None:
+            g=datetime.fromisoformat(generated_at.replace("Z","+00:00")); local_date=g.astimezone().date().isoformat()
+            u=forecast.get("pv_remaining_energy_uncertainty") or {}
+            c.execute("INSERT OR REPLACE INTO pv_remaining_day_forecast(generated_at,local_date,remaining_energy_kwh,p80_kwh,p95_kwh,model) VALUES (?,?,?,?,?,?)",(generated_at,local_date,float(remaining),u.get("p80_kwh"),u.get("p95_kwh"),model))
+        c.execute("DELETE FROM pv_forecast_15m WHERE generated_at < ?",((datetime.now(timezone.utc)-timedelta(days=180)).isoformat(),))
+        c.execute("DELETE FROM pv_remaining_day_forecast WHERE generated_at < ?",((datetime.now(timezone.utc)-timedelta(days=180)).isoformat(),))
 
 
 def latest_pv_forecast(limit=144):
     limit=max(1,min(int(limit),500))
     with sqlite3.connect(DB_PATH) as c:
-        row=c.execute("SELECT MAX(generated_at) FROM pv_forecast_15m").fetchone()
-        generated_at=row[0] if row else None
+        row=c.execute("SELECT MAX(generated_at) FROM pv_forecast_15m").fetchone(); generated_at=row[0] if row else None
         if not generated_at: return {"generated_at":None,"rows":[]}
-        cur=c.execute("SELECT start_utc,forecast_kw,uncertainty_kw,irradiance_w_m2,cloud_cover_pct,temperature_c,model,radiation_feature FROM pv_forecast_15m WHERE generated_at=? ORDER BY start_utc ASC LIMIT ?",(generated_at,limit))
-        names=[d[0] for d in cur.description]
-        rows=[dict(zip(names,r)) for r in cur.fetchall()]
+        cur=c.execute("SELECT start_utc,forecast_kw,uncertainty_kw,irradiance_w_m2,cloud_cover_pct,temperature_c,model,radiation_feature,payload_json FROM pv_forecast_15m WHERE generated_at=? ORDER BY start_utc ASC LIMIT ?",(generated_at,limit)); names=[d[0] for d in cur.description]
+        rows=[]
+        for r in cur.fetchall():
+            d=dict(zip(names,r)); payload=d.pop("payload_json",None)
+            if payload:
+                try: d.update(json.loads(payload))
+                except Exception: pass
+            rows.append(d)
     return {"generated_at":generated_at,"rows":rows}
 
 
