@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
+
 TRAINING_DIR = Path("/data/training")
 DATASET_PATH = TRAINING_DIR / "training_dataset_15m.csv"
+IRRADIANCE_PATH = TRAINING_DIR / "satellite_irradiance.csv"
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
+SATELLITE_ARCHIVE_URL = "https://satellite-api.open-meteo.com/v1/archive"
 
 
 def ensure_training_dir() -> Path:
@@ -135,8 +138,113 @@ def list_training_files() -> list[dict[str, Any]]:
     return result
 
 
+def _solinteg_range() -> tuple[date, date]:
+    candidates = [TRAINING_DIR / f["name"] for f in list_training_files() if f.get("kind") == "solinteg"]
+    if not candidates:
+        raise RuntimeError("No Solinteg training CSV found. Upload it first.")
+    first: datetime | None = None
+    last: datetime | None = None
+    for path in candidates:
+        _, rows = _rows(path)
+        for row in rows:
+            try:
+                local = datetime.fromisoformat(f"{row['date']}T{row['time']}")
+                tz = _offset_timezone(row.get("utc_offset", "")) or STOCKHOLM
+                stamp = local.replace(tzinfo=tz).astimezone(timezone.utc)
+            except Exception:
+                continue
+            first = stamp if first is None or stamp < first else first
+            last = stamp if last is None or stamp > last else last
+    if first is None or last is None:
+        raise RuntimeError("Could not determine date range from Solinteg CSV")
+    return first.date(), last.date()
+
+
+async def fetch_historical_irradiance(cfg: dict[str, Any], ha_client) -> dict[str, Any]:
+    ensure_training_dir()
+    start_date, end_date = _solinteg_range()
+    ha_cfg = await ha_client.system_config()
+    lat = ha_cfg.get("latitude")
+    lon = ha_cfg.get("longitude")
+    if lat is None or lon is None:
+        raise RuntimeError("Home Assistant config does not expose latitude/longitude")
+
+    pv_cfg = cfg.get("forecast", {}).get("pv", {})
+    tilt = pv_cfg.get("tilt_deg")
+    azimuth = pv_cfg.get("azimuth_deg")
+    if tilt is None or azimuth is None:
+        raise RuntimeError("PV tilt and azimuth must be configured before fetching GTI")
+
+    variables = [
+        "global_tilted_irradiance",
+        "shortwave_radiation",
+        "direct_normal_irradiance",
+        "diffuse_radiation",
+    ]
+    records: dict[str, dict[str, Any]] = {}
+    chunks = 0
+    day = start_date
+
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        while day <= end_date:
+            chunk_end = min(day + timedelta(days=27), end_date)
+            params = {
+                "latitude": float(lat),
+                "longitude": float(lon),
+                "start_date": day.isoformat(),
+                "end_date": chunk_end.isoformat(),
+                "hourly": ",".join(variables),
+                "tilt": float(tilt),
+                "azimuth": float(azimuth),
+                "models": "satellite_radiation_seamless",
+                "temporal_resolution": "native",
+                "timezone": "UTC",
+            }
+            response = await client.get(SATELLITE_ARCHIVE_URL, params=params)
+            response.raise_for_status()
+            data = response.json()
+            hourly = data.get("hourly") or {}
+            times = hourly.get("time") or []
+            for i, stamp in enumerate(times):
+                row = {"time": stamp}
+                for variable in variables:
+                    values = hourly.get(variable) or []
+                    row[variable] = values[i] if i < len(values) else None
+                records[str(stamp)] = row
+            chunks += 1
+            day = chunk_end + timedelta(days=1)
+
+    if not records:
+        raise RuntimeError("Satellite API returned no irradiance rows")
+
+    columns = ["time", *variables]
+    with IRRADIANCE_PATH.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        for stamp in sorted(records):
+            writer.writerow(records[stamp])
+
+    dataset = build_dataset()
+    non_null_gti = sum(1 for row in records.values() if row.get("global_tilted_irradiance") is not None)
+    return {
+        "ok": True,
+        "source": "Open-Meteo Satellite Radiation API / satellite_radiation_seamless",
+        "saved_to": str(IRRADIANCE_PATH),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "latitude": float(lat),
+        "longitude": float(lon),
+        "tilt_deg": float(tilt),
+        "azimuth_deg": float(azimuth),
+        "native_rows": len(records),
+        "gti_rows": non_null_gti,
+        "chunks": chunks,
+        "dataset": dataset,
+    }
+
+
 def _aggregate_solinteg(path: Path) -> dict[datetime, dict[str, float | None]]:
-    fields, rows = _rows(path)
+    _, rows = _rows(path)
     groups: dict[datetime, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
         try:
@@ -150,10 +258,7 @@ def _aggregate_solinteg(path: Path) -> dict[datetime, dict[str, float | None]]:
             value = _number(row.get(key))
             if value is not None:
                 groups[bucket][key].append(value)
-    out = {}
-    for bucket, values in groups.items():
-        out[bucket] = {key: (mean(vals) if vals else None) for key, vals in values.items()}
-    return out
+    return {bucket: {key: (mean(vals) if vals else None) for key, vals in values.items()} for bucket, values in groups.items()}
 
 
 def _aggregate_c4(path: Path) -> dict[datetime, dict[str, float | None]]:
@@ -207,10 +312,7 @@ def _aggregate_irradiance(path: Path) -> dict[datetime, dict[str, float | None]]
             value = _number(_first(row, names))
             if value is not None:
                 groups[bucket][target].append(value)
-    out = {}
-    for bucket, values in groups.items():
-        out[bucket] = {key: (mean(vals) if vals else None) for key, vals in values.items()}
-    return out
+    return {bucket: {key: (mean(vals) if vals else None) for key, vals in values.items()} for bucket, values in groups.items()}
 
 
 def build_dataset() -> dict[str, Any]:
@@ -286,10 +388,12 @@ def training_status() -> dict[str, Any]:
         "training_dir": str(ensure_training_dir()),
         "dataset_path": str(DATASET_PATH),
         "dataset_exists": DATASET_PATH.exists(),
+        "irradiance_path": str(IRRADIANCE_PATH),
+        "irradiance_exists": IRRADIANCE_PATH.exists(),
         "files": files,
         "expected": {
             "solinteg": "5-minute CSV with date,time,utc_offset,pv_power_kw,meter_power_kw,load_power_kw",
             "c4_import": "15-minute CSV with Datum and El kWh",
-            "irradiance": "CSV with time/timestamp and global_tilted_irradiance (preferred), optionally shortwave/cloud/temperature",
+            "irradiance": "CSV with time/timestamp and global_tilted_irradiance (preferred), optionally shortwave/DNI/DHI",
         },
     }
