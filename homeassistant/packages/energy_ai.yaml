@@ -1,0 +1,71 @@
+# Energy AI canonical package. V1 is read-only.
+# Replace REPLACE_ME entities only after verifying them in Developer Tools -> States.
+template:
+  - sensor:
+      - name: Energy PV Power
+        unique_id: energy_ai_canonical_pv_power
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        state: "{{ states('sensor.REPLACE_ME_SOLINTEG_PV_POWER') | float(none) }}"
+      - name: Energy House Load
+        unique_id: energy_ai_canonical_house_load
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        state: "{{ states('sensor.REPLACE_ME_SOLINTEG_HOUSE_LOAD') | float(none) }}"
+      - name: Energy Grid Power
+        unique_id: energy_ai_canonical_grid_power
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        state: "{{ states('sensor.REPLACE_ME_SOLINTEG_GRID_POWER') | float(none) }}"
+        attributes:
+          sign_convention: "positive=import, negative=export"
+      - name: Energy Battery Power
+        unique_id: energy_ai_canonical_battery_power
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        state: "{{ states('sensor.REPLACE_ME_SOLINTEG_BATTERY_POWER') | float(none) }}"
+        attributes:
+          sign_convention: "positive=discharge, negative=charge"
+      - name: Energy Battery SOC
+        unique_id: energy_ai_canonical_battery_soc
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        state: "{{ states('sensor.REPLACE_ME_SOLINTEG_BATTERY_SOC') | float(none) }}"
+      - name: Energy Spot Price
+        unique_id: energy_ai_canonical_spot_price
+        unit_of_measurement: "öre/kWh"
+        state_class: measurement
+        state: "{{ states('sensor.REPLACE_ME_15_MIN_SPOT_PRICE') | float(none) }}"
+input_number:
+  energy_ai_battery_capacity_kwh: {name: Energy AI battery capacity, min: 1, max: 100, step: 0.1, initial: 19.6, unit_of_measurement: "kWh"}
+  energy_ai_hard_min_soc: {name: Energy AI hard minimum SOC, min: 0, max: 50, step: 1, initial: 5, unit_of_measurement: "%"}
+  energy_ai_preferred_min_soc: {name: Energy AI preferred minimum SOC, min: 5, max: 50, step: 1, initial: 15, unit_of_measurement: "%"}
+  energy_ai_preferred_max_soc: {name: Energy AI preferred maximum SOC, min: 50, max: 100, step: 1, initial: 90, unit_of_measurement: "%"}
+  energy_ai_normal_reserve_soc: {name: Energy AI normal reserve SOC, min: 5, max: 60, step: 1, initial: 20, unit_of_measurement: "%"}
+  energy_ai_high_uncertainty_reserve_soc: {name: Energy AI high uncertainty reserve SOC, min: 5, max: 70, step: 1, initial: 28, unit_of_measurement: "%"}
+  energy_ai_import_overhead: {name: Energy AI import overhead, min: -200, max: 500, step: 1, initial: 0, unit_of_measurement: "öre/kWh"}
+  energy_ai_export_overhead: {name: Energy AI export overhead, min: -500, max: 500, step: 1, initial: 0, unit_of_measurement: "öre/kWh"}
+  energy_ai_min_arbitrage_margin: {name: Energy AI minimum arbitrage margin, min: 0, max: 300, step: 1, initial: 20, unit_of_measurement: "öre/kWh"}
+  energy_ai_import_power_target_kw: {name: Energy AI import power target, min: 0, max: 25, step: 0.1, initial: 4, unit_of_measurement: "kW"}
+  energy_ai_export_power_target_kw: {name: Energy AI export power target, min: 0, max: 25, step: 0.1, initial: 5, unit_of_measurement: "kW"}
+input_boolean:
+  energy_ai_sauna_reserve: {name: Energy AI sauna reserve}
+  energy_ai_demand_tariff_enabled: {name: Energy AI demand tariff enabled, initial: false}
+  energy_ai_shadow_mode: {name: Energy AI shadow mode, initial: true}
+input_datetime:
+  energy_ai_sauna_reserve_until: {name: Energy AI sauna reserve until, has_date: true, has_time: true}
+  energy_ai_ev_ready_by: {name: Energy AI EV ready by, has_date: true, has_time: true}
+input_select:
+  energy_ai_ev_mode:
+    name: Energy AI EV charging mode
+    options: [smart, charge_now, pause]
+    initial: smart
+  energy_ai_mode:
+    name: Energy AI mode
+    options: [disabled, monitor, ai]
+    initial: monitor
