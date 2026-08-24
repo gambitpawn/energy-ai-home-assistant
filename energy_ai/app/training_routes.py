@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from html import escape
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
@@ -23,7 +24,6 @@ UI_BUILD = "1.0.31-training-ui-20260824"
 def _current_load_status() -> dict:
     status = load_model_status()
     report = status.get("report") or {}
-    # Do not present an old report as if it belonged to the current model generation.
     report_is_current = bool(status.get("model_exists")) and report.get("model") == LOAD_MODEL_NAME
     return {**status, "expected_model": LOAD_MODEL_NAME, "report_is_current": report_is_current,
             "report": report if report_is_current else None,
@@ -100,26 +100,41 @@ async def training_pv_status(): return model_status()
 
 
 async def _run_load_training():
-    weather = await fetch_historical_weather(ha_client)
-    report = await asyncio.to_thread(train_load_model)
-    report["weather_enrichment"] = {"source": weather.get("source"), "interpolated_15m_rows": weather.get("interpolated_15m_rows")}
+    diagnostics = {"ui_build": UI_BUILD, "weather": {"attempted": True}, "training": {"attempted": False}}
+    try:
+        weather = await fetch_historical_weather(ha_client)
+        diagnostics["weather"] = {"attempted": True, "ok": True, "source": weather.get("source"),
+                                  "interpolated_15m_rows": weather.get("interpolated_15m_rows")}
+    except Exception as exc:
+        # Weather enrichment is helpful but must not block model training. The model
+        # has a deterministic temperature fallback and can be retrained once weather is fixed.
+        diagnostics["weather"] = {"attempted": True, "ok": False, "error_type": type(exc).__name__, "error": repr(exc)}
+
+    diagnostics["training"]["attempted"] = True
+    try:
+        report = await asyncio.to_thread(train_load_model)
+    except Exception as exc:
+        diagnostics["training"] = {"attempted": True, "ok": False, "error_type": type(exc).__name__, "error": repr(exc),
+                                   "traceback": traceback.format_exc(limit=8)}
+        return {"ok": False, "stage": "training", "diagnostics": diagnostics}
+
+    diagnostics["training"] = {"attempted": True, "ok": True, "model": report.get("model")}
+    report["weather_enrichment"] = diagnostics["weather"]
+    report["diagnostics"] = diagnostics
     return report
 
 
 @router.post("/load/train")
 async def training_load_train():
-    try: return await _run_load_training()
-    except Exception as exc: raise HTTPException(500, f"Load forecast v2 training failed: {exc!r}")
+    return await _run_load_training()
 
 
 @router.get("/load/train-run")
 async def training_load_train_run(ui_build: str | None = None):
-    try:
-        result = await _run_load_training()
-        result["ui_build"] = UI_BUILD
-        result["request_ui_build"] = ui_build
-        return result
-    except Exception as exc: raise HTTPException(500, f"Load forecast v2 training failed: {exc!r}")
+    result = await _run_load_training()
+    result["ui_build"] = UI_BUILD
+    result["request_ui_build"] = ui_build
+    return result
 
 
 @router.get("/load/status")
