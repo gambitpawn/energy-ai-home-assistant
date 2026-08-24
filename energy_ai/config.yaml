@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.25"
+version: "1.0.26"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, history and LLM analysis for Home Assistant."
 stage: experimental
