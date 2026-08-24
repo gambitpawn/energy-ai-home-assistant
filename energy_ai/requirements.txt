@@ -4,4 +4,5 @@ httpx>=0.28,<1
 websockets>=15,<16
 pydantic>=2.11,<3
 python-multipart>=0.0.20,<1
+scikit-learn>=1.7,<2
 openai>=1.100,<3
