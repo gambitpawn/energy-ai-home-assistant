@@ -42,8 +42,8 @@ def _entity_option(options: dict[str, Any], key: str) -> str | None:
     return str(raw)
 
 
-def _optional_float(options: dict[str, Any], key: str) -> float | None:
-    raw = options.get(key)
+def _optional_float(options: dict[str, Any], key: str, default: float | None = None) -> float | None:
+    raw = options.get(key, default)
     if raw in (None, ""):
         return None
     return float(raw)
@@ -91,9 +91,9 @@ def load_config() -> dict[str, Any]:
             "interval_minutes": 15,
             "horizon_hours": 36,
             "pv": {
-                "capacity_kw": float(options.get("pv_capacity_kw", 12.0)),
-                "tilt_deg": _optional_float(options, "pv_tilt_deg"),
-                "azimuth_deg": _optional_float(options, "pv_azimuth_deg"),
+                "capacity_kw": float(options.get("pv_capacity_kw", 10.0)),
+                "tilt_deg": _optional_float(options, "pv_tilt_deg", 35.5),
+                "azimuth_deg": _optional_float(options, "pv_azimuth_deg", -79.0),
                 "primary_irradiance_feature": "global_tilted_irradiance",
                 "uncertainty": {
                     "local_residual_minutes": 15,
