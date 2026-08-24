@@ -35,7 +35,7 @@ async def lifespan(app):
 
 app = FastAPI(
     title="Energy AI",
-    version="0.1.4",
+    version="0.1.6",
     description="Read-only HA energy data + LLM analysis",
     lifespan=lifespan,
 )
@@ -126,6 +126,7 @@ async def root():
   <p>Home Assistant-appen körs.</p>
   <p id="health">Kontrollerar status…</p>
   <ul>
+    <li><a href="ha-diagnostics">HA connection diagnostics</a></li>
     <li><a href="discover">Discover HA entities</a></li>
     <li><a href="health">Health</a></li>
     <li><a href="state">Current state</a></li>
@@ -133,7 +134,7 @@ async def root():
     <li><a href="config">Configuration</a></li>
     <li><a href="docs">API docs</a></li>
   </ul>
-  <p>Version <code>0.1.4</code>. Fysisk styrning är avstängd i denna version.</p>
+  <p>Version <code>0.1.6</code>. Fysisk styrning är avstängd i denna version.</p>
   <script>
     fetch('health')
       .then(r => r.json())
@@ -153,6 +154,11 @@ async def root():
 </body>
 </html>
 """
+
+
+@app.get("/ha-diagnostics")
+async def ha_diagnostics():
+    return await collector.ha.diagnostics()
 
 
 @app.get("/discover", response_class=HTMLResponse)
