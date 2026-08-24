@@ -18,9 +18,30 @@ def _normalize_ha_api_url(raw_url: str) -> str:
     path = parsed.path.rstrip("/")
     if path.endswith("/api") or path == "/api":
         return url
-    if not path:
-        return f"{url}/api"
     return f"{url}/api"
+
+
+def _normalize_value(raw: Any, source_unit: str | None, target_unit: str | None) -> Any:
+    if raw in (None, "unknown", "unavailable", ""):
+        return None
+    if target_unit is None:
+        return raw
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return raw
+
+    unit = (source_unit or "").strip().lower()
+    if target_unit == "kW":
+        if unit == "w":
+            return value / 1000.0
+        if unit == "kw":
+            return value
+    if target_unit == "%":
+        return value
+    if target_unit == "öre/kWh":
+        return value
+    return value
 
 
 class HomeAssistantClient:
@@ -78,7 +99,7 @@ class HomeAssistantClient:
                 result["dns"] = {"error": repr(exc)}
 
             try:
-                reader, writer = await __import__("asyncio").wait_for(
+                _, writer = await __import__("asyncio").wait_for(
                     __import__("asyncio").open_connection(host, port),
                     timeout=5.0,
                 )
@@ -121,11 +142,16 @@ class HomeAssistantClient:
             response.raise_for_status()
             return response.json()
 
-    async def _get_entity(self, client: httpx.AsyncClient, entity_id: str | None) -> StateValue:
+    async def _get_entity(
+        self,
+        client: httpx.AsyncClient,
+        entity_id: str | None,
+        target_unit: str | None = None,
+    ) -> StateValue:
         if not entity_id:
-            return StateValue(entity_id=None, available=False)
+            return StateValue(entity_id=None, available=False, normalized_unit=target_unit)
         if not self.token:
-            return StateValue(entity_id=entity_id, available=False, state=None)
+            return StateValue(entity_id=entity_id, available=False, normalized_unit=target_unit)
 
         try:
             response = await client.get(
@@ -134,47 +160,53 @@ class HomeAssistantClient:
                 timeout=self.timeout,
             )
             if response.status_code == 404:
-                return StateValue(entity_id=entity_id, available=False, state=None)
+                return StateValue(entity_id=entity_id, available=False, normalized_unit=target_unit)
             response.raise_for_status()
             data = response.json()
             raw = data.get("state")
             available = raw not in (None, "unknown", "unavailable", "")
+            attrs = data.get("attributes", {}) or {}
+            source_unit = attrs.get("unit_of_measurement")
+            state = _normalize_value(raw, source_unit, target_unit) if available else None
             return StateValue(
                 entity_id=entity_id,
-                state=raw if available else None,
+                state=state,
                 available=available,
                 last_updated=data.get("last_updated"),
+                source_unit=source_unit,
+                normalized_unit=target_unit or source_unit,
             )
         except Exception:
-            return StateValue(entity_id=entity_id, available=False, state=None)
+            return StateValue(entity_id=entity_id, available=False, normalized_unit=target_unit)
 
     async def snapshot(self) -> EnergyState:
         keys = {
-            "pv_power_kw": "pv_power",
-            "house_load_kw": "house_load",
-            "grid_power_kw": "grid_power",
-            "battery_power_kw": "battery_power",
-            "battery_soc_pct": "battery_soc",
-            "spot_price_ore_kwh": "spot_price",
-            "sauna_reserve": "sauna_reserve",
-            "sauna_reserve_until": "sauna_reserve_until",
-            "ev_mode": "ev_mode",
-            "ev_connected": "ev_connected",
-            "ev_soc_pct": "ev_soc",
-            "ev_target_soc_pct": "ev_target_soc",
-            "ev_ready_by": "ev_ready_by",
-            "ev_power_kw": "ev_power",
-            "demand_tariff_enabled": "demand_tariff_enabled",
-            "import_power_target_kw": "import_power_target_kw",
-            "export_power_target_kw": "export_power_target_kw",
+            "pv_power_kw": ("pv_power", "kW"),
+            "house_load_kw": ("house_load", "kW"),
+            "grid_power_kw": ("grid_power", "kW"),
+            "battery_power_kw": ("battery_power", "kW"),
+            "battery_soc_pct": ("battery_soc", "%"),
+            "spot_price_ore_kwh": ("spot_price", "öre/kWh"),
+            "sauna_reserve": ("sauna_reserve", None),
+            "sauna_reserve_until": ("sauna_reserve_until", None),
+            "ev_mode": ("ev_mode", None),
+            "ev_connected": ("ev_connected", None),
+            "ev_soc_pct": ("ev_soc", "%"),
+            "ev_target_soc_pct": ("ev_target_soc", "%"),
+            "ev_ready_by": ("ev_ready_by", None),
+            "ev_power_kw": ("ev_power", "kW"),
+            "demand_tariff_enabled": ("demand_tariff_enabled", None),
+            "import_power_target_kw": ("import_power_target_kw", "kW"),
+            "export_power_target_kw": ("export_power_target_kw", "kW"),
         }
 
         async with httpx.AsyncClient() as client:
             values = {}
-            for output_key, config_key in keys.items():
+            for output_key, (config_key, target_unit) in keys.items():
                 values[output_key] = await self._get_entity(
                     client,
                     self.entities.get(config_key),
+                    target_unit,
                 )
 
         return EnergyState(
