@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.6"
+version: "1.0.7"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -53,7 +53,8 @@ options:
 
   # Fallback only if Supervisor does not inject SUPERVISOR_TOKEN.
   ha_access_token: ""
-  ha_base_url: "http://homeassistant:8123/api"
+  # Base Home Assistant URL; /api is appended automatically when missing.
+  ha_base_url: "http://homeassistant.local"
 
 schema:
   poll_seconds: "int(15,900)"
