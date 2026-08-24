@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from .pv_calibration import load_model, predict_calibrated
+from .solar_geometry import solar_features
 
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
@@ -26,6 +27,8 @@ class PVForecaster:
         lon = ha_cfg.get("longitude")
         if lat is None or lon is None:
             raise RuntimeError("Home Assistant config does not expose latitude/longitude")
+        lat = float(lat)
+        lon = float(lon)
 
         use_gti = self.tilt_deg is not None and self.azimuth_deg is not None
         radiation_var = "global_tilted_irradiance" if use_gti else "shortwave_radiation"
@@ -55,13 +58,15 @@ class PVForecaster:
         calibrated = None
         if use_gti:
             try:
-                calibrated = load_model()
+                candidate = load_model()
+                if candidate and candidate.get("latitude_deg") is not None and candidate.get("longitude_deg") is not None:
+                    calibrated = candidate
             except Exception:
                 calibrated = None
 
         generated_at = datetime.now(timezone.utc).isoformat()
         rows = []
-        model_name = "pv_hist_gradient_boosting_v1" if calibrated else "physical_baseline_v1"
+        model_name = "pv_hist_gradient_boosting_v2_solar_geometry" if calibrated else "physical_baseline_v1"
         for i in range(n):
             irr = max(0.0, float(radiation[i] or 0.0))
             cloud = None if clouds[i] is None else float(clouds[i])
@@ -72,9 +77,15 @@ class PVForecaster:
             stamp = datetime.fromisoformat(start.replace("Z", "+00:00"))
             if stamp.tzinfo is None:
                 stamp = stamp.replace(tzinfo=timezone.utc)
+            solar = solar_features(stamp, lat, lon)
 
             if calibrated:
-                forecast_kw, uncertainty_kw = predict_calibrated(calibrated, stamp, irr, temp, cloud)
+                try:
+                    forecast_kw, uncertainty_kw = predict_calibrated(calibrated, stamp, irr, temp, cloud)
+                except Exception:
+                    forecast_kw = min(self.capacity_kw, self.capacity_kw * irr / 1000.0)
+                    cloud_fraction = 0.0 if cloud is None else max(0.0, min(1.0, cloud / 100.0))
+                    uncertainty_kw = min(self.capacity_kw, max(0.15, forecast_kw * 0.15 + self.capacity_kw * 0.08 * cloud_fraction))
             else:
                 forecast_kw = min(self.capacity_kw, self.capacity_kw * irr / 1000.0)
                 cloud_fraction = 0.0 if cloud is None else max(0.0, min(1.0, cloud / 100.0))
@@ -83,6 +94,9 @@ class PVForecaster:
                     max(0.15, forecast_kw * 0.15 + self.capacity_kw * 0.08 * cloud_fraction),
                 )
 
+            if solar["solar_elevation_deg"] <= -1.0:
+                forecast_kw = 0.0
+
             rows.append({
                 "start": start,
                 "pv_power_forecast_kw": round(forecast_kw, 4),
@@ -90,6 +104,10 @@ class PVForecaster:
                 "irradiance_w_m2": irr,
                 "cloud_cover_pct": cloud,
                 "temperature_c": temp,
+                "solar_elevation_deg": round(solar["solar_elevation_deg"], 3),
+                "solar_azimuth_deg": round(solar["solar_azimuth_deg"], 3),
+                "daily_max_solar_elevation_deg": round(solar["daily_max_solar_elevation_deg"], 3),
+                "daylight_hours": round(solar["daylight_hours"], 3),
             })
 
         return {
@@ -101,5 +119,6 @@ class PVForecaster:
             "orientation_configured": use_gti,
             "model": model_name,
             "calibrated_model_active": calibrated is not None,
+            "solar_geometry_features": True,
             "rows": rows,
         }
