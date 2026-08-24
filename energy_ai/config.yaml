@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.15"
+version: "1.0.16"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -36,10 +36,9 @@ options:
   entity_battery_soc: "sensor.solinteg_inverter_battery_soc"
   entity_spot_price: "sensor.nord_pool_se4_aktuellt_pris"
 
-  # PV installation. Tilt is provisional until the roof is measured.
-  # Open-Meteo azimuth convention: 0=south, -90=east, +90=west.
+  # PV installation geometry. Open-Meteo azimuth convention: 0=south, -90=east, +90=west.
   pv_capacity_kw: 10.0
-  pv_tilt_deg: "45"
+  pv_tilt_deg: "35.5"
   pv_azimuth_deg: "-79"
 
   battery_capacity_kwh: 19.6
