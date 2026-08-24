@@ -6,12 +6,12 @@ from typing import Any
 OPTIONS_PATH = Path("/data/options.json")
 
 ENTITY_DEFAULTS = {
-    "pv_power": "sensor.energy_pv_power",
-    "house_load": "sensor.energy_house_load",
-    "grid_power": "sensor.energy_grid_power",
-    "battery_power": "sensor.energy_battery_power",
-    "battery_soc": "sensor.energy_battery_soc",
-    "spot_price": "sensor.energy_spot_price",
+    "pv_power": "sensor.solinteg_inverter_pv_power_total",
+    "house_load": "sensor.solinteg_inverter_house_total_load",
+    "grid_power": "sensor.solinteg_inverter_meter_active_power",
+    "battery_power": "sensor.solinteg_inverter_battery_power",
+    "battery_soc": "sensor.solinteg_inverter_battery_soc",
+    "spot_price": None,
     "sauna_reserve": "input_boolean.energy_ai_sauna_reserve",
     "sauna_reserve_until": "input_datetime.energy_ai_sauna_reserve_until",
     "ev_mode": "input_select.energy_ai_ev_mode",
