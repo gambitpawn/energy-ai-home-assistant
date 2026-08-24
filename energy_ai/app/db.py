@@ -23,6 +23,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS raw_state(id INTEGER PRIMARY KEY AUTOINCREMENT,collected_at TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS state_15m(bucket_start TEXT PRIMARY KEY,collected_at TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS price_15m(area TEXT NOT NULL,start_utc TEXT NOT NULL,end_utc TEXT NOT NULL,price_ore_kwh REAL NOT NULL,source_currency TEXT NOT NULL,source_price_per_mwh REAL NOT NULL,fetched_at TEXT NOT NULL,PRIMARY KEY(area,start_utc));
+        CREATE TABLE IF NOT EXISTS pv_forecast_15m(generated_at TEXT NOT NULL,start_utc TEXT NOT NULL,forecast_kw REAL NOT NULL,uncertainty_kw REAL NOT NULL,irradiance_w_m2 REAL NOT NULL,cloud_cover_pct REAL,temperature_c REAL,model TEXT NOT NULL,radiation_feature TEXT NOT NULL,PRIMARY KEY(generated_at,start_utc));
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,event_type TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS llm_explanations(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,model TEXT NOT NULL,request_json TEXT NOT NULL,explanation TEXT NOT NULL);
         ''')
@@ -72,10 +73,7 @@ def rebuild_15m_bucket(bucket_start, bucket_end, expected_samples=None):
         return None
 
     avg_keys=["pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","spot_price_ore_kwh"]
-    means={}
-    mins={}
-    maxs={}
-    counts={}
+    means={}; mins={}; maxs={}; counts={}
     for key in avg_keys:
         values=[v for _,p in usable if (v:=_numeric_state(p,key)) is not None]
         means[key]=mean(values) if values else None
@@ -85,28 +83,16 @@ def rebuild_15m_bucket(bucket_start, bucket_end, expected_samples=None):
 
     soc_values=[v for _,p in usable if (v:=_numeric_state(p,"battery_soc_pct")) is not None]
     last_ts,last_payload=usable[-1]
-    samples_raw=len(parsed)
-    samples_valid=len(usable)
-    completeness=None
-    if expected_samples:
-        completeness=min(1.0,samples_valid/float(expected_samples))
+    samples_raw=len(parsed); samples_valid=len(usable)
+    completeness=min(1.0,samples_valid/float(expected_samples)) if expected_samples else None
 
     payload={
-        "schema_version":2,
-        "bucket_start":bucket_start,
-        "bucket_end":bucket_end,
-        "samples":samples_valid,
-        "samples_raw":samples_raw,
-        "expected_samples":expected_samples,
-        "completeness":completeness,
-        "value_counts":counts,
-        "mean":means,
-        "min":mins,
-        "max":maxs,
+        "schema_version":2,"bucket_start":bucket_start,"bucket_end":bucket_end,
+        "samples":samples_valid,"samples_raw":samples_raw,"expected_samples":expected_samples,
+        "completeness":completeness,"value_counts":counts,"mean":means,"min":mins,"max":maxs,
         "battery_soc_end_pct":soc_values[-1] if soc_values else None,
         "battery_soc_start_pct":soc_values[0] if soc_values else None,
-        "last_sample_at":last_ts,
-        "last_state":last_payload,
+        "last_sample_at":last_ts,"last_state":last_payload,
     }
     upsert_15m(bucket_start,last_ts,payload)
     return payload
@@ -118,18 +104,15 @@ def rebuild_recent_15m(poll_seconds, lookback_hours=48):
     with sqlite3.connect(DB_PATH) as c:
         cur=c.execute("SELECT collected_at FROM raw_state WHERE collected_at>=? ORDER BY collected_at ASC",(cutoff,))
         timestamps=[r[0] for r in cur.fetchall()]
-
     buckets=set()
     for ts in timestamps:
         d=datetime.fromisoformat(ts.replace("Z","+00:00")).astimezone(timezone.utc)
         start=d.replace(minute=(d.minute//15)*15,second=0,microsecond=0)
         buckets.add(start)
-
     rebuilt=0
     for start in sorted(buckets):
         result=rebuild_15m_bucket(start.isoformat(),(start+timedelta(minutes=15)).isoformat(),expected_samples)
-        if result is not None:
-            rebuilt+=1
+        if result is not None: rebuilt+=1
     return rebuilt
 
 
@@ -144,6 +127,31 @@ def get_prices(area, limit=192):
         cur=c.execute("SELECT area,start_utc,end_utc,price_ore_kwh,source_currency,source_price_per_mwh,fetched_at FROM price_15m WHERE area=? ORDER BY start_utc ASC LIMIT ?",(area,limit))
         names=[d[0] for d in cur.description]
         return [dict(zip(names,row)) for row in cur.fetchall()]
+
+
+def insert_pv_forecast(forecast):
+    rows=forecast.get("rows") or []
+    generated_at=forecast["generated_at"]
+    model=forecast["model"]
+    radiation_feature=forecast["radiation_feature"]
+    with sqlite3.connect(DB_PATH) as c:
+        c.executemany('''INSERT OR REPLACE INTO pv_forecast_15m(generated_at,start_utc,forecast_kw,uncertainty_kw,irradiance_w_m2,cloud_cover_pct,temperature_c,model,radiation_feature) VALUES (?,?,?,?,?,?,?,?,?)''',[
+            (generated_at,r["start"],r["pv_power_forecast_kw"],r["pv_power_uncertainty_kw"],r["irradiance_w_m2"],r.get("cloud_cover_pct"),r.get("temperature_c"),model,radiation_feature)
+            for r in rows
+        ])
+        c.execute('''DELETE FROM pv_forecast_15m WHERE generated_at < ?''',((datetime.now(timezone.utc)-timedelta(days=14)).isoformat(),))
+
+
+def latest_pv_forecast(limit=144):
+    limit=max(1,min(int(limit),500))
+    with sqlite3.connect(DB_PATH) as c:
+        row=c.execute("SELECT MAX(generated_at) FROM pv_forecast_15m").fetchone()
+        generated_at=row[0] if row else None
+        if not generated_at: return {"generated_at":None,"rows":[]}
+        cur=c.execute("SELECT start_utc,forecast_kw,uncertainty_kw,irradiance_w_m2,cloud_cover_pct,temperature_c,model,radiation_feature FROM pv_forecast_15m WHERE generated_at=? ORDER BY start_utc ASC LIMIT ?",(generated_at,limit))
+        names=[d[0] for d in cur.description]
+        rows=[dict(zip(names,r)) for r in cur.fetchall()]
+    return {"generated_at":generated_at,"rows":rows}
 
 
 def insert_llm(ts,model,request,text):
