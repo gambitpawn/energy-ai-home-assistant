@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.37"
+RUNTIME_BUILD = "1.0.38"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -22,6 +22,10 @@ ENTITY_DEFAULTS = {
     "ev_target_soc": None,
     "ev_ready_by": None,
     "ev_power": "sensor.zap361270_laddeffekt",
+    "spa_power": None,
+    "spa_temperature": None,
+    "pool_heat_pump_power": None,
+    "pool_temperature": None,
     "demand_tariff_enabled": "input_boolean.energy_ai_demand_tariff_enabled",
     "import_power_target_kw": "input_number.energy_ai_import_power_target_kw",
     "export_power_target_kw": "input_number.energy_ai_export_power_target_kw",
@@ -51,10 +55,29 @@ def _optional_float(options: dict[str, Any], key: str, default: float | None = N
     return float(raw)
 
 
+def _component_json(options: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = options.get("load_components_json", "")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
 def load_config() -> dict[str, Any]:
     options = {}
     if OPTIONS_PATH.exists():
         options = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
+
+    entities = {**ENTITY_DEFAULTS}
+    for key in (
+        "pv_power","house_load","grid_power","battery_power","battery_soc","spot_price",
+        "sauna_power","ev_power","ev_connected","ev_soc","ev_target_soc","ev_ready_by",
+        "spa_power","spa_temperature","pool_heat_pump_power","pool_temperature",
+    ):
+        entities[key] = _entity_option(options, key)
 
     return {
         "runtime_build": RUNTIME_BUILD,
@@ -62,21 +85,8 @@ def load_config() -> dict[str, Any]:
             "poll_seconds": int(options.get("poll_seconds", 60)),
             "stale_after_seconds": int(options.get("stale_after_seconds", 180)),
         },
-        "entities": {
-            **ENTITY_DEFAULTS,
-            "pv_power": _entity_option(options, "pv_power"),
-            "house_load": _entity_option(options, "house_load"),
-            "grid_power": _entity_option(options, "grid_power"),
-            "battery_power": _entity_option(options, "battery_power"),
-            "battery_soc": _entity_option(options, "battery_soc"),
-            "spot_price": _entity_option(options, "spot_price"),
-            "sauna_power": _entity_option(options, "sauna_power"),
-            "ev_power": _entity_option(options, "ev_power"),
-            "ev_connected": _entity_option(options, "ev_connected"),
-            "ev_soc": _entity_option(options, "ev_soc"),
-            "ev_target_soc": _entity_option(options, "ev_target_soc"),
-            "ev_ready_by": _entity_option(options, "ev_ready_by"),
-        },
+        "entities": entities,
+        "components": {"custom": _component_json(options)},
         "policy": {
             "battery": {
                 "capacity_kwh": float(options.get("battery_capacity_kwh", 19.6)),
