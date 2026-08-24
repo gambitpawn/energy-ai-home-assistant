@@ -10,17 +10,32 @@ import httpx
 from .models import EnergyState, StateValue
 
 
+def _normalize_ha_api_url(raw_url: str) -> str:
+    url = (raw_url or "").strip().rstrip("/")
+    if not url:
+        url = "http://homeassistant.local"
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/api") or path == "/api":
+        return url
+    if not path:
+        return f"{url}/api"
+    return f"{url}/api"
+
+
 class HomeAssistantClient:
     def __init__(self, cfg: dict[str, Any]):
         supervisor_token = os.getenv("SUPERVISOR_TOKEN") or ""
         fallback_token = os.getenv("HA_ACCESS_TOKEN") or ""
 
         if supervisor_token:
-            self.base_url = "http://supervisor/core/api"
+            self.raw_base_url = "http://supervisor/core/api"
+            self.base_url = self.raw_base_url
             self.token = supervisor_token
             self.auth_mode = "supervisor"
         else:
-            self.base_url = (os.getenv("HA_BASE_URL") or "http://homeassistant:8123/api").rstrip("/")
+            self.raw_base_url = os.getenv("HA_BASE_URL") or "http://homeassistant.local"
+            self.base_url = _normalize_ha_api_url(self.raw_base_url)
             self.token = fallback_token
             self.auth_mode = "long_lived_token" if fallback_token else "none"
 
@@ -44,7 +59,8 @@ class HomeAssistantClient:
         host = parsed.hostname
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         result: dict[str, Any] = {
-            "base_url": self.base_url,
+            "configured_base_url": self.raw_base_url,
+            "effective_api_base_url": self.base_url,
             "auth_mode": self.auth_mode,
             "token_present": bool(self.token),
             "scheme": parsed.scheme,
