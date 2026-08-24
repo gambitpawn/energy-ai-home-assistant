@@ -75,6 +75,21 @@ class HomeAssistantClient:
         host = parsed.netloc
         return f"{scheme}://{host}/api/websocket"
 
+    async def system_config(self) -> dict[str, Any]:
+        if not self.token:
+            raise RuntimeError("No Home Assistant API token is available")
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{self.base_url}/config", headers=self._headers(), timeout=self.timeout)
+            response.raise_for_status()
+            data = response.json()
+        return {
+            "latitude": data.get("latitude"),
+            "longitude": data.get("longitude"),
+            "elevation": data.get("elevation"),
+            "time_zone": data.get("time_zone"),
+            "unit_system": data.get("unit_system"),
+        }
+
     async def diagnostics(self) -> dict[str, Any]:
         parsed = urlparse(self.base_url); host = parsed.hostname; port = parsed.port or (443 if parsed.scheme == "https" else 80)
         result: dict[str, Any] = {"configured_base_url":self.raw_base_url,"effective_api_base_url":self.base_url,"auth_mode":self.auth_mode,"token_present":bool(self.token),"scheme":parsed.scheme,"host":host,"port":port,"dns":None,"tcp":None,"http":None}
