@@ -10,13 +10,24 @@ from fastapi.responses import HTMLResponse
 
 from .collector import Collector
 from .config import load_config
-from .db import get_prices, init_db, latest_rows, insert_llm, rebuild_recent_15m, upsert_prices
+from .db import (
+    get_prices,
+    init_db,
+    insert_llm,
+    insert_pv_forecast,
+    latest_pv_forecast,
+    latest_rows,
+    rebuild_recent_15m,
+    upsert_prices,
+)
+from .forecast import PVForecaster
 from .llm import LLMExplainer
 from .models import ExplainRequest, ExplainResponse
 
 cfg = load_config()
 collector = Collector(cfg)
 explainer = LLMExplainer(cfg)
+pv_forecaster = PVForecaster(cfg, collector.ha)
 task = None
 PRICE_AREA = "SE4"
 PRICE_TZ = ZoneInfo("Europe/Stockholm")
@@ -38,6 +49,22 @@ async def _refresh_price_horizon():
     return result
 
 
+async def _refresh_pv_forecast():
+    forecast = await pv_forecaster.refresh()
+    insert_pv_forecast(forecast)
+    return {
+        "ok": True,
+        "generated_at": forecast["generated_at"],
+        "intervals": len(forecast["rows"]),
+        "interval_minutes": forecast["interval_minutes"],
+        "horizon_hours": forecast["horizon_hours"],
+        "capacity_kw": forecast["capacity_kw"],
+        "radiation_feature": forecast["radiation_feature"],
+        "orientation_configured": forecast["orientation_configured"],
+        "model": forecast["model"],
+    }
+
+
 @asynccontextmanager
 async def lifespan(app):
     global task
@@ -51,6 +78,10 @@ async def lifespan(app):
         await _refresh_price_horizon()
     except Exception:
         pass
+    try:
+        await _refresh_pv_forecast()
+    except Exception:
+        pass
     task = asyncio.create_task(collector.loop())
     yield
     collector.stop()
@@ -60,8 +91,8 @@ async def lifespan(app):
 
 app = FastAPI(
     title="Energy AI",
-    version="0.1.13",
-    description="Read-only HA energy data + LLM analysis",
+    version="0.1.14",
+    description="Read-only HA energy data, forecasts and LLM analysis",
     lifespan=lifespan,
     docs_url=None,
     redoc_url=None,
@@ -80,11 +111,23 @@ KEYWORDS = {
 
 def _row(entity: dict, score: int = 0) -> dict:
     attrs = entity.get("attributes", {}) or {}
-    return {"entity_id": entity.get("entity_id"), "friendly_name": attrs.get("friendly_name"), "state": entity.get("state"), "unit": attrs.get("unit_of_measurement"), "device_class": attrs.get("device_class"), "score": score}
+    return {
+        "entity_id": entity.get("entity_id"),
+        "friendly_name": attrs.get("friendly_name"),
+        "state": entity.get("state"),
+        "unit": attrs.get("unit_of_measurement"),
+        "device_class": attrs.get("device_class"),
+        "score": score,
+    }
 
 
 def _candidate_score(entity: dict, category: str) -> int:
-    entity_id = str(entity.get("entity_id", "")).lower(); attrs = entity.get("attributes", {}) or {}; name = str(attrs.get("friendly_name", "")).lower(); unit = str(attrs.get("unit_of_measurement", "")).lower(); device_class = str(attrs.get("device_class", "")).lower(); text = f"{entity_id} {name}"
+    entity_id = str(entity.get("entity_id", "")).lower()
+    attrs = entity.get("attributes", {}) or {}
+    name = str(attrs.get("friendly_name", "")).lower()
+    unit = str(attrs.get("unit_of_measurement", "")).lower()
+    device_class = str(attrs.get("device_class", "")).lower()
+    text = f"{entity_id} {name}"
     score = sum(5 for kw in KEYWORDS[category] if kw in text)
     if category in POWER_CATEGORIES:
         if device_class == "power": score += 5
@@ -92,8 +135,10 @@ def _candidate_score(entity: dict, category: str) -> int:
     elif category == "battery_soc":
         if device_class == "battery": score += 5
         if unit == "%": score += 3
-    elif category == "spot_price" and any(x in unit for x in ["kwh", "mwh", "sek", "kr", "öre", "eur"]): score += 4
-    if entity.get("state") in (None, "unknown", "unavailable", ""): score -= 3
+    elif category == "spot_price" and any(x in unit for x in ["kwh", "mwh", "sek", "kr", "öre", "eur"]):
+        score += 4
+    if entity.get("state") in (None, "unknown", "unavailable", ""):
+        score -= 3
     return score
 
 
@@ -103,15 +148,20 @@ def _discover_candidates(states: list[dict]) -> dict[str, list[dict]]:
         ranked = []
         for entity in states:
             score = _candidate_score(entity, category)
-            if score >= 4: ranked.append(_row(entity, score))
-        ranked.sort(key=lambda x: (-x["score"], x["entity_id"] or "")); result[category] = ranked[:30]
+            if score >= 4:
+                ranked.append(_row(entity, score))
+        ranked.sort(key=lambda x: (-x["score"], x["entity_id"] or ""))
+        result[category] = ranked[:30]
     return result
 
 
 def _generic_energy_candidates(states: list[dict]) -> dict[str, list[dict]]:
-    power=[]; percent=[]; price=[]; keyword=[]; search_words=["solinteg","inverter","battery","batter","grid","meter","solar","pv","power","nordpool","tibber","price"]
+    power=[]; percent=[]; price=[]; keyword=[]
+    search_words=["solinteg","inverter","battery","batter","grid","meter","solar","pv","power","nordpool","tibber","price"]
     for entity in states:
-        entity_id=str(entity.get("entity_id", "")); attrs=entity.get("attributes", {}) or {}; name=str(attrs.get("friendly_name", "")); unit=str(attrs.get("unit_of_measurement", "")).lower(); device_class=str(attrs.get("device_class", "")).lower(); text=f"{entity_id} {name}".lower(); row=_row(entity)
+        entity_id=str(entity.get("entity_id", "")); attrs=entity.get("attributes", {}) or {}
+        name=str(attrs.get("friendly_name", "")); unit=str(attrs.get("unit_of_measurement", "")).lower()
+        device_class=str(attrs.get("device_class", "")).lower(); text=f"{entity_id} {name}".lower(); row=_row(entity)
         if device_class == "power" or unit in {"w", "kw"}: power.append(row)
         if unit == "%" or device_class == "battery": percent.append(row)
         if any(x in unit for x in ["kwh","mwh","sek","kr","öre","eur"]) and any(x in text for x in ["price","spot","nordpool","tibber","elpris"]): price.append(row)
@@ -131,15 +181,26 @@ def _table(rows: list[dict], show_score: bool = True) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return """<!doctype html><html lang="sv"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Energy AI</title><style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:760px}.ok{color:#188038}.warn{color:#b06000}code{background:#8882;padding:.15rem .3rem;border-radius:4px}li{margin:.45rem 0}</style></head><body><h1>Energy AI</h1><p>Home Assistant-appen körs.</p><p id="health">Kontrollerar status…</p><ul><li><a href="prices/refresh">Refresh 15-minute prices</a></li><li><a href="prices">15-minute prices</a></li><li><a href="ha-diagnostics">HA connection diagnostics</a></li><li><a href="discover">Discover HA entities</a></li><li><a href="health">Health</a></li><li><a href="state">Current state</a></li><li><a href="history?resolution=15m&limit=96">15-minute history</a></li><li><a href="history?resolution=raw&limit=100">Raw history</a></li><li><a href="config">Configuration</a></li><li><a href="docs">API docs</a></li></ul><p>Version <code>0.1.13</code>. Fysisk styrning är avstängd.</p><script>fetch('health').then(r=>r.json()).then(h=>{const e=document.getElementById('health');e.className=h.ok?'ok':'warn';e.textContent=h.ok?'HA-datainsamling fungerar.':'Appen körs, men datainsamlingen behöver konfigureras: '+(h.last_error||'okänt fel')})</script></body></html>"""
+    return """<!doctype html><html lang="sv"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Energy AI</title><style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:760px}.ok{color:#188038}.warn{color:#b06000}code{background:#8882;padding:.15rem .3rem;border-radius:4px}li{margin:.45rem 0}</style></head><body><h1>Energy AI</h1><p>Home Assistant-appen körs.</p><p id="health">Kontrollerar status…</p><ul><li><a href="forecast/pv/refresh">Refresh PV forecast</a></li><li><a href="forecast/pv">PV forecast</a></li><li><a href="prices/refresh">Refresh 15-minute prices</a></li><li><a href="prices">15-minute prices</a></li><li><a href="ha-diagnostics">HA connection diagnostics</a></li><li><a href="discover">Discover HA entities</a></li><li><a href="health">Health</a></li><li><a href="state">Current state</a></li><li><a href="history?resolution=15m&limit=96">15-minute history</a></li><li><a href="history?resolution=raw&limit=100">Raw history</a></li><li><a href="config">Configuration</a></li><li><a href="docs">API docs</a></li></ul><p>Version <code>0.1.14</code>. Fysisk styrning är avstängd.</p><script>fetch('health').then(r=>r.json()).then(h=>{const e=document.getElementById('health');e.className=h.ok?'ok':'warn';e.textContent=h.ok?'HA-datainsamling fungerar.':'Appen körs, men datainsamlingen behöver konfigureras: '+(h.last_error||'okänt fel')})</script></body></html>"""
 
 
 @app.get("/docs", include_in_schema=False)
 async def custom_docs():
-    return get_swagger_ui_html(
-        openapi_url="openapi.json",
-        title="Energy AI API docs",
-    )
+    return get_swagger_ui_html(openapi_url="openapi.json", title="Energy AI API docs")
+
+
+@app.get("/forecast/pv/refresh")
+async def forecast_pv_refresh():
+    try:
+        return await _refresh_pv_forecast()
+    except Exception as exc:
+        raise HTTPException(502, f"PV forecast refresh failed: {exc!r}")
+
+
+@app.get("/forecast/pv")
+async def forecast_pv(limit: int = Query(144, ge=1, le=500)):
+    result = latest_pv_forecast(limit)
+    return {"unit":"kW","interval_minutes":15,**result}
 
 
 @app.get("/prices/refresh")
@@ -162,7 +223,10 @@ async def ha_diagnostics(): return await collector.ha.diagnostics()
 async def discover():
     try: states=await collector.ha.all_states()
     except Exception as exc: raise HTTPException(502,f"Could not read Home Assistant states: {exc!r}")
-    groups=_discover_candidates(states); generic=_generic_energy_candidates(states); labels={"pv_power":"PV power","house_load":"House load","grid_power":"Grid power","battery_power":"Battery power","battery_soc":"Battery SOC","spot_price":"Spot price"}; sections=[f"<h2>{labels[k]}</h2>{_table(v)}" for k,v in groups.items()]; sections += ["<h2>All power sensors</h2>"+_table(generic["all_power_sensors"],False),"<h2>Battery / percentage candidates</h2>"+_table(generic["battery_percent_candidates"],False),"<h2>Price candidates</h2>"+_table(generic["price_candidates"],False),"<h2>Energy keyword matches</h2>"+_table(generic["energy_keyword_matches"],False)]
+    groups=_discover_candidates(states); generic=_generic_energy_candidates(states)
+    labels={"pv_power":"PV power","house_load":"House load","grid_power":"Grid power","battery_power":"Battery power","battery_soc":"Battery SOC","spot_price":"Spot price"}
+    sections=[f"<h2>{labels[k]}</h2>{_table(v)}" for k,v in groups.items()]
+    sections += ["<h2>All power sensors</h2>"+_table(generic["all_power_sensors"],False),"<h2>Battery / percentage candidates</h2>"+_table(generic["battery_percent_candidates"],False),"<h2>Price candidates</h2>"+_table(generic["price_candidates"],False),"<h2>Energy keyword matches</h2>"+_table(generic["energy_keyword_matches"],False)]
     return "<!doctype html><html lang='sv'><head><meta charset='utf-8'><title>Energy AI discovery</title><style>body{font-family:system-ui,sans-serif;margin:2rem;max-width:1200px}table{border-collapse:collapse;width:100%;margin-bottom:2rem}th,td{border-bottom:1px solid #9995;text-align:left;padding:.42rem}</style></head><body><h1>Discover Home Assistant entities</h1>"+"".join(sections)+"<p><a href='./'>Tillbaka</a></p></body></html>"
 
 
@@ -175,20 +239,27 @@ async def discover_json():
 
 @app.get("/health")
 async def health(): return {"ok":collector.last_error is None,"read_only":True,"collector_running":collector.running,"ha_api_authenticated":collector.ha.authenticated,"last_error":collector.last_error,"openai_configured":explainer.client is not None,"llm_model":explainer.model}
+
 @app.get("/config")
 async def config(): return cfg
+
 @app.get("/state")
 async def state():
     if collector.latest is None: raise HTTPException(503,"No HA state collected yet")
     return collector.latest
+
 @app.post("/collect-now")
 async def collect_now(): return await collector.run_once()
+
 @app.get("/history")
-async def history(resolution:str=Query("15m",pattern="^(raw|15m)$"),limit:int=Query(96,ge=1,le=1000)): return latest_rows("raw_state" if resolution=="raw" else "state_15m",limit)
+async def history(resolution:str=Query("15m",pattern="^(raw|15m)$"),limit:int=Query(96,ge=1,le=1000)):
+    return latest_rows("raw_state" if resolution=="raw" else "state_15m",limit)
+
 @app.post("/explain",response_model=ExplainResponse)
 async def explain(req:ExplainRequest):
     payload={"proposed_action":req.proposed_action,"reason_data":req.reason_data,"policy":cfg.get("policy",{})}
     if req.include_current_state and collector.latest is not None: payload["current_state"]=collector.latest.model_dump()
     try: text=await asyncio.to_thread(explainer.explain,payload)
     except Exception as exc: raise HTTPException(502,f"LLM explanation failed: {exc!r}")
-    now=datetime.now(timezone.utc).isoformat(); insert_llm(now,explainer.model,payload,text); return ExplainResponse(explanation_sv=text,model=explainer.model)
+    now=datetime.now(timezone.utc).isoformat(); insert_llm(now,explainer.model,payload,text)
+    return ExplainResponse(explanation_sv=text,model=explainer.model)
