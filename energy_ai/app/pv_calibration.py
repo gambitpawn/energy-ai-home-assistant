@@ -4,8 +4,8 @@ import csv
 import json
 import math
 import pickle
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from statistics import mean
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -45,6 +45,10 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _physical_baseline(capacity_kw: float, gti_w_m2: float) -> float:
+    return min(capacity_kw, max(0.0, capacity_kw * gti_w_m2 / 1000.0))
+
+
 def feature_vector(
     timestamp: datetime,
     gti_w_m2: float,
@@ -59,7 +63,7 @@ def feature_vector(
     doy = ts.timetuple().tm_yday
     hour_angle = 2.0 * math.pi * hour / 24.0
     doy_angle = 2.0 * math.pi * doy / 365.25
-    baseline = min(capacity_kw, max(0.0, capacity_kw * gti_w_m2 / 1000.0))
+    baseline = _physical_baseline(capacity_kw, gti_w_m2)
     solar = solar_features(timestamp, latitude_deg, longitude_deg)
     return [
         float(gti_w_m2),
@@ -87,9 +91,7 @@ def _load_rows(capacity_kw: float, latitude_deg: float, longitude_deg: float) ->
         for row in reader:
             pv = _number(row.get("pv_power_kw"))
             gti = _number(row.get("gti_w_m2"))
-            if pv is None or gti is None:
-                continue
-            if gti < 5.0:
+            if pv is None or gti is None or gti < 5.0:
                 continue
             try:
                 ts = datetime.fromisoformat(str(row["timestamp_utc"]).replace("Z", "+00:00"))
@@ -99,8 +101,15 @@ def _load_rows(capacity_kw: float, latitude_deg: float, longitude_deg: float) ->
                 continue
             temp = _number(row.get("temperature_c"))
             cloud = _number(row.get("cloud_cover_pct"))
+            solar = solar_features(ts, latitude_deg, longitude_deg)
             x = feature_vector(ts, gti, temp, cloud, capacity_kw, latitude_deg, longitude_deg)
-            rows.append({"ts": ts.astimezone(timezone.utc), "x": x, "y": max(0.0, pv), "gti": gti})
+            rows.append({
+                "ts": ts.astimezone(timezone.utc),
+                "x": x,
+                "y": max(0.0, pv),
+                "gti": gti,
+                "solar": solar,
+            })
     rows.sort(key=lambda r: r["ts"])
     if len(rows) < 500:
         raise RuntimeError(f"Too few daylight PV+GTI rows for training: {len(rows)}")
@@ -151,11 +160,58 @@ def _quantile(values: list[float], q: float) -> float:
     return values[lo] * (1.0 - frac) + values[hi] * frac
 
 
+def _rolling_mean_abs(residuals: list[float], window: int) -> list[float]:
+    if len(residuals) < window:
+        return []
+    return [abs(sum(residuals[i - window + 1:i + 1]) / window) for i in range(window - 1, len(residuals))]
+
+
+def _daily_energy_residuals(rows: list[dict[str, Any]], predictions: list[float]) -> list[float]:
+    by_day: dict[str, float] = defaultdict(float)
+    for row, pred in zip(rows, predictions):
+        day = row["ts"].astimezone(STOCKHOLM).date().isoformat()
+        by_day[day] += (row["y"] - pred) * 0.25
+    return [abs(v) for v in by_day.values()]
+
+
+def _domain(rows: list[dict[str, Any]]) -> dict[str, float]:
+    elevation = [float(r["solar"]["solar_elevation_deg"]) for r in rows]
+    daily_max = [float(r["solar"]["daily_max_solar_elevation_deg"]) for r in rows]
+    daylight = [float(r["solar"]["daylight_hours"]) for r in rows]
+    return {
+        "solar_elevation_min_deg": round(min(elevation), 4),
+        "solar_elevation_max_deg": round(max(elevation), 4),
+        "daily_max_solar_elevation_min_deg": round(min(daily_max), 4),
+        "daily_max_solar_elevation_max_deg": round(max(daily_max), 4),
+        "daylight_hours_min": round(min(daylight), 4),
+        "daylight_hours_max": round(max(daylight), 4),
+    }
+
+
+def _ml_weight(domain: dict[str, float], solar: dict[str, float]) -> float:
+    """Blend toward physics when seasonal solar geometry is outside training support."""
+    daily_max = float(solar["daily_max_solar_elevation_deg"])
+    low = float(domain.get("daily_max_solar_elevation_min_deg", daily_max))
+    high = float(domain.get("daily_max_solar_elevation_max_deg", daily_max))
+    if low <= daily_max <= high:
+        return 1.0
+    distance = low - daily_max if daily_max < low else daily_max - high
+    if distance <= 3.0:
+        return 0.75
+    if distance <= 8.0:
+        return 0.50
+    if distance <= 15.0:
+        return 0.25
+    return 0.10
+
+
 def train_pv_model(capacity_kw: float = 10.0, latitude_deg: float | None = None, longitude_deg: float | None = None) -> dict[str, Any]:
     if latitude_deg is None or longitude_deg is None:
         raise RuntimeError("PV calibration requires latitude and longitude")
+    latitude_deg = float(latitude_deg)
+    longitude_deg = float(longitude_deg)
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
-    rows = _load_rows(capacity_kw, float(latitude_deg), float(longitude_deg))
+    rows = _load_rows(capacity_kw, latitude_deg, longitude_deg)
     train, validation, test, periods = _split(rows)
     model = HistGradientBoostingRegressor(
         loss="squared_error",
@@ -166,35 +222,65 @@ def train_pv_model(capacity_kw: float = 10.0, latitude_deg: float | None = None,
         l2_regularization=0.2,
         random_state=42,
     )
-    x_train = [r["x"] for r in train]
-    y_train = [r["y"] for r in train]
-    model.fit(x_train, y_train)
+    model.fit([r["x"] for r in train], [r["y"] for r in train])
 
-    def predict(part):
+    def predict_raw(part):
         raw = model.predict([r["x"] for r in part])
         return [max(0.0, min(capacity_kw * 1.2, float(v))) for v in raw]
 
-    validation_pred = predict(validation)
-    test_pred = predict(test)
-    test_true = [r["y"] for r in test]
+    validation_pred = predict_raw(validation)
+    test_pred = predict_raw(test)
     validation_true = [r["y"] for r in validation]
-    baseline_test = [min(capacity_kw, capacity_kw * r["gti"] / 1000.0) for r in test]
+    test_true = [r["y"] for r in test]
+    baseline_test = [_physical_baseline(capacity_kw, r["gti"]) for r in test]
 
-    residuals = [abs(a - p) for a, p in zip(validation_true + test_true, validation_pred + test_pred)]
+    combined_rows = validation + test
+    combined_pred = validation_pred + test_pred
+    residual_signed = [r["y"] - p for r, p in zip(combined_rows, combined_pred)]
+    residual_15m = [abs(v) for v in residual_signed]
+    residual_1h = _rolling_mean_abs(residual_signed, 4)
+    residual_3h = _rolling_mean_abs(residual_signed, 12)
+    daily_energy = _daily_energy_residuals(combined_rows, combined_pred)
+
     uncertainty = {
-        "absolute_residual_p50_kw": round(_quantile(residuals, 0.50), 4),
-        "absolute_residual_p80_kw": round(_quantile(residuals, 0.80), 4),
-        "absolute_residual_p95_kw": round(_quantile(residuals, 0.95), 4),
+        "residual_15m": {
+            "p50_kw": round(_quantile(residual_15m, 0.50), 4),
+            "p80_kw": round(_quantile(residual_15m, 0.80), 4),
+            "p95_kw": round(_quantile(residual_15m, 0.95), 4),
+        },
+        "residual_1h_mean": {
+            "p50_kw": round(_quantile(residual_1h, 0.50), 4),
+            "p80_kw": round(_quantile(residual_1h, 0.80), 4),
+            "p95_kw": round(_quantile(residual_1h, 0.95), 4),
+        },
+        "residual_3h_mean": {
+            "p50_kw": round(_quantile(residual_3h, 0.50), 4),
+            "p80_kw": round(_quantile(residual_3h, 0.80), 4),
+            "p95_kw": round(_quantile(residual_3h, 0.95), 4),
+        },
+        "daily_energy_residual": {
+            "p50_kwh": round(_quantile(daily_energy, 0.50), 4),
+            "p80_kwh": round(_quantile(daily_energy, 0.80), 4),
+            "p95_kwh": round(_quantile(daily_energy, 0.95), 4),
+            "days": len(daily_energy),
+        },
     }
+    domain = _domain(train)
     report = {
         "ok": True,
-        "model": "pv_hist_gradient_boosting_v2_solar_geometry",
+        "model": "pv_hist_gradient_boosting_v3_guarded",
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "capacity_kw": capacity_kw,
-        "site": {"latitude": float(latitude_deg), "longitude": float(longitude_deg)},
+        "site": {"latitude": latitude_deg, "longitude": longitude_deg},
         "features": FEATURE_NAMES,
         "rows": {"all_daylight": len(rows), "train": len(train), "validation": len(validation), "test": len(test)},
         "periods": periods,
+        "training_domain": domain,
+        "extrapolation_guard": {
+            "basis": "daily_max_solar_elevation_deg",
+            "inside_domain_ml_weight": 1.0,
+            "outside_weights": {"0-3deg": 0.75, "3-8deg": 0.50, "8-15deg": 0.25, ">15deg": 0.10},
+        },
         "metrics": {
             "validation_ml": _metrics(validation_true, validation_pred, capacity_kw),
             "test_ml": _metrics(test_true, test_pred, capacity_kw),
@@ -207,8 +293,10 @@ def train_pv_model(capacity_kw: float = 10.0, latitude_deg: float | None = None,
         "report": report,
         "feature_names": FEATURE_NAMES,
         "capacity_kw": capacity_kw,
-        "latitude_deg": float(latitude_deg),
-        "longitude_deg": float(longitude_deg),
+        "latitude_deg": latitude_deg,
+        "longitude_deg": longitude_deg,
+        "training_domain": domain,
+        "model_version": 3,
     }
     with MODEL_PATH.open("wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -236,22 +324,56 @@ def load_model() -> dict[str, Any] | None:
     return payload
 
 
-def predict_calibrated(payload: dict[str, Any], timestamp: datetime, gti_w_m2: float, temperature_c: float | None, cloud_cover_pct: float | None) -> tuple[float, float]:
+def predict_calibrated(
+    payload: dict[str, Any],
+    timestamp: datetime,
+    gti_w_m2: float,
+    temperature_c: float | None,
+    cloud_cover_pct: float | None,
+) -> tuple[float, float, dict[str, Any]]:
     capacity_kw = float(payload.get("capacity_kw", 10.0))
     latitude_deg = payload.get("latitude_deg")
     longitude_deg = payload.get("longitude_deg")
     if latitude_deg is None or longitude_deg is None:
         raise RuntimeError("Stored PV calibration model lacks solar-geometry site coordinates; retrain model")
+    if int(payload.get("model_version", 0)) < 3:
+        raise RuntimeError("Stored PV model predates v3 extrapolation guard; retrain model")
     if gti_w_m2 < 2.0:
-        return 0.0, 0.0
-    solar = solar_features(timestamp, float(latitude_deg), float(longitude_deg))
+        return 0.0, 0.0, {"ml_weight": 0.0, "extrapolation_guard_active": False}
+
+    latitude_deg = float(latitude_deg)
+    longitude_deg = float(longitude_deg)
+    solar = solar_features(timestamp, latitude_deg, longitude_deg)
     if solar["solar_elevation_deg"] <= -1.0:
-        return 0.0, 0.0
-    x = feature_vector(timestamp, gti_w_m2, temperature_c, cloud_cover_pct, capacity_kw, float(latitude_deg), float(longitude_deg))
-    pred = float(payload["model"].predict([x])[0])
+        return 0.0, 0.0, {"ml_weight": 0.0, "extrapolation_guard_active": False}
+
+    baseline = _physical_baseline(capacity_kw, gti_w_m2)
+    x = feature_vector(timestamp, gti_w_m2, temperature_c, cloud_cover_pct, capacity_kw, latitude_deg, longitude_deg)
+    ml_pred = float(payload["model"].predict([x])[0])
+    ml_pred = max(0.0, min(capacity_kw * 1.2, ml_pred))
+    domain = payload.get("training_domain") or {}
+    weight = _ml_weight(domain, solar)
+    pred = weight * ml_pred + (1.0 - weight) * baseline
     pred = max(0.0, min(capacity_kw * 1.2, pred))
+
     report = payload.get("report") or {}
-    p80 = float((report.get("uncertainty") or {}).get("absolute_residual_p80_kw", 0.5))
+    u = report.get("uncertainty") or {}
+    p80 = float((u.get("residual_15m") or {}).get("p80_kw", 0.8))
     cloud_fraction = max(0.0, min(1.0, (cloud_cover_pct or 0.0) / 100.0))
-    uncertainty = max(0.10, p80 * (0.75 + 0.5 * cloud_fraction))
-    return pred, min(capacity_kw, uncertainty)
+    # Increase point uncertainty as we leave the training domain, but do not
+    # propagate that local penalty directly into whole-day energy uncertainty.
+    domain_penalty = 1.0 + (1.0 - weight) * 0.75
+    uncertainty = max(0.10, p80 * (0.75 + 0.5 * cloud_fraction) * domain_penalty)
+    meta = {
+        "ml_weight": round(weight, 3),
+        "extrapolation_guard_active": weight < 0.999,
+        "ml_prediction_kw": round(ml_pred, 4),
+        "physical_baseline_kw": round(baseline, 4),
+    }
+    return pred, min(capacity_kw, uncertainty), meta
+
+
+def daily_energy_uncertainty(payload: dict[str, Any], confidence: str = "p80") -> float:
+    report = payload.get("report") or {}
+    daily = ((report.get("uncertainty") or {}).get("daily_energy_residual") or {})
+    return float(daily.get(f"{confidence}_kwh", daily.get("p80_kwh", 2.0)))
