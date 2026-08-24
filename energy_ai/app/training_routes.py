@@ -9,12 +9,14 @@ from fastapi.responses import HTMLResponse
 from .config import load_config
 from .ha import HomeAssistantClient
 from .load_calibration import model_status as load_model_status, train_load_model
+from .load_forecast import LoadForecaster
 from .pv_calibration import model_status, train_pv_model
 from .training import build_dataset, dataset_preview, fetch_historical_irradiance, save_upload, training_status
 
 router = APIRouter(prefix="/training", tags=["training"])
 cfg = load_config()
 ha_client = HomeAssistantClient(cfg)
+load_forecaster = LoadForecaster(cfg)
 
 
 @router.get("", response_class=HTMLResponse)
@@ -35,7 +37,7 @@ async def training_page(request: Request):
     pv_text = "Tränad modell finns." if pv_status["model_exists"] else "Ingen tränad modell ännu."
     load_text = "Tränad modell finns." if load_status["model_exists"] else "Ingen tränad modell ännu."
 
-    return f"""<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Energy AI training</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border-bottom:1px solid #9995;text-align:left;padding:.45rem}}input,button{{margin:.4rem 0}}.box{{padding:1rem;border:1px solid #9995;border-radius:8px;margin:1rem 0}}</style></head><body><h1>Training data</h1><p>Filer sparas persistent i <code>{escape(status['training_dir'])}</code>.</p><div class='box'><h2>Ladda upp historik</h2><form action='{child}upload' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv,text/csv' required><br><button type='submit'>Ladda upp CSV</button></form></div><div class='box'><h2>Historisk solinstrålning</h2><p>Hämtar automatiskt satellitbaserad GTI för Solinteg-filens hela datumintervall med konfigurerad taklutning och azimut. Efter hämtningen byggs träningsdatasetet om automatiskt.</p><form action='{child}fetch-irradiance' method='post'><button type='submit'>Hämta historisk GTI</button></form></div><div class='box'><h2>PV calibration</h2><p>{pv_text}</p><form action='{child}pv/train' method='post'><button type='submit'>Träna PV-modell</button></form><p><a href='{child}pv/status'>PV-modellstatus och rapport</a></p></div><div class='box'><h2>Lastprognos v1</h2><p>{load_text} Baseline är medianlast per veckodag och 15-minutersslot; gradient boosting lär endast residualen och används bara om den förbättrar valideringen.</p><form action='{child}load/train' method='post'><button type='submit'>Träna lastmodell</button></form><p><a href='{child}load/status'>Lastmodellstatus och rapport</a></p></div><h2>Filer</h2><table><thead><tr><th>Fil</th><th>Identifierad typ</th><th>Rader</th><th>Bytes</th></tr></thead><tbody>{rows}</tbody></table><p><a href='{child}build'>Bygg/bygg om 15-minutersdataset</a></p><p><a href='{child}preview?limit=20'>Dataset preview</a> · <a href='{child}status'>JSON status</a> · <a href='{back}'>Tillbaka</a></p></body></html>"""
+    return f"""<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Energy AI training</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border-bottom:1px solid #9995;text-align:left;padding:.45rem}}input,button{{margin:.4rem 0}}.box{{padding:1rem;border:1px solid #9995;border-radius:8px;margin:1rem 0}}</style></head><body><h1>Training data</h1><p>Filer sparas persistent i <code>{escape(status['training_dir'])}</code>.</p><div class='box'><h2>Ladda upp historik</h2><form action='{child}upload' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv,text/csv' required><br><button type='submit'>Ladda upp CSV</button></form></div><div class='box'><h2>Historisk solinstrålning</h2><p>Hämtar automatiskt satellitbaserad GTI för Solinteg-filens hela datumintervall med konfigurerad taklutning och azimut. Efter hämtningen byggs träningsdatasetet om automatiskt.</p><form action='{child}fetch-irradiance' method='post'><button type='submit'>Hämta historisk GTI</button></form></div><div class='box'><h2>PV calibration</h2><p>{pv_text}</p><form action='{child}pv/train' method='post'><button type='submit'>Träna PV-modell</button></form><p><a href='{child}pv/status'>PV-modellstatus och rapport</a></p></div><div class='box'><h2>Lastprognos v1</h2><p>{load_text} Baseline är medianlast per veckodag och 15-minutersslot; gradient boosting lär endast residualen och används bara om den förbättrar valideringen.</p><form action='{child}load/train' method='post'><button type='submit'>Träna lastmodell</button></form><p><a href='{child}load/status'>Lastmodellstatus och rapport</a> · <a href='{child}load/forecast'>36 h lastprognos</a></p></div><h2>Filer</h2><table><thead><tr><th>Fil</th><th>Identifierad typ</th><th>Rader</th><th>Bytes</th></tr></thead><tbody>{rows}</tbody></table><p><a href='{child}build'>Bygg/bygg om 15-minutersdataset</a></p><p><a href='{child}preview?limit=20'>Dataset preview</a> · <a href='{child}status'>JSON status</a> · <a href='{back}'>Tillbaka</a></p></body></html>"""
 
 
 @router.post("/upload")
@@ -108,3 +110,11 @@ async def training_load_train():
 @router.get("/load/status")
 async def training_load_status():
     return load_model_status()
+
+
+@router.get("/load/forecast")
+async def training_load_forecast():
+    try:
+        return await asyncio.to_thread(load_forecaster.refresh)
+    except Exception as exc:
+        raise HTTPException(500, f"Load forecast failed: {exc!r}")
