@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import traceback
 from html import escape
 
@@ -14,11 +15,12 @@ from .load_forecast import LoadForecaster
 from .pv_calibration import model_status, train_pv_model
 from .training import build_dataset, dataset_preview, fetch_historical_irradiance, fetch_historical_weather, save_upload, training_status
 
+logger = logging.getLogger("energy_ai.training")
 router = APIRouter(prefix="/training", tags=["training"])
 cfg = load_config()
 ha_client = HomeAssistantClient(cfg)
 load_forecaster = LoadForecaster(cfg)
-UI_BUILD = "1.0.31-training-ui-20260824"
+UI_BUILD = "1.0.32-training-ui-20260824"
 
 
 def _current_load_status() -> dict:
@@ -39,8 +41,8 @@ async def training_page(request: Request):
     child = "" if slash_form else "training/"
     back = "../" if slash_form else "./"
     pv_text = "Tränad modell finns." if pv_status["model_exists"] else "Ingen tränad modell ännu."
-    load_text = "Tränad v2-modell finns." if load_status["report_is_current"] else "Ingen tränad v2-modell ännu."
-    return f"""<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta http-equiv='Cache-Control' content='no-store'><title>Energy AI training</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border-bottom:1px solid #9995;text-align:left;padding:.45rem}}input,button,.button{{margin:.4rem 0}}.button{{display:inline-block;padding:.55rem .85rem;border:2px solid #444;border-radius:5px;background:#eee;color:#111;text-decoration:none}}.box{{padding:1rem;border:1px solid #9995;border-radius:8px;margin:1rem 0}}.build{{padding:.65rem;background:#fff3cd;border:1px solid #d6b656;border-radius:6px;font-weight:700}}</style></head><body><h1>Training data</h1><p class='build'>UI BUILD: {UI_BUILD}</p><p>Filer sparas persistent i <code>{escape(status['training_dir'])}</code>.</p><div class='box'><h2>Ladda upp historik</h2><form action='{child}upload' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv,text/csv' required><br><button type='submit'>Ladda upp CSV</button></form></div><div class='box'><h2>Historiskt väder</h2><p>Hämtar temperatur och molnighet för Solinteg-perioden och bygger om datasetet.</p><form action='{child}fetch-weather' method='post'><button type='submit'>Hämta historiskt väder</button></form></div><div class='box'><h2>Historisk solinstrålning</h2><form action='{child}fetch-irradiance' method='post'><button type='submit'>Hämta historisk GTI</button></form></div><div class='box'><h2>PV calibration</h2><p>{pv_text}</p><form action='{child}pv/train' method='post'><button type='submit'>Träna PV-modell</button></form><p><a href='{child}pv/status'>PV-modellstatus och rapport</a></p></div><div class='box'><h2>Lastprognos v2</h2><p>{load_text} Adaptiv 28-dagars veckoprofil + 7-dagars nivåkorrektion + temperatur + residual-ML.</p><p><a class='button' href='{child}load/train-run?ui_build=1031'>TRÄNA LASTMODELL V2 — BUILD 1.0.31</a></p><p>Rå länk: <a href='{child}load/train-run?ui_build=1031'>{child}load/train-run?ui_build=1031</a></p><p><a href='{child}load/status'>Lastmodellstatus</a> · <a href='{child}load/forecast'>36 h lastprognos</a> · <a href='{child}ui-version'>UI-version</a></p></div><h2>Filer</h2><table><thead><tr><th>Fil</th><th>Identifierad typ</th><th>Rader</th><th>Bytes</th></tr></thead><tbody>{rows}</tbody></table><p><a href='{child}build'>Bygg/bygg om 15-minutersdataset</a></p><p><a href='{child}preview?limit=20'>Dataset preview</a> · <a href='{child}status'>JSON status</a> · <a href='{back}'>Tillbaka</a></p></body></html>"""
+    load_text = "Tränad v2.1-modell finns." if load_status["report_is_current"] else "Ingen tränad v2.1-modell ännu."
+    return f"""<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta http-equiv='Cache-Control' content='no-store'><title>Energy AI training</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border-bottom:1px solid #9995;text-align:left;padding:.45rem}}input,button,.button{{margin:.4rem 0}}.button{{display:inline-block;padding:.55rem .85rem;border:2px solid #444;border-radius:5px;background:#eee;color:#111;text-decoration:none}}.box{{padding:1rem;border:1px solid #9995;border-radius:8px;margin:1rem 0}}.build{{padding:.65rem;background:#fff3cd;border:1px solid #d6b656;border-radius:6px;font-weight:700}}</style></head><body><h1>Training data</h1><p class='build'>UI BUILD: {UI_BUILD}</p><p>Filer sparas persistent i <code>{escape(status['training_dir'])}</code>.</p><div class='box'><h2>Ladda upp historik</h2><form action='{child}upload' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv,text/csv' required><br><button type='submit'>Ladda upp CSV</button></form></div><div class='box'><h2>Historiskt väder</h2><p>Hämtar temperatur och molnighet för Solinteg-perioden och bygger om datasetet.</p><form action='{child}fetch-weather' method='post'><button type='submit'>Hämta historiskt väder</button></form></div><div class='box'><h2>Historisk solinstrålning</h2><form action='{child}fetch-irradiance' method='post'><button type='submit'>Hämta historisk GTI</button></form></div><div class='box'><h2>PV calibration</h2><p>{pv_text}</p><form action='{child}pv/train' method='post'><button type='submit'>Träna PV-modell</button></form><p><a href='{child}pv/status'>PV-modellstatus och rapport</a></p></div><div class='box'><h2>Lastprognos v2.1</h2><p>{load_text} Samma adaptiva modell som v2 men med linjär walk-forward-beräkning anpassad för Raspberry Pi.</p><p><a class='button' href='{child}load/train-run?ui_build=1032'>TRÄNA LASTMODELL V2.1 — BUILD 1.0.32</a></p><p>Rå länk: <a href='{child}load/train-run?ui_build=1032'>{child}load/train-run?ui_build=1032</a></p><p><a href='{child}load/status'>Lastmodellstatus</a> · <a href='{child}load/forecast'>36 h lastprognos</a> · <a href='{child}ui-version'>UI-version</a></p></div><h2>Filer</h2><table><thead><tr><th>Fil</th><th>Identifierad typ</th><th>Rader</th><th>Bytes</th></tr></thead><tbody>{rows}</tbody></table><p><a href='{child}build'>Bygg/bygg om 15-minutersdataset</a></p><p><a href='{child}preview?limit=20'>Dataset preview</a> · <a href='{child}status'>JSON status</a> · <a href='{back}'>Tillbaka</a></p></body></html>"""
 
 
 @router.get("/ui-version")
@@ -100,27 +102,33 @@ async def training_pv_status(): return model_status()
 
 
 async def _run_load_training():
+    logger.warning("LOAD TRAINING: request started; ui_build=%s model=%s", UI_BUILD, LOAD_MODEL_NAME)
     diagnostics = {"ui_build": UI_BUILD, "weather": {"attempted": True}, "training": {"attempted": False}}
     try:
+        logger.warning("LOAD TRAINING: weather enrichment started")
         weather = await fetch_historical_weather(ha_client)
         diagnostics["weather"] = {"attempted": True, "ok": True, "source": weather.get("source"),
                                   "interpolated_15m_rows": weather.get("interpolated_15m_rows")}
+        logger.warning("LOAD TRAINING: weather enrichment finished; rows=%s", weather.get("interpolated_15m_rows"))
     except Exception as exc:
-        # Weather enrichment is helpful but must not block model training. The model
-        # has a deterministic temperature fallback and can be retrained once weather is fixed.
         diagnostics["weather"] = {"attempted": True, "ok": False, "error_type": type(exc).__name__, "error": repr(exc)}
+        logger.exception("LOAD TRAINING: weather enrichment failed; continuing without fresh weather")
 
     diagnostics["training"]["attempted"] = True
     try:
+        logger.warning("LOAD TRAINING: model fit started")
         report = await asyncio.to_thread(train_load_model)
+        logger.warning("LOAD TRAINING: model fit finished; model=%s", report.get("model"))
     except Exception as exc:
         diagnostics["training"] = {"attempted": True, "ok": False, "error_type": type(exc).__name__, "error": repr(exc),
                                    "traceback": traceback.format_exc(limit=8)}
+        logger.exception("LOAD TRAINING: model fit failed")
         return {"ok": False, "stage": "training", "diagnostics": diagnostics}
 
     diagnostics["training"] = {"attempted": True, "ok": True, "model": report.get("model")}
     report["weather_enrichment"] = diagnostics["weather"]
     report["diagnostics"] = diagnostics
+    logger.warning("LOAD TRAINING: request completed successfully")
     return report
 
 
@@ -131,6 +139,7 @@ async def training_load_train():
 
 @router.get("/load/train-run")
 async def training_load_train_run(ui_build: str | None = None):
+    logger.warning("LOAD TRAINING: GET wrapper invoked; request_ui_build=%s", ui_build)
     result = await _run_load_training()
     result["ui_build"] = UI_BUILD
     result["request_ui_build"] = ui_build
