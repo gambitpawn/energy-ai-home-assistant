@@ -31,7 +31,7 @@ def _normalize_value(raw: Any, source_unit: str | None, target_unit: str | None)
     except (TypeError, ValueError):
         return raw
 
-    unit = (source_unit or "").strip().lower()
+    unit = (source_unit or "").strip().lower().replace(" ", "")
     if target_unit == "kW":
         if unit == "w":
             return value / 1000.0
@@ -40,6 +40,12 @@ def _normalize_value(raw: Any, source_unit: str | None, target_unit: str | None)
     if target_unit == "%":
         return value
     if target_unit == "öre/kWh":
+        if unit in {"sek/kwh", "kr/kwh"}:
+            return value * 100.0
+        if unit in {"öre/kwh", "ore/kwh"}:
+            return value
+        if unit == "sek/mwh":
+            return value / 10.0
         return value
     return value
 
