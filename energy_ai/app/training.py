@@ -15,8 +15,10 @@ import httpx
 TRAINING_DIR = Path("/data/training")
 DATASET_PATH = TRAINING_DIR / "training_dataset_15m.csv"
 IRRADIANCE_PATH = TRAINING_DIR / "satellite_irradiance.csv"
+WEATHER_PATH = TRAINING_DIR / "historical_weather_15m.csv"
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 SATELLITE_ARCHIVE_URL = "https://satellite-api.open-meteo.com/v1/archive"
+WEATHER_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 
 def ensure_training_dir() -> Path:
@@ -122,6 +124,8 @@ def detect_file(path: Path) -> dict[str, Any]:
         kind = "irradiance"
     elif "time" in low and any(k in low for k in ("shortwave_radiation", "direct_normal_irradiance", "diffuse_radiation")):
         kind = "irradiance"
+    elif "time" in low and any(k in low for k in ("temperature_2m", "temperature_c", "cloud_cover", "cloud_cover_pct")):
+        kind = "weather"
     return {"name": path.name, "kind": kind, "columns": fields, "rows": len(rows), "bytes": path.stat().st_size}
 
 
@@ -164,83 +168,75 @@ async def fetch_historical_irradiance(cfg: dict[str, Any], ha_client) -> dict[st
     ensure_training_dir()
     start_date, end_date = _solinteg_range()
     ha_cfg = await ha_client.system_config()
-    lat = ha_cfg.get("latitude")
-    lon = ha_cfg.get("longitude")
+    lat = ha_cfg.get("latitude"); lon = ha_cfg.get("longitude")
     if lat is None or lon is None:
         raise RuntimeError("Home Assistant config does not expose latitude/longitude")
-
     pv_cfg = cfg.get("forecast", {}).get("pv", {})
-    tilt = pv_cfg.get("tilt_deg")
-    azimuth = pv_cfg.get("azimuth_deg")
+    tilt = pv_cfg.get("tilt_deg"); azimuth = pv_cfg.get("azimuth_deg")
     if tilt is None or azimuth is None:
         raise RuntimeError("PV tilt and azimuth must be configured before fetching GTI")
 
-    variables = [
-        "global_tilted_irradiance",
-        "shortwave_radiation",
-        "direct_normal_irradiance",
-        "diffuse_radiation",
-    ]
-    records: dict[str, dict[str, Any]] = {}
-    chunks = 0
-    day = start_date
-
+    variables = ["global_tilted_irradiance", "shortwave_radiation", "direct_normal_irradiance", "diffuse_radiation"]
+    records: dict[str, dict[str, Any]] = {}; chunks = 0; day = start_date
     async with httpx.AsyncClient(timeout=45.0) as client:
         while day <= end_date:
             chunk_end = min(day + timedelta(days=27), end_date)
-            params = {
-                "latitude": float(lat),
-                "longitude": float(lon),
-                "start_date": day.isoformat(),
-                "end_date": chunk_end.isoformat(),
-                "hourly": ",".join(variables),
-                "tilt": float(tilt),
-                "azimuth": float(azimuth),
-                "models": "satellite_radiation_seamless",
-                "temporal_resolution": "native",
-                "timezone": "UTC",
-            }
-            response = await client.get(SATELLITE_ARCHIVE_URL, params=params)
-            response.raise_for_status()
-            data = response.json()
-            hourly = data.get("hourly") or {}
-            times = hourly.get("time") or []
+            params = {"latitude": float(lat), "longitude": float(lon), "start_date": day.isoformat(), "end_date": chunk_end.isoformat(),
+                      "hourly": ",".join(variables), "tilt": float(tilt), "azimuth": float(azimuth),
+                      "models": "satellite_radiation_seamless", "temporal_resolution": "native", "timezone": "UTC"}
+            response = await client.get(SATELLITE_ARCHIVE_URL, params=params); response.raise_for_status(); data = response.json()
+            hourly = data.get("hourly") or {}; times = hourly.get("time") or []
             for i, stamp in enumerate(times):
                 row = {"time": stamp}
                 for variable in variables:
-                    values = hourly.get(variable) or []
-                    row[variable] = values[i] if i < len(values) else None
+                    values = hourly.get(variable) or []; row[variable] = values[i] if i < len(values) else None
                 records[str(stamp)] = row
-            chunks += 1
-            day = chunk_end + timedelta(days=1)
-
+            chunks += 1; day = chunk_end + timedelta(days=1)
     if not records:
         raise RuntimeError("Satellite API returned no irradiance rows")
-
     columns = ["time", *variables]
     with IRRADIANCE_PATH.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
-        writer.writeheader()
-        for stamp in sorted(records):
-            writer.writerow(records[stamp])
-
+        writer = csv.DictWriter(f, fieldnames=columns); writer.writeheader()
+        for stamp in sorted(records): writer.writerow(records[stamp])
     dataset = build_dataset()
-    non_null_gti = sum(1 for row in records.values() if row.get("global_tilted_irradiance") is not None)
-    return {
-        "ok": True,
-        "source": "Open-Meteo Satellite Radiation API / satellite_radiation_seamless",
-        "saved_to": str(IRRADIANCE_PATH),
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
-        "latitude": float(lat),
-        "longitude": float(lon),
-        "tilt_deg": float(tilt),
-        "azimuth_deg": float(azimuth),
-        "native_rows": len(records),
-        "gti_rows": non_null_gti,
-        "chunks": chunks,
-        "dataset": dataset,
-    }
+    return {"ok": True, "source": "Open-Meteo Satellite Radiation API / satellite_radiation_seamless", "saved_to": str(IRRADIANCE_PATH),
+            "start_date": start_date.isoformat(), "end_date": end_date.isoformat(), "latitude": float(lat), "longitude": float(lon),
+            "tilt_deg": float(tilt), "azimuth_deg": float(azimuth), "native_rows": len(records),
+            "gti_rows": sum(1 for r in records.values() if r.get("global_tilted_irradiance") is not None), "chunks": chunks, "dataset": dataset}
+
+
+async def fetch_historical_weather(ha_client) -> dict[str, Any]:
+    """Fetch hourly historical temperature/cloud and interpolate to 15-minute timestamps."""
+    ensure_training_dir()
+    start_date, end_date = _solinteg_range()
+    ha_cfg = await ha_client.system_config()
+    lat = ha_cfg.get("latitude"); lon = ha_cfg.get("longitude")
+    if lat is None or lon is None:
+        raise RuntimeError("Home Assistant config does not expose latitude/longitude")
+    params = {"latitude": float(lat), "longitude": float(lon), "start_date": start_date.isoformat(), "end_date": end_date.isoformat(),
+              "hourly": "temperature_2m,cloud_cover", "timezone": "UTC"}
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        response = await client.get(WEATHER_ARCHIVE_URL, params=params); response.raise_for_status(); data = response.json()
+    hourly = data.get("hourly") or {}; times = hourly.get("time") or []
+    temps = hourly.get("temperature_2m") or []; clouds = hourly.get("cloud_cover") or []
+    if not times:
+        raise RuntimeError("Historical weather API returned no rows")
+    records = []
+    for i, raw in enumerate(times):
+        t0 = _parse_iso_or_local(str(raw)); t1 = t0 + timedelta(hours=1)
+        temp0 = _number(temps[i] if i < len(temps) else None); cloud0 = _number(clouds[i] if i < len(clouds) else None)
+        temp1 = _number(temps[i + 1] if i + 1 < len(temps) else temp0); cloud1 = _number(clouds[i + 1] if i + 1 < len(clouds) else cloud0)
+        for quarter in range(4):
+            f = quarter / 4.0; stamp = t0 + timedelta(minutes=15 * quarter)
+            temp = None if temp0 is None else (temp0 if temp1 is None else temp0 + (temp1 - temp0) * f)
+            cloud = None if cloud0 is None else (cloud0 if cloud1 is None else cloud0 + (cloud1 - cloud0) * f)
+            records.append({"time": stamp.isoformat(), "temperature_2m": temp, "cloud_cover": cloud})
+    with WEATHER_PATH.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["time", "temperature_2m", "cloud_cover"]); writer.writeheader(); writer.writerows(records)
+    dataset = build_dataset()
+    return {"ok": True, "source": "Open-Meteo Historical Weather API", "saved_to": str(WEATHER_PATH),
+            "start_date": start_date.isoformat(), "end_date": end_date.isoformat(), "latitude": float(lat), "longitude": float(lon),
+            "hourly_source_rows": len(times), "interpolated_15m_rows": len(records), "dataset": dataset}
 
 
 def _aggregate_solinteg(path: Path) -> dict[datetime, dict[str, float | None]]:
@@ -256,144 +252,89 @@ def _aggregate_solinteg(path: Path) -> dict[datetime, dict[str, float | None]]:
         bucket = _bucket_15m(stamp)
         for key in ("pv_power_kw", "meter_power_kw", "load_power_kw"):
             value = _number(row.get(key))
-            if value is not None:
-                groups[bucket][key].append(value)
+            if value is not None: groups[bucket][key].append(value)
     return {bucket: {key: (mean(vals) if vals else None) for key, vals in values.items()} for bucket, values in groups.items()}
 
 
 def _aggregate_c4(path: Path) -> dict[datetime, dict[str, float | None]]:
-    _, rows = _rows(path)
-    out = {}
+    _, rows = _rows(path); out = {}
     for row in rows:
-        try:
-            stamp = _parse_iso_or_local(row.get("Datum", ""))
-        except Exception:
-            continue
-        energy = _number(row.get("El kWh"))
-        production = _number(row.get("Produktion"))
-        bucket = _bucket_15m(stamp)
-        out[bucket] = {
-            "c4_import_energy_kwh": energy,
-            "c4_import_power_kw": None if energy is None else energy * 4.0,
-            "c4_production_field": production,
-        }
+        try: stamp = _parse_iso_or_local(row.get("Datum", ""))
+        except Exception: continue
+        energy = _number(row.get("El kWh")); production = _number(row.get("Produktion")); bucket = _bucket_15m(stamp)
+        out[bucket] = {"c4_import_energy_kwh": energy, "c4_import_power_kw": None if energy is None else energy * 4.0, "c4_production_field": production}
     return out
 
 
 def _first(row: dict[str, str], names: tuple[str, ...]) -> str | None:
     low = {k.lower(): v for k, v in row.items()}
     for name in names:
-        if name.lower() in low:
-            return low[name.lower()]
+        if name.lower() in low: return low[name.lower()]
     return None
 
 
-def _aggregate_irradiance(path: Path) -> dict[datetime, dict[str, float | None]]:
+def _aggregate_environment(path: Path) -> dict[datetime, dict[str, float | None]]:
     _, rows = _rows(path)
     groups: dict[datetime, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    aliases = {
+        "gti_w_m2": ("global_tilted_irradiance", "gti", "gti_w_m2"), "shortwave_w_m2": ("shortwave_radiation", "shortwave_w_m2"),
+        "dni_w_m2": ("direct_normal_irradiance", "dni", "dni_w_m2"), "dhi_w_m2": ("diffuse_radiation", "diffuse_radiation_instant", "dhi", "dhi_w_m2"),
+        "cloud_cover_pct": ("cloud_cover", "cloud_cover_pct"), "temperature_c": ("temperature_2m", "temperature_c"),
+    }
     for row in rows:
         stamp_raw = _first(row, ("time", "timestamp", "timestamp_utc", "date"))
-        if not stamp_raw:
-            continue
-        try:
-            stamp = _parse_iso_or_local(stamp_raw)
-        except Exception:
-            continue
+        if not stamp_raw: continue
+        try: stamp = _parse_iso_or_local(stamp_raw)
+        except Exception: continue
         bucket = _bucket_15m(stamp)
-        aliases = {
-            "gti_w_m2": ("global_tilted_irradiance", "gti", "gti_w_m2"),
-            "shortwave_w_m2": ("shortwave_radiation", "shortwave_w_m2"),
-            "dni_w_m2": ("direct_normal_irradiance", "dni", "dni_w_m2"),
-            "dhi_w_m2": ("diffuse_radiation", "diffuse_radiation_instant", "dhi", "dhi_w_m2"),
-            "cloud_cover_pct": ("cloud_cover", "cloud_cover_pct"),
-            "temperature_c": ("temperature_2m", "temperature_c"),
-        }
         for target, names in aliases.items():
             value = _number(_first(row, names))
-            if value is not None:
-                groups[bucket][target].append(value)
+            if value is not None: groups[bucket][target].append(value)
     return {bucket: {key: (mean(vals) if vals else None) for key, vals in values.items()} for bucket, values in groups.items()}
 
 
 def build_dataset() -> dict[str, Any]:
-    ensure_training_dir()
-    files = list_training_files()
-    merged: dict[datetime, dict[str, Any]] = defaultdict(dict)
-    source_counts = {"solinteg": 0, "c4_import": 0, "irradiance": 0}
-
+    ensure_training_dir(); files = list_training_files(); merged: dict[datetime, dict[str, Any]] = defaultdict(dict)
+    source_counts = {"solinteg": 0, "c4_import": 0, "irradiance": 0, "weather": 0}
     for info in files:
-        path = TRAINING_DIR / info["name"]
-        kind = info.get("kind")
-        if kind == "solinteg":
-            data = _aggregate_solinteg(path)
-        elif kind == "c4_import":
-            data = _aggregate_c4(path)
-        elif kind == "irradiance":
-            data = _aggregate_irradiance(path)
-        else:
-            continue
+        path = TRAINING_DIR / info["name"]; kind = info.get("kind")
+        if kind == "solinteg": data = _aggregate_solinteg(path)
+        elif kind == "c4_import": data = _aggregate_c4(path)
+        elif kind in {"irradiance", "weather"}: data = _aggregate_environment(path)
+        else: continue
         source_counts[kind] += len(data)
-        for stamp, values in data.items():
-            merged[stamp].update(values)
-
-    columns = [
-        "timestamp_utc", "pv_power_kw", "meter_power_kw", "load_power_kw",
-        "c4_import_energy_kwh", "c4_import_power_kw", "c4_production_field",
-        "gti_w_m2", "shortwave_w_m2", "dni_w_m2", "dhi_w_m2",
-        "cloud_cover_pct", "temperature_c",
-    ]
+        for stamp, values in data.items(): merged[stamp].update(values)
+    columns = ["timestamp_utc", "pv_power_kw", "meter_power_kw", "load_power_kw", "c4_import_energy_kwh", "c4_import_power_kw", "c4_production_field",
+               "gti_w_m2", "shortwave_w_m2", "dni_w_m2", "dhi_w_m2", "cloud_cover_pct", "temperature_c"]
     with DATASET_PATH.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
-        writer.writeheader()
+        writer = csv.DictWriter(f, fieldnames=columns); writer.writeheader()
         for stamp in sorted(merged):
-            row = {"timestamp_utc": stamp.isoformat()}
-            row.update(merged[stamp])
-            writer.writerow({k: row.get(k) for k in columns})
-
-    overlap_pv_gti = sum(1 for values in merged.values() if values.get("pv_power_kw") is not None and values.get("gti_w_m2") is not None)
-    overlap_pv_weather = sum(1 for values in merged.values() if values.get("pv_power_kw") is not None and (values.get("gti_w_m2") is not None or values.get("shortwave_w_m2") is not None))
-    pv_rows = sum(1 for values in merged.values() if values.get("pv_power_kw") is not None)
-    c4_rows = sum(1 for values in merged.values() if values.get("c4_import_energy_kwh") is not None)
-
-    return {
-        "ok": True,
-        "dataset": str(DATASET_PATH),
-        "rows": len(merged),
-        "pv_rows": pv_rows,
-        "c4_rows": c4_rows,
-        "pv_gti_overlap_rows": overlap_pv_gti,
-        "pv_weather_overlap_rows": overlap_pv_weather,
-        "source_interval_rows": source_counts,
-        "columns": columns,
-    }
+            row = {"timestamp_utc": stamp.isoformat()}; row.update(merged[stamp]); writer.writerow({k: row.get(k) for k in columns})
+    pv_rows = sum(1 for v in merged.values() if v.get("pv_power_kw") is not None); c4_rows = sum(1 for v in merged.values() if v.get("c4_import_energy_kwh") is not None)
+    return {"ok": True, "dataset": str(DATASET_PATH), "rows": len(merged), "pv_rows": pv_rows, "c4_rows": c4_rows,
+            "pv_gti_overlap_rows": sum(1 for v in merged.values() if v.get("pv_power_kw") is not None and v.get("gti_w_m2") is not None),
+            "pv_weather_overlap_rows": sum(1 for v in merged.values() if v.get("pv_power_kw") is not None and (v.get("gti_w_m2") is not None or v.get("shortwave_w_m2") is not None)),
+            "load_temperature_overlap_rows": sum(1 for v in merged.values() if v.get("load_power_kw") is not None and v.get("temperature_c") is not None),
+            "source_interval_rows": source_counts, "columns": columns}
 
 
 def dataset_preview(limit: int = 20) -> dict[str, Any]:
     limit = max(1, min(int(limit), 200))
-    if not DATASET_PATH.exists():
-        return {"exists": False, "path": str(DATASET_PATH), "rows": []}
+    if not DATASET_PATH.exists(): return {"exists": False, "path": str(DATASET_PATH), "rows": []}
     with DATASET_PATH.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = []
+        reader = csv.DictReader(f); rows = []
         for row in reader:
             rows.append(row)
-            if len(rows) >= limit:
-                break
+            if len(rows) >= limit: break
     return {"exists": True, "path": str(DATASET_PATH), "rows": rows}
 
 
 def training_status() -> dict[str, Any]:
     files = list_training_files()
-    return {
-        "training_dir": str(ensure_training_dir()),
-        "dataset_path": str(DATASET_PATH),
-        "dataset_exists": DATASET_PATH.exists(),
-        "irradiance_path": str(IRRADIANCE_PATH),
-        "irradiance_exists": IRRADIANCE_PATH.exists(),
-        "files": files,
-        "expected": {
-            "solinteg": "5-minute CSV with date,time,utc_offset,pv_power_kw,meter_power_kw,load_power_kw",
-            "c4_import": "15-minute CSV with Datum and El kWh",
-            "irradiance": "CSV with time/timestamp and global_tilted_irradiance (preferred), optionally shortwave/DNI/DHI",
-        },
-    }
+    return {"training_dir": str(ensure_training_dir()), "dataset_path": str(DATASET_PATH), "dataset_exists": DATASET_PATH.exists(),
+            "irradiance_path": str(IRRADIANCE_PATH), "irradiance_exists": IRRADIANCE_PATH.exists(),
+            "weather_path": str(WEATHER_PATH), "weather_exists": WEATHER_PATH.exists(), "files": files,
+            "expected": {"solinteg": "5-minute CSV with date,time,utc_offset,pv_power_kw,meter_power_kw,load_power_kw",
+                         "c4_import": "15-minute CSV with Datum and El kWh",
+                         "irradiance": "CSV with time/timestamp and global_tilted_irradiance (preferred), optionally shortwave/DNI/DHI",
+                         "weather": "CSV with time and temperature_2m/cloud_cover"}}
