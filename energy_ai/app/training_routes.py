@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from html import escape
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
@@ -7,6 +8,7 @@ from fastapi.responses import HTMLResponse
 
 from .config import load_config
 from .ha import HomeAssistantClient
+from .pv_calibration import model_status, train_pv_model
 from .training import build_dataset, dataset_preview, fetch_historical_irradiance, save_upload, training_status
 
 router = APIRouter(prefix="/training", tags=["training"])
@@ -18,20 +20,19 @@ ha_client = HomeAssistantClient(cfg)
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def training_page(request: Request):
     status = training_status()
+    pv_status = model_status()
     files = status["files"]
     rows = "".join(
         f"<tr><td>{escape(str(f.get('name','')))}</td><td>{escape(str(f.get('kind','')))}</td><td>{f.get('rows','')}</td><td>{f.get('bytes','')}</td></tr>"
         for f in files
     ) or "<tr><td colspan='4'>Inga träningsfiler ännu.</td></tr>"
 
-    # Home Assistant Ingress strips the external prefix before forwarding the
-    # request. Avoid redirects and construct browser-relative links differently
-    # for /training and /training/ so the hidden Ingress prefix is preserved.
     slash_form = request.url.path.endswith("/")
     child = "" if slash_form else "training/"
     back = "../" if slash_form else "./"
+    model_text = "Tränad modell finns." if pv_status["model_exists"] else "Ingen tränad modell ännu."
 
-    return f"""<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Energy AI training</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border-bottom:1px solid #9995;text-align:left;padding:.45rem}}input,button{{margin:.4rem 0}}.box{{padding:1rem;border:1px solid #9995;border-radius:8px;margin:1rem 0}}</style></head><body><h1>Training data</h1><p>Filer sparas persistent i <code>{escape(status['training_dir'])}</code>.</p><div class='box'><h2>Ladda upp historik</h2><form action='{child}upload' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv,text/csv' required><br><button type='submit'>Ladda upp CSV</button></form></div><div class='box'><h2>Historisk solinstrålning</h2><p>Hämtar automatiskt satellitbaserad GTI för Solinteg-filens hela datumintervall med konfigurerad taklutning och azimut. Efter hämtningen byggs träningsdatasetet om automatiskt.</p><form action='{child}fetch-irradiance' method='post'><button type='submit'>Hämta historisk GTI</button></form></div><h2>Filer</h2><table><thead><tr><th>Fil</th><th>Identifierad typ</th><th>Rader</th><th>Bytes</th></tr></thead><tbody>{rows}</tbody></table><p><a href='{child}build'>Bygg/bygg om 15-minutersdataset</a></p><p><a href='{child}preview?limit=20'>Dataset preview</a> · <a href='{child}status'>JSON status</a> · <a href='{back}'>Tillbaka</a></p></body></html>"""
+    return f"""<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Energy AI training</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border-bottom:1px solid #9995;text-align:left;padding:.45rem}}input,button{{margin:.4rem 0}}.box{{padding:1rem;border:1px solid #9995;border-radius:8px;margin:1rem 0}}</style></head><body><h1>Training data</h1><p>Filer sparas persistent i <code>{escape(status['training_dir'])}</code>.</p><div class='box'><h2>Ladda upp historik</h2><form action='{child}upload' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv,text/csv' required><br><button type='submit'>Ladda upp CSV</button></form></div><div class='box'><h2>Historisk solinstrålning</h2><p>Hämtar automatiskt satellitbaserad GTI för Solinteg-filens hela datumintervall med konfigurerad taklutning och azimut. Efter hämtningen byggs träningsdatasetet om automatiskt.</p><form action='{child}fetch-irradiance' method='post'><button type='submit'>Hämta historisk GTI</button></form></div><div class='box'><h2>PV calibration v1</h2><p>{model_text} Träningen använder endast dagsljusdata med faktisk PV + GTI, kronologisk train/validation/test och jämför mot fysisk GTI-baseline.</p><form action='{child}pv/train' method='post'><button type='submit'>Träna PV-modell</button></form><p><a href='{child}pv/status'>Modellstatus och rapport</a></p></div><h2>Filer</h2><table><thead><tr><th>Fil</th><th>Identifierad typ</th><th>Rader</th><th>Bytes</th></tr></thead><tbody>{rows}</tbody></table><p><a href='{child}build'>Bygg/bygg om 15-minutersdataset</a></p><p><a href='{child}preview?limit=20'>Dataset preview</a> · <a href='{child}status'>JSON status</a> · <a href='{back}'>Tillbaka</a></p></body></html>"""
 
 
 @router.post("/upload")
@@ -72,3 +73,17 @@ async def training_build():
 @router.get("/preview")
 async def training_preview(limit: int = Query(20, ge=1, le=200)):
     return dataset_preview(limit)
+
+
+@router.post("/pv/train")
+async def training_pv_train():
+    capacity_kw = float(cfg.get("forecast", {}).get("pv", {}).get("capacity_kw", 10.0))
+    try:
+        return await asyncio.to_thread(train_pv_model, capacity_kw)
+    except Exception as exc:
+        raise HTTPException(500, f"PV calibration training failed: {exc!r}")
+
+
+@router.get("/pv/status")
+async def training_pv_status():
+    return model_status()
