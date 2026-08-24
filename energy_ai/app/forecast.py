@@ -4,6 +4,8 @@ from typing import Any
 
 import httpx
 
+from .pv_calibration import load_model, predict_calibrated
+
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -13,7 +15,7 @@ class PVForecaster:
         self.cfg = cfg
         self.ha = ha_client
         pv_cfg = cfg.get("forecast", {}).get("pv", {})
-        self.capacity_kw = float(pv_cfg.get("capacity_kw", 12.0))
+        self.capacity_kw = float(pv_cfg.get("capacity_kw", 10.0))
         self.horizon_hours = int(cfg.get("forecast", {}).get("horizon_hours", 36))
         self.tilt_deg = pv_cfg.get("tilt_deg")
         self.azimuth_deg = pv_cfg.get("azimuth_deg")
@@ -50,23 +52,37 @@ class PVForecaster:
         temps = min15.get("temperature_2m") or [None] * len(times)
         n = min(len(times), len(radiation), len(clouds), len(temps))
 
+        calibrated = None
+        if use_gti:
+            try:
+                calibrated = load_model()
+            except Exception:
+                calibrated = None
+
         generated_at = datetime.now(timezone.utc).isoformat()
         rows = []
+        model_name = "pv_hist_gradient_boosting_v1" if calibrated else "physical_baseline_v1"
         for i in range(n):
             irr = max(0.0, float(radiation[i] or 0.0))
             cloud = None if clouds[i] is None else float(clouds[i])
             temp = None if temps[i] is None else float(temps[i])
-            # Deliberately simple physical baseline. A learned local calibration
-            # will replace this once enough site history has accumulated.
-            forecast_kw = min(self.capacity_kw, self.capacity_kw * irr / 1000.0)
-            cloud_fraction = 0.0 if cloud is None else max(0.0, min(1.0, cloud / 100.0))
-            uncertainty_kw = min(
-                self.capacity_kw,
-                max(0.15, forecast_kw * 0.15 + self.capacity_kw * 0.08 * cloud_fraction),
-            )
             start = str(times[i])
             if "+" not in start and not start.endswith("Z"):
                 start += "+00:00"
+            stamp = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+
+            if calibrated:
+                forecast_kw, uncertainty_kw = predict_calibrated(calibrated, stamp, irr, temp, cloud)
+            else:
+                forecast_kw = min(self.capacity_kw, self.capacity_kw * irr / 1000.0)
+                cloud_fraction = 0.0 if cloud is None else max(0.0, min(1.0, cloud / 100.0))
+                uncertainty_kw = min(
+                    self.capacity_kw,
+                    max(0.15, forecast_kw * 0.15 + self.capacity_kw * 0.08 * cloud_fraction),
+                )
+
             rows.append({
                 "start": start,
                 "pv_power_forecast_kw": round(forecast_kw, 4),
@@ -83,6 +99,7 @@ class PVForecaster:
             "capacity_kw": self.capacity_kw,
             "radiation_feature": radiation_var,
             "orientation_configured": use_gti,
-            "model": "physical_baseline_v1",
+            "model": model_name,
+            "calibrated_model_active": calibrated is not None,
             "rows": rows,
         }
