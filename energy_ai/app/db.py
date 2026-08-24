@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo
 
 DB_PATH=Path(os.getenv("ENERGY_AI_DB","/data/energy_ai.db"))
 STOCKHOLM=ZoneInfo("Europe/Stockholm")
-
 CORE_KEYS=("pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","battery_soc_pct")
 LEGACY_MARKERS=("sensor.energy_pv_power","sensor.energy_house_load","sensor.energy_grid_power","sensor.energy_battery_power","sensor.energy_battery_soc","sensor.energy_spot_price")
 
@@ -46,6 +45,14 @@ def _numeric_state(payload,key):
     except (TypeError,ValueError,AttributeError): return None
 
 
+def _component_numeric(payload, component_id):
+    try:
+        item=(payload.get("load_components") or {}).get(component_id) or {}
+        if not item.get("available"): return None
+        return float(item.get("state"))
+    except (TypeError,ValueError,AttributeError): return None
+
+
 def _usable_core_sample(payload): return any(_numeric_state(payload,key) is not None for key in CORE_KEYS)
 
 
@@ -54,12 +61,18 @@ def rebuild_15m_bucket(bucket_start,bucket_end,expected_samples=None):
     if not rows: return None
     parsed=[(ts,json.loads(pj)) for ts,pj in rows]; usable=[(ts,p) for ts,p in parsed if _usable_core_sample(p)]
     if not usable: return None
-    avg_keys=["pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","spot_price_ore_kwh","ev_power_kw","sauna_power_kw"]; means={}; mins={}; maxs={}; counts={}
+    avg_keys=["pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","spot_price_ore_kwh","ev_power_kw"]
+    means={}; mins={}; maxs={}; counts={}
     for key in avg_keys:
         values=[v for _,p in usable if (v:=_numeric_state(p,key)) is not None]
         means[key]=mean(values) if values else None; mins[key]=min(values) if values else None; maxs[key]=max(values) if values else None; counts[key]=len(values)
+    component_ids=sorted({cid for _,p in usable for cid in (p.get("load_components") or {}).keys()})
+    component_means={}; component_counts={}
+    for cid in component_ids:
+        vals=[v for _,p in usable if (v:=_component_numeric(p,cid)) is not None]
+        component_means[cid]=mean(vals) if vals else None; component_counts[cid]=len(vals)
     soc=[v for _,p in usable if (v:=_numeric_state(p,"battery_soc_pct")) is not None]; last_ts,last_payload=usable[-1]
-    payload={"schema_version":3,"bucket_start":bucket_start,"bucket_end":bucket_end,"samples":len(usable),"samples_raw":len(parsed),"expected_samples":expected_samples,"completeness":min(1.0,len(usable)/float(expected_samples)) if expected_samples else None,"value_counts":counts,"mean":means,"min":mins,"max":maxs,"battery_soc_end_pct":soc[-1] if soc else None,"battery_soc_start_pct":soc[0] if soc else None,"last_sample_at":last_ts,"last_state":last_payload}
+    payload={"schema_version":4,"bucket_start":bucket_start,"bucket_end":bucket_end,"samples":len(usable),"samples_raw":len(parsed),"expected_samples":expected_samples,"completeness":min(1.0,len(usable)/float(expected_samples)) if expected_samples else None,"value_counts":counts,"mean":means,"min":mins,"max":maxs,"component_mean_kw":component_means,"component_value_counts":component_counts,"battery_soc_end_pct":soc[-1] if soc else None,"battery_soc_start_pct":soc[0] if soc else None,"last_sample_at":last_ts,"last_state":last_payload}
     upsert_15m(bucket_start,last_ts,payload); return payload
 
 
