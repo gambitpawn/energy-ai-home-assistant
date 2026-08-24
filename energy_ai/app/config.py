@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
+RUNTIME_BUILD = "1.0.36"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -56,6 +57,7 @@ def load_config() -> dict[str, Any]:
         options = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
 
     return {
+        "runtime_build": RUNTIME_BUILD,
         "collector": {
             "poll_seconds": int(options.get("poll_seconds", 60)),
             "stale_after_seconds": int(options.get("stale_after_seconds", 180)),
