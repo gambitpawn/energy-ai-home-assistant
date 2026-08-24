@@ -42,6 +42,13 @@ def _entity_option(options: dict[str, Any], key: str) -> str | None:
     return str(raw)
 
 
+def _optional_float(options: dict[str, Any], key: str) -> float | None:
+    raw = options.get(key)
+    if raw in (None, ""):
+        return None
+    return float(raw)
+
+
 def load_config() -> dict[str, Any]:
     options = {}
     if OPTIONS_PATH.exists():
@@ -76,20 +83,17 @@ def load_config() -> dict[str, Any]:
                 "export_overhead_ore_kwh": float(options.get("export_overhead_ore_kwh", 0)),
                 "minimum_arbitrage_margin_ore_kwh": float(options.get("minimum_arbitrage_margin_ore_kwh", 20)),
             },
-            "sauna": {
-                "nominal_peak_kw": 6.0,
-                "learn_from_load_history": True,
-            },
-            "ev": {
-                "max_power_kw": 11.0,
-                "default_mode": "smart",
-            },
+            "sauna": {"nominal_peak_kw": 6.0, "learn_from_load_history": True},
+            "ev": {"max_power_kw": 11.0, "default_mode": "smart"},
         },
         "tariffs": {"enabled": False, "rules": []},
         "forecast": {
             "interval_minutes": 15,
             "horizon_hours": 36,
             "pv": {
+                "capacity_kw": float(options.get("pv_capacity_kw", 12.0)),
+                "tilt_deg": _optional_float(options, "pv_tilt_deg"),
+                "azimuth_deg": _optional_float(options, "pv_azimuth_deg"),
                 "primary_irradiance_feature": "global_tilted_irradiance",
                 "uncertainty": {
                     "local_residual_minutes": 15,
@@ -99,9 +103,5 @@ def load_config() -> dict[str, Any]:
                 },
             },
         },
-        "llm": {
-            "enabled": bool(options.get("llm_enabled", True)),
-            "role": "explanation_only",
-            "language": "sv",
-        },
+        "llm": {"enabled": bool(options.get("llm_enabled", True)), "role": "explanation_only", "language": "sv"},
     }
