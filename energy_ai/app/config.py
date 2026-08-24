@@ -12,6 +12,7 @@ ENTITY_DEFAULTS = {
     "battery_power": "sensor.solinteg_inverter_battery_power",
     "battery_soc": "sensor.solinteg_inverter_battery_soc",
     "spot_price": "sensor.nord_pool_se4_aktuellt_pris",
+    "sauna_power": None,
     "sauna_reserve": "input_boolean.energy_ai_sauna_reserve",
     "sauna_reserve_until": "input_datetime.energy_ai_sauna_reserve_until",
     "ev_mode": "input_select.energy_ai_ev_mode",
@@ -67,6 +68,12 @@ def load_config() -> dict[str, Any]:
             "battery_power": _entity_option(options, "battery_power"),
             "battery_soc": _entity_option(options, "battery_soc"),
             "spot_price": _entity_option(options, "spot_price"),
+            "sauna_power": _entity_option(options, "sauna_power"),
+            "ev_power": _entity_option(options, "ev_power"),
+            "ev_connected": _entity_option(options, "ev_connected"),
+            "ev_soc": _entity_option(options, "ev_soc"),
+            "ev_target_soc": _entity_option(options, "ev_target_soc"),
+            "ev_ready_by": _entity_option(options, "ev_ready_by"),
         },
         "policy": {
             "battery": {
@@ -83,8 +90,12 @@ def load_config() -> dict[str, Any]:
                 "export_overhead_ore_kwh": float(options.get("export_overhead_ore_kwh", 0)),
                 "minimum_arbitrage_margin_ore_kwh": float(options.get("minimum_arbitrage_margin_ore_kwh", 20)),
             },
-            "sauna": {"nominal_peak_kw": 6.0, "learn_from_load_history": True},
-            "ev": {"max_power_kw": 11.0, "default_mode": "smart"},
+            "sauna": {
+                "nominal_peak_kw": float(options.get("sauna_nominal_peak_kw", 6.0)),
+                "detection_step_kw": float(options.get("sauna_detection_step_kw", 4.0)),
+                "learn_from_load_history": True,
+            },
+            "ev": {"max_power_kw": float(options.get("ev_max_power_kw", 11.0)), "default_mode": "smart"},
         },
         "tariffs": {"enabled": False, "rules": []},
         "forecast": {
