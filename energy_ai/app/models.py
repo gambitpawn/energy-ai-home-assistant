@@ -2,11 +2,15 @@ from __future__ import annotations
 from typing import Any
 from pydantic import BaseModel, Field
 
+
 class StateValue(BaseModel):
     entity_id: str | None = None
     state: Any = None
     available: bool = False
     last_updated: str | None = None
+    source_unit: str | None = None
+    normalized_unit: str | None = None
+
 
 class EnergyState(BaseModel):
     collected_at: str
@@ -28,10 +32,12 @@ class EnergyState(BaseModel):
     import_power_target_kw: StateValue
     export_power_target_kw: StateValue
 
+
 class ExplainRequest(BaseModel):
     proposed_action: dict[str, Any] = Field(default_factory=dict)
     reason_data: dict[str, Any] = Field(default_factory=dict)
     include_current_state: bool = True
+
 
 class ExplainResponse(BaseModel):
     explanation_sv: str
