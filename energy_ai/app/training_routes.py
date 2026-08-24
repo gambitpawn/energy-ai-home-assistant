@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from .config import load_config
 from .ha import HomeAssistantClient
 from .load_calibration import MODEL_NAME as LOAD_MODEL_NAME, model_status as load_model_status, train_load_model
+from .load_evaluation import evaluate_matured_load_forecasts, evaluation_report, insert_load_forecast
 from .load_forecast import LoadForecaster
 from .pv_calibration import model_status, train_pv_model
 from .training import build_dataset, dataset_preview, fetch_historical_irradiance, fetch_historical_weather, save_upload, training_status
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/training", tags=["training"])
 cfg = load_config()
 ha_client = HomeAssistantClient(cfg)
 load_forecaster = LoadForecaster(cfg)
-UI_BUILD = "1.0.33-training-ui-20260824"
+UI_BUILD = "1.0.34-training-ui-20260824"
 
 
 def _current_load_status() -> dict:
@@ -42,7 +43,7 @@ async def training_page(request: Request):
     back = "../" if slash_form else "./"
     pv_text = "Tränad modell finns." if pv_status["model_exists"] else "Ingen tränad modell ännu."
     load_text = "Tränad v3-modell finns." if load_status["report_is_current"] else "Ingen tränad v3-modell ännu."
-    return f"""<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta http-equiv='Cache-Control' content='no-store'><title>Energy AI training</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border-bottom:1px solid #9995;text-align:left;padding:.45rem}}input,button,.button{{margin:.4rem 0}}.button{{display:inline-block;padding:.55rem .85rem;border:2px solid #444;border-radius:5px;background:#eee;color:#111;text-decoration:none}}.box{{padding:1rem;border:1px solid #9995;border-radius:8px;margin:1rem 0}}.build{{padding:.65rem;background:#fff3cd;border:1px solid #d6b656;border-radius:6px;font-weight:700}}</style></head><body><h1>Training data</h1><p class='build'>UI BUILD: {UI_BUILD}</p><p>Filer sparas persistent i <code>{escape(status['training_dir'])}</code>.</p><div class='box'><h2>Ladda upp historik</h2><form action='{child}upload' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv,text/csv' required><br><button type='submit'>Ladda upp CSV</button></form></div><div class='box'><h2>Historiskt väder</h2><p>Hämtar temperatur och molnighet för Solinteg-perioden och bygger om datasetet.</p><form action='{child}fetch-weather' method='post'><button type='submit'>Hämta historiskt väder</button></form></div><div class='box'><h2>Historisk solinstrålning</h2><form action='{child}fetch-irradiance' method='post'><button type='submit'>Hämta historisk GTI</button></form></div><div class='box'><h2>PV calibration</h2><p>{pv_text}</p><form action='{child}pv/train' method='post'><button type='submit'>Träna PV-modell</button></form><p><a href='{child}pv/status'>PV-modellstatus och rapport</a></p></div><div class='box'><h2>Lastprognos v3</h2><p>{load_text} Validation-optimerad ensemble av statisk profil, recent-slot och 7-dagars nivåkorrektion. Residual-ML används endast om den förbättrar validation ytterligare.</p><p><a class='button' href='{child}load/train-run?ui_build=1033'>TRÄNA LASTMODELL V3 — BUILD 1.0.33</a></p><p>Rå länk: <a href='{child}load/train-run?ui_build=1033'>{child}load/train-run?ui_build=1033</a></p><p><a href='{child}load/status'>Lastmodellstatus</a> · <a href='{child}load/forecast'>36 h lastprognos</a> · <a href='{child}ui-version'>UI-version</a></p></div><h2>Filer</h2><table><thead><tr><th>Fil</th><th>Identifierad typ</th><th>Rader</th><th>Bytes</th></tr></thead><tbody>{rows}</tbody></table><p><a href='{child}build'>Bygg/bygg om 15-minutersdataset</a></p><p><a href='{child}preview?limit=20'>Dataset preview</a> · <a href='{child}status'>JSON status</a> · <a href='{back}'>Tillbaka</a></p></body></html>"""
+    return f"""<!doctype html><html lang='sv'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta http-equiv='Cache-Control' content='no-store'><title>Energy AI training</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;max-width:900px}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border-bottom:1px solid #9995;text-align:left;padding:.45rem}}input,button,.button{{margin:.4rem 0}}.button{{display:inline-block;padding:.55rem .85rem;border:2px solid #444;border-radius:5px;background:#eee;color:#111;text-decoration:none}}.box{{padding:1rem;border:1px solid #9995;border-radius:8px;margin:1rem 0}}.build{{padding:.65rem;background:#fff3cd;border:1px solid #d6b656;border-radius:6px;font-weight:700}}</style></head><body><h1>Training data</h1><p class='build'>UI BUILD: {UI_BUILD}</p><p>Filer sparas persistent i <code>{escape(status['training_dir'])}</code>.</p><div class='box'><h2>Ladda upp historik</h2><form action='{child}upload' method='post' enctype='multipart/form-data'><input type='file' name='file' accept='.csv,text/csv' required><br><button type='submit'>Ladda upp CSV</button></form></div><div class='box'><h2>Historiskt väder</h2><p>Hämtar temperatur och molnighet för Solinteg-perioden och bygger om datasetet.</p><form action='{child}fetch-weather' method='post'><button type='submit'>Hämta historiskt väder</button></form></div><div class='box'><h2>Historisk solinstrålning</h2><form action='{child}fetch-irradiance' method='post'><button type='submit'>Hämta historisk GTI</button></form></div><div class='box'><h2>PV calibration</h2><p>{pv_text}</p><form action='{child}pv/train' method='post'><button type='submit'>Träna PV-modell</button></form><p><a href='{child}pv/status'>PV-modellstatus och rapport</a></p></div><div class='box'><h2>Lastprognos v3 + flexibla laster</h2><p>{load_text} Baslastprognosen kompletteras nu med separata EV- och bastukomponenter. Forecast-vintages sparas automatiskt var 15:e minut för online-evaluering.</p><p><a class='button' href='{child}load/train-run?ui_build=1034'>TRÄNA LASTMODELL V3 — BUILD 1.0.34</a></p><p><a href='{child}load/status'>Lastmodellstatus</a> · <a href='{child}load/forecast'>36 h lastprognos</a> · <a href='{child}load/evaluation'>Online-evaluering</a> · <a href='{child}load/evaluate-now'>Evaluate now</a> · <a href='{child}ui-version'>UI-version</a></p></div><h2>Filer</h2><table><thead><tr><th>Fil</th><th>Identifierad typ</th><th>Rader</th><th>Bytes</th></tr></thead><tbody>{rows}</tbody></table><p><a href='{child}build'>Bygg/bygg om 15-minutersdataset</a></p><p><a href='{child}preview?limit=20'>Dataset preview</a> · <a href='{child}status'>JSON status</a> · <a href='{back}'>Tillbaka</a></p></body></html>"""
 
 
 @router.get("/ui-version")
@@ -152,5 +153,18 @@ async def training_load_status(): return _current_load_status()
 
 @router.get("/load/forecast")
 async def training_load_forecast():
-    try: return await asyncio.to_thread(load_forecaster.refresh)
+    try:
+        result = await asyncio.to_thread(load_forecaster.refresh)
+        await asyncio.to_thread(insert_load_forecast, result)
+        return result
     except Exception as exc: raise HTTPException(500, f"Load forecast failed: {exc!r}")
+
+
+@router.get("/load/evaluation")
+async def training_load_evaluation(days: int = Query(30, ge=1, le=180)):
+    return await asyncio.to_thread(evaluation_report, days)
+
+
+@router.get("/load/evaluate-now")
+async def training_load_evaluate_now():
+    return await asyncio.to_thread(evaluate_matured_load_forecasts, 30)
