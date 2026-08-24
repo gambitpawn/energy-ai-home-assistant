@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .db import DB_PATH
+from .flexible_loads import flexible_load_forecast
 from .load_calibration import MODEL_NAME, load_model, predict_load
 
 
@@ -47,8 +48,8 @@ class LoadForecaster:
 
     def refresh(self) -> dict[str, Any]:
         payload = load_model()
-        if payload is None or int(payload.get("model_version", 0)) < 2:
-            raise RuntimeError("No trained load v2 model. Train it under /training/load/train first.")
+        if payload is None or int(payload.get("model_version", 0)) < 3:
+            raise RuntimeError("No trained load v3 model. Train it under /training/load/train first.")
 
         now = datetime.now(timezone.utc)
         start = now.replace(second=0, microsecond=0)
@@ -58,28 +59,49 @@ class LoadForecaster:
 
         history = self._recent_history(28)
         temp_map = self._temperature_forecast()
+        starts = [start + timedelta(minutes=15 * i) for i in range(self.horizon_hours * 4)]
+        flex = flexible_load_forecast(self.cfg, starts)
+        flex_rows = {r["start"]: r for r in flex["rows"]}
+
         rows = []
-        for i in range(self.horizon_hours * 4):
-            stamp = start + timedelta(minutes=15 * i)
+        for stamp in starts:
             key = stamp.isoformat()
             temp = temp_map.get(key)
-            pred, uncertainty, meta = predict_load(payload, stamp, history=history, temperature_c=temp)
+            base_pred, uncertainty, meta = predict_load(payload, stamp, history=history, temperature_c=temp)
+            f = flex_rows.get(key) or {}
+            ev_kw = float(f.get("ev_forecast_kw") or 0.0)
+            sauna_kw = float(f.get("sauna_forecast_kw") or 0.0)
+            total = max(0.0, base_pred + ev_kw + sauna_kw)
             rows.append({
                 "start": key,
-                "house_load_forecast_kw": round(pred, 4),
+                "base_household_forecast_kw": round(base_pred, 4),
+                "ev_forecast_kw": round(ev_kw, 4),
+                "sauna_forecast_kw": round(sauna_kw, 4),
+                "house_load_forecast_kw": round(total, 4),
                 "house_load_uncertainty_kw": round(uncertainty, 4),
                 "temperature_c": temp,
                 **meta,
             })
 
+        base_energy = sum(float(r["base_household_forecast_kw"]) * 0.25 for r in rows)
+        ev_energy = sum(float(r["ev_forecast_kw"]) * 0.25 for r in rows)
+        sauna_energy = sum(float(r["sauna_forecast_kw"]) * 0.25 for r in rows)
         total_energy = sum(float(r["house_load_forecast_kw"]) * 0.25 for r in rows)
         return {
             "generated_at": now.isoformat(),
             "interval_minutes": 15,
             "horizon_hours": self.horizon_hours,
             "model": MODEL_NAME,
+            "composition": "base_household + ev + sauna",
             "live_recent_history_rows": len(history),
             "temperature_forecast_rows": sum(1 for r in rows if r.get("temperature_c") is not None),
+            "flexible_loads": {"ev": flex["ev"], "sauna": flex["sauna"], "provisional": flex.get("provisional", True)},
+            "energy_kwh": {
+                "base_household": round(base_energy, 3),
+                "ev": round(ev_energy, 3),
+                "sauna": round(sauna_energy, 3),
+                "total": round(total_energy, 3),
+            },
             "total_forecast_energy_kwh": round(total_energy, 3),
             "rows": rows,
         }
