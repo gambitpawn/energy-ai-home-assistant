@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.45"
+RUNTIME_BUILD = "1.0.46"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -80,6 +80,12 @@ def load_config() -> dict[str, Any]:
         entities[key] = _entity_option(options, key)
 
     physical_grid_import_limit_kw = float(options.get("optimizer_physical_grid_import_limit_kw", 13.8))
+    reserve_shortfall_penalty = float(
+        options.get(
+            "optimizer_reserve_shortfall_penalty_ore_per_kwh_hour",
+            options.get("optimizer_reserve_penalty_ore_per_kwh", 100.0),
+        )
+    )
 
     return {
         "runtime_build": RUNTIME_BUILD,
@@ -113,7 +119,7 @@ def load_config() -> dict[str, Any]:
         },
         "optimizer": {
             "mode": "shadow_read_only",
-            "planner": "deterministic_battery_dp_v3_2",
+            "planner": "deterministic_battery_dp_v3_3",
             "battery_max_charge_kw": float(options.get("optimizer_battery_max_charge_kw", 8.0)),
             "battery_max_discharge_kw": float(options.get("optimizer_battery_max_discharge_kw", 8.0)),
             "battery_charge_efficiency": float(options.get("optimizer_battery_charge_efficiency", 0.95)),
@@ -122,7 +128,7 @@ def load_config() -> dict[str, Any]:
             "physical_grid_import_limit_kw": physical_grid_import_limit_kw,
             "grid_export_limit_kw": float(options.get("optimizer_grid_export_limit_kw", 10.0)),
             "soc_grid_step_kwh": float(options.get("optimizer_soc_grid_step_kwh", 0.5)),
-            "reserve_penalty_ore_per_kwh": float(options.get("optimizer_reserve_penalty_ore_per_kwh", 100.0)),
+            "reserve_shortfall_penalty_ore_per_kwh_hour": reserve_shortfall_penalty,
             "reserve_uncertainty_full_scale_kw": float(options.get("optimizer_reserve_uncertainty_full_scale_kw", 3.0)),
             "terminal_soc_tolerance_pct": float(options.get("optimizer_terminal_soc_tolerance_pct", 3.0)),
             "terminal_soc_tiebreak_ore_per_kwh": float(options.get("optimizer_terminal_soc_tiebreak_ore_per_kwh", 5.0)),
