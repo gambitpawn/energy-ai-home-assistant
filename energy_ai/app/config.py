@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.40"
+RUNTIME_BUILD = "1.0.41"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -111,7 +111,7 @@ def load_config() -> dict[str, Any]:
         },
         "optimizer": {
             "mode": "shadow_read_only",
-            "planner": "deterministic_battery_dp_v1",
+            "planner": "deterministic_battery_dp_v2",
             "battery_max_charge_kw": float(options.get("optimizer_battery_max_charge_kw", 8.0)),
             "battery_max_discharge_kw": float(options.get("optimizer_battery_max_discharge_kw", 8.0)),
             "battery_charge_efficiency": float(options.get("optimizer_battery_charge_efficiency", 0.95)),
@@ -121,8 +121,9 @@ def load_config() -> dict[str, Any]:
             "grid_export_limit_kw": float(options.get("optimizer_grid_export_limit_kw", 10.0)),
             "soc_grid_step_kwh": float(options.get("optimizer_soc_grid_step_kwh", 0.5)),
             "reserve_penalty_ore_per_kwh": float(options.get("optimizer_reserve_penalty_ore_per_kwh", 100.0)),
-            "terminal_soc_penalty_ore_per_kwh": float(options.get("optimizer_terminal_soc_penalty_ore_per_kwh", 20.0)),
-            "high_uncertainty_threshold_kw": float(options.get("optimizer_high_uncertainty_threshold_kw", 3.0)),
+            "reserve_uncertainty_full_scale_kw": float(options.get("optimizer_reserve_uncertainty_full_scale_kw", 3.0)),
+            "terminal_soc_tolerance_pct": float(options.get("optimizer_terminal_soc_tolerance_pct", 3.0)),
+            "terminal_soc_tiebreak_ore_per_kwh": float(options.get("optimizer_terminal_soc_tiebreak_ore_per_kwh", 5.0)),
         },
         "tariffs": {"enabled": False, "rules": []},
         "forecast": {
