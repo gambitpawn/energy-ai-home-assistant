@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.44"
+RUNTIME_BUILD = "1.0.45"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -113,7 +113,7 @@ def load_config() -> dict[str, Any]:
         },
         "optimizer": {
             "mode": "shadow_read_only",
-            "planner": "deterministic_battery_dp_v3_1",
+            "planner": "deterministic_battery_dp_v3_2",
             "battery_max_charge_kw": float(options.get("optimizer_battery_max_charge_kw", 8.0)),
             "battery_max_discharge_kw": float(options.get("optimizer_battery_max_discharge_kw", 8.0)),
             "battery_charge_efficiency": float(options.get("optimizer_battery_charge_efficiency", 0.95)),
