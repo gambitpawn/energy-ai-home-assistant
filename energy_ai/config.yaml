@@ -1,7 +1,7 @@
 name: "Energy AI"
-version: "1.0.38"
+version: "1.0.39"
 slug: "energy_ai"
-description: "Read-only energy AI, forecasts, history and LLM analysis for Home Assistant."
+description: "Read-only energy AI, forecasts, deterministic shadow planning, history and LLM analysis for Home Assistant."
 stage: experimental
 init: false
 
@@ -67,6 +67,18 @@ options:
   export_overhead_ore_kwh: 0
   minimum_arbitrage_margin_ore_kwh: 20
 
+  optimizer_battery_max_charge_kw: 8.0
+  optimizer_battery_max_discharge_kw: 8.0
+  optimizer_battery_charge_efficiency: 0.95
+  optimizer_battery_discharge_efficiency: 0.95
+  optimizer_battery_degradation_ore_kwh: 5.0
+  optimizer_grid_import_limit_kw: 8.0
+  optimizer_grid_export_limit_kw: 10.0
+  optimizer_soc_grid_step_kwh: 0.5
+  optimizer_reserve_penalty_ore_per_kwh: 100.0
+  optimizer_terminal_soc_penalty_ore_per_kwh: 20.0
+  optimizer_high_uncertainty_threshold_kw: 3.0
+
   llm_enabled: true
   openai_api_key: ""
   openai_model: "gpt-5.6-luna"
@@ -115,6 +127,18 @@ schema:
   import_overhead_ore_kwh: float
   export_overhead_ore_kwh: float
   minimum_arbitrage_margin_ore_kwh: "float(0,500)"
+
+  optimizer_battery_max_charge_kw: "float(0,15)"
+  optimizer_battery_max_discharge_kw: "float(0,15)"
+  optimizer_battery_charge_efficiency: "float(0.5,1)"
+  optimizer_battery_discharge_efficiency: "float(0.5,1)"
+  optimizer_battery_degradation_ore_kwh: "float(0,100)"
+  optimizer_grid_import_limit_kw: "float(0,30)"
+  optimizer_grid_export_limit_kw: "float(0,30)"
+  optimizer_soc_grid_step_kwh: "float(0.1,2)"
+  optimizer_reserve_penalty_ore_per_kwh: "float(0,1000)"
+  optimizer_terminal_soc_penalty_ore_per_kwh: "float(0,1000)"
+  optimizer_high_uncertainty_threshold_kw: "float(0,20)"
 
   llm_enabled: bool
   openai_api_key: password
