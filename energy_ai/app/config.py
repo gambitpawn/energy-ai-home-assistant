@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.46"
+RUNTIME_BUILD = "1.0.47"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -80,7 +80,7 @@ def load_config() -> dict[str, Any]:
         entities[key] = _entity_option(options, key)
 
     physical_grid_import_limit_kw = float(options.get("optimizer_physical_grid_import_limit_kw", 13.8))
-    reserve_shortfall_penalty = float(
+    legacy_reserve_penalty = float(
         options.get(
             "optimizer_reserve_shortfall_penalty_ore_per_kwh_hour",
             options.get("optimizer_reserve_penalty_ore_per_kwh", 100.0),
@@ -119,7 +119,7 @@ def load_config() -> dict[str, Any]:
         },
         "optimizer": {
             "mode": "shadow_read_only",
-            "planner": "deterministic_battery_dp_v3_3",
+            "planner": "deterministic_battery_dp_v3_4",
             "battery_max_charge_kw": float(options.get("optimizer_battery_max_charge_kw", 8.0)),
             "battery_max_discharge_kw": float(options.get("optimizer_battery_max_discharge_kw", 8.0)),
             "battery_charge_efficiency": float(options.get("optimizer_battery_charge_efficiency", 0.95)),
@@ -128,7 +128,11 @@ def load_config() -> dict[str, Any]:
             "physical_grid_import_limit_kw": physical_grid_import_limit_kw,
             "grid_export_limit_kw": float(options.get("optimizer_grid_export_limit_kw", 10.0)),
             "soc_grid_step_kwh": float(options.get("optimizer_soc_grid_step_kwh", 0.5)),
-            "reserve_shortfall_penalty_ore_per_kwh_hour": reserve_shortfall_penalty,
+            "reserve_critical_soc_pct": float(options.get("optimizer_reserve_critical_soc_pct", 10.0)),
+            "reserve_critical_penalty_ore_per_kwh_hour": float(options.get("optimizer_reserve_critical_penalty_ore_per_kwh_hour", legacy_reserve_penalty * 3.0)),
+            "reserve_preferred_penalty_ore_per_kwh_hour": float(options.get("optimizer_reserve_preferred_penalty_ore_per_kwh_hour", legacy_reserve_penalty)),
+            "reserve_target_penalty_ore_per_kwh_hour": float(options.get("optimizer_reserve_target_penalty_ore_per_kwh_hour", legacy_reserve_penalty * 0.25)),
+            "preferred_max_excess_penalty_ore_per_kwh_hour": float(options.get("optimizer_preferred_max_excess_penalty_ore_per_kwh_hour", legacy_reserve_penalty * 0.02)),
             "reserve_uncertainty_full_scale_kw": float(options.get("optimizer_reserve_uncertainty_full_scale_kw", 3.0)),
             "terminal_soc_tolerance_pct": float(options.get("optimizer_terminal_soc_tolerance_pct", 3.0)),
             "terminal_soc_tiebreak_ore_per_kwh": float(options.get("optimizer_terminal_soc_tiebreak_ore_per_kwh", 5.0)),
