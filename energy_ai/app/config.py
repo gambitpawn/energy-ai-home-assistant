@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.39"
+RUNTIME_BUILD = "1.0.40"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
