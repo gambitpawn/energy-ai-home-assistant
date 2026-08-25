@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.43"
+RUNTIME_BUILD = "1.0.44"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -80,14 +80,6 @@ def load_config() -> dict[str, Any]:
         entities[key] = _entity_option(options, key)
 
     physical_grid_import_limit_kw = float(options.get("optimizer_physical_grid_import_limit_kw", 13.8))
-    # Backward compatibility: the old 8 kW optimizer_grid_import_limit_kw option is
-    # retained as an operational/soft target. It is no longer a physical feasibility limit.
-    grid_import_target_kw = float(
-        options.get(
-            "optimizer_grid_import_target_kw",
-            options.get("optimizer_grid_import_limit_kw", 8.0),
-        )
-    )
 
     return {
         "runtime_build": RUNTIME_BUILD,
@@ -121,15 +113,13 @@ def load_config() -> dict[str, Any]:
         },
         "optimizer": {
             "mode": "shadow_read_only",
-            "planner": "deterministic_battery_dp_v3",
+            "planner": "deterministic_battery_dp_v3_1",
             "battery_max_charge_kw": float(options.get("optimizer_battery_max_charge_kw", 8.0)),
             "battery_max_discharge_kw": float(options.get("optimizer_battery_max_discharge_kw", 8.0)),
             "battery_charge_efficiency": float(options.get("optimizer_battery_charge_efficiency", 0.95)),
             "battery_discharge_efficiency": float(options.get("optimizer_battery_discharge_efficiency", 0.95)),
             "battery_degradation_ore_kwh": float(options.get("optimizer_battery_degradation_ore_kwh", 5.0)),
             "physical_grid_import_limit_kw": physical_grid_import_limit_kw,
-            "grid_import_limit_kw": physical_grid_import_limit_kw,
-            "grid_import_target_kw": grid_import_target_kw,
             "grid_export_limit_kw": float(options.get("optimizer_grid_export_limit_kw", 10.0)),
             "soc_grid_step_kwh": float(options.get("optimizer_soc_grid_step_kwh", 0.5)),
             "reserve_penalty_ore_per_kwh": float(options.get("optimizer_reserve_penalty_ore_per_kwh", 100.0)),
