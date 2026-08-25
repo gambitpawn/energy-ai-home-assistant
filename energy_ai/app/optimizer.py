@@ -6,7 +6,7 @@ from statistics import median
 from typing import Any
 from .db import DB_PATH
 
-PLANNER_NAME = "deterministic_battery_dp_v3_4"
+PLANNER_NAME = "deterministic_battery_dp_v3_5"
 DT_HOURS = 0.25
 
 
@@ -216,7 +216,7 @@ def _reserve_policy_penalty_ore(
 
     critical_rate = max(0.0, float(o.get("reserve_critical_penalty_ore_per_kwh_hour", 300.0)))
     preferred_rate = max(0.0, float(o.get("reserve_preferred_penalty_ore_per_kwh_hour", 100.0)))
-    target_rate = max(0.0, float(o.get("reserve_target_penalty_ore_per_kwh_hour", 25.0)))
+    target_rate = max(0.0, float(o.get("reserve_target_penalty_ore_per_kwh_hour", 10.0)))
     return (
         critical_missing * critical_rate
         + preferred_missing * preferred_rate
@@ -454,7 +454,7 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             "reserve_critical_soc_pct":critical_pct,
             "reserve_critical_penalty_ore_per_kwh_hour":float(o.get("reserve_critical_penalty_ore_per_kwh_hour",300)),
             "reserve_preferred_penalty_ore_per_kwh_hour":float(o.get("reserve_preferred_penalty_ore_per_kwh_hour",100)),
-            "reserve_target_penalty_ore_per_kwh_hour":float(o.get("reserve_target_penalty_ore_per_kwh_hour",25)),
+            "reserve_target_penalty_ore_per_kwh_hour":float(o.get("reserve_target_penalty_ore_per_kwh_hour",10)),
             "preferred_max_excess_penalty_ore_per_kwh_hour":excess_rate,
             "reserve_penalty_interval_hours":DT_HOURS,
             "battery_max_charge_kw":cmax,
