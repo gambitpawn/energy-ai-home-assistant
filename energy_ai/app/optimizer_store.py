@@ -56,7 +56,7 @@ def insert_plan(plan: dict[str, Any]) -> int:
                 float(r["grid_import_kw"]),
                 float(r["grid_export_kw"]),
                 float(r.get("curtailed_kw") or 0.0),
-                float(r["interval_cost_ore"]),
+                float(r.get("objective_cost_ore", r.get("interval_cost_ore", 0.0))),
                 json.dumps(r, ensure_ascii=False),
             ) for r in rows],
         )
@@ -69,8 +69,8 @@ def insert_plan(plan: dict[str, Any]) -> int:
                 generated,
                 planner,
                 int(plan.get("horizon_hours") or 0),
-                float(s.get("expected_cost_ore") or 0.0),
-                float(s.get("baseline_cost_ore") or 0.0),
+                float(s.get("expected_cash_cost_ore", s.get("expected_cost_ore", 0.0)) or 0.0),
+                float(s.get("baseline_cash_cost_ore", s.get("baseline_cost_ore", 0.0)) or 0.0),
                 float(s.get("expected_saving_ore") or 0.0),
                 json.dumps(plan, ensure_ascii=False),
             ),
@@ -110,8 +110,8 @@ def plan_history(limit: int = 20) -> list[dict[str, Any]]:
             "generated_at": r[0],
             "planner": r[1],
             "horizon_hours": r[2],
-            "expected_cost_ore": r[3],
-            "baseline_cost_ore": r[4],
+            "expected_cash_cost_ore": r[3],
+            "baseline_cash_cost_ore": r[4],
             "expected_saving_ore": r[5],
         }
         for r in rows
