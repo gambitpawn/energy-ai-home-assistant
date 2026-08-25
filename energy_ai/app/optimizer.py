@@ -219,16 +219,14 @@ def _interval_result(row: dict[str, Any], action_kw: float, cfg: dict[str, Any])
     energy_cost = grid_import * DT_HOURS * buy - grid_export * DT_HOURS * sell
     degradation_cost = abs(action_kw) * DT_HOURS * degradation
 
-    # Only battery energy exported to the grid must clear the configured net-profit hurdle.
-    # Charging cost, round-trip efficiency and degradation are already represented elsewhere
-    # in the DP, so this is an additional required profit margin rather than a duplicate cost.
     battery_export_kw = 0.0
     if action_kw > 0.0 and grid_export > 0.0:
         discharge_needed_for_self_consumption = max(0.0, net_before_battery)
         battery_export_kw = min(grid_export, max(0.0, action_kw - discharge_needed_for_self_consumption))
     arbitrage_hurdle_cost = battery_export_kw * DT_HOURS * arbitrage_margin
 
-    interval_cost = energy_cost + degradation_cost + arbitrage_hurdle_cost
+    cash_cost = energy_cost + degradation_cost
+    objective_cost = cash_cost + arbitrage_hurdle_cost
     return {
         "feasible": 1.0 if feasible else 0.0,
         "grid_import_kw": grid_import,
@@ -237,13 +235,14 @@ def _interval_result(row: dict[str, Any], action_kw: float, cfg: dict[str, Any])
         "curtailed_kw": curtailed,
         "energy_cost_ore": energy_cost,
         "degradation_cost_ore": degradation_cost,
+        "cash_cost_ore": cash_cost,
         "arbitrage_hurdle_cost_ore": arbitrage_hurdle_cost,
-        "interval_cost_ore": interval_cost,
+        "interval_cost_ore": objective_cost,
     }
 
 
 def _baseline_cost(rows: list[dict[str, Any]], cfg: dict[str, Any]) -> float:
-    return sum(_interval_result(r, 0.0, cfg)["interval_cost_ore"] for r in rows)
+    return sum(_interval_result(r, 0.0, cfg)["cash_cost_ore"] for r in rows)
 
 
 def _classify_action(row: dict[str, Any], action_kw: float, result: dict[str, float]) -> tuple[str, dict[str, float]]:
@@ -331,13 +330,11 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
         costs = next_costs
         parents.append(back)
 
-    # Fair-horizon comparison: optimized plan must end near its starting SOC.
     tolerance_kwh = capacity * terminal_tolerance_pct / 100.0
     terminal_candidates = [idx for idx in costs if abs(states[idx] - initial_kwh) <= tolerance_kwh + 1e-9]
     if not terminal_candidates:
         nearest_delta = min(abs(states[idx] - initial_kwh) for idx in costs)
         terminal_candidates = [idx for idx in costs if abs(abs(states[idx] - initial_kwh) - nearest_delta) <= 1e-9]
-
     best_idx = min(
         terminal_candidates,
         key=lambda idx: costs[idx] + abs(states[idx] - initial_kwh) * terminal_tiebreak_ore_kwh,
@@ -352,11 +349,13 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
     path.reverse()
 
     out_rows = []
-    expected_cost = 0.0
+    objective_cost = 0.0
+    cash_cost = 0.0
     total_battery_export_kwh = 0.0
     total_arbitrage_hurdle_ore = 0.0
     for row, (_, i1, action, result, reserve_kwh, reserve_pct) in zip(rows, path):
-        expected_cost += result["interval_cost_ore"]
+        objective_cost += result["interval_cost_ore"]
+        cash_cost += result["cash_cost_ore"]
         total_battery_export_kwh += result.get("battery_export_kw", 0.0) * DT_HOURS
         total_arbitrage_hurdle_ore += result.get("arbitrage_hurdle_cost_ore", 0.0)
         reason, flow = _classify_action(row, action, result)
@@ -371,8 +370,9 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             "curtailed_kw": round(result["curtailed_kw"], 4),
             "energy_cost_ore": round(result["energy_cost_ore"], 4),
             "degradation_cost_ore": round(result["degradation_cost_ore"], 4),
+            "cash_cost_ore": round(result["cash_cost_ore"], 4),
             "arbitrage_hurdle_cost_ore": round(result.get("arbitrage_hurdle_cost_ore", 0.0), 4),
-            "interval_cost_ore": round(result["interval_cost_ore"], 4),
+            "objective_cost_ore": round(result["interval_cost_ore"], 4),
             "reason": reason,
             "flow_breakdown_kw": {k: round(v, 4) for k, v in flow.items()},
         })
@@ -418,10 +418,11 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             "component_forecasts_included": True,
         },
         "summary": {
-            "expected_cost_ore": round(expected_cost, 2),
-            "baseline_cost_ore": round(baseline, 2),
-            "expected_saving_ore": round(baseline - expected_cost, 2),
-            "expected_saving_sek": round((baseline - expected_cost) / 100.0, 2),
+            "objective_cost_ore": round(objective_cost, 2),
+            "expected_cash_cost_ore": round(cash_cost, 2),
+            "baseline_cash_cost_ore": round(baseline, 2),
+            "expected_saving_ore": round(baseline - cash_cost, 2),
+            "expected_saving_sek": round((baseline - cash_cost) / 100.0, 2),
             "terminal_soc_pct": round(terminal_soc_pct, 2),
             "terminal_soc_delta_pct": round(terminal_delta_pct, 2),
             "battery_export_kwh": round(total_battery_export_kwh, 3),
