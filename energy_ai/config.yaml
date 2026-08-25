@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.51"
+version: "1.0.52"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, deterministic shadow planning, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -87,6 +87,20 @@ options:
   optimizer_unknown_price_risk_premium_ore_kwh: 40.0
   optimizer_unknown_price_default_continuation_value_ore_kwh: 150.0
 
+  tariff_enabled: false
+  tariff_consumption_enabled: false
+  tariff_consumption_rate_sek_per_kw: 105.0
+  tariff_consumption_start_hour: 7
+  tariff_consumption_end_hour: 19
+  tariff_consumption_active_months: "1,2,11,12"
+  tariff_consumption_day_rule: "workdays"
+  tariff_production_enabled: false
+  tariff_production_rate_sek_per_kw: 10.0
+  tariff_production_start_hour: 8
+  tariff_production_end_hour: 16
+  tariff_production_active_months: "4,5,6,7,8"
+  tariff_production_day_rule: "weekends_holidays_midsummer_eve"
+
   llm_enabled: true
   openai_api_key: ""
   openai_model: "gpt-5.6-luna"
@@ -155,6 +169,20 @@ schema:
   optimizer_unknown_price_energy_coverage_fraction: "float(0,1)"
   optimizer_unknown_price_risk_premium_ore_kwh: "float(0,500)"
   optimizer_unknown_price_default_continuation_value_ore_kwh: "float(0,1000)"
+
+  tariff_enabled: bool
+  tariff_consumption_enabled: bool
+  tariff_consumption_rate_sek_per_kw: "float(0,10000)"
+  tariff_consumption_start_hour: "int(0,23)"
+  tariff_consumption_end_hour: "int(1,24)"
+  tariff_consumption_active_months: str
+  tariff_consumption_day_rule: str
+  tariff_production_enabled: bool
+  tariff_production_rate_sek_per_kw: "float(0,10000)"
+  tariff_production_start_hour: "int(0,23)"
+  tariff_production_end_hour: "int(1,24)"
+  tariff_production_active_months: str
+  tariff_production_day_rule: str
 
   llm_enabled: bool
   openai_api_key: password
