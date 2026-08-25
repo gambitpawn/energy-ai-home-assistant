@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.40"
+version: "1.0.41"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, deterministic shadow planning, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -76,8 +76,9 @@ options:
   optimizer_grid_export_limit_kw: 10.0
   optimizer_soc_grid_step_kwh: 0.5
   optimizer_reserve_penalty_ore_per_kwh: 100.0
-  optimizer_terminal_soc_penalty_ore_per_kwh: 20.0
-  optimizer_high_uncertainty_threshold_kw: 3.0
+  optimizer_reserve_uncertainty_full_scale_kw: 3.0
+  optimizer_terminal_soc_tolerance_pct: 3.0
+  optimizer_terminal_soc_tiebreak_ore_per_kwh: 5.0
 
   llm_enabled: true
   openai_api_key: ""
@@ -137,8 +138,9 @@ schema:
   optimizer_grid_export_limit_kw: "float(0,30)"
   optimizer_soc_grid_step_kwh: "float(0.1,2)"
   optimizer_reserve_penalty_ore_per_kwh: "float(0,1000)"
-  optimizer_terminal_soc_penalty_ore_per_kwh: "float(0,1000)"
-  optimizer_high_uncertainty_threshold_kw: "float(0,20)"
+  optimizer_reserve_uncertainty_full_scale_kw: "float(0.1,20)"
+  optimizer_terminal_soc_tolerance_pct: "float(0,20)"
+  optimizer_terminal_soc_tiebreak_ore_per_kwh: "float(0,500)"
 
   llm_enabled: bool
   openai_api_key: password
