@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.47"
+version: "1.0.48"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, deterministic shadow planning, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -78,7 +78,7 @@ options:
   optimizer_reserve_critical_soc_pct: 10.0
   optimizer_reserve_critical_penalty_ore_per_kwh_hour: 300.0
   optimizer_reserve_preferred_penalty_ore_per_kwh_hour: 100.0
-  optimizer_reserve_target_penalty_ore_per_kwh_hour: 25.0
+  optimizer_reserve_target_penalty_ore_per_kwh_hour: 10.0
   optimizer_preferred_max_excess_penalty_ore_per_kwh_hour: 2.0
   optimizer_reserve_uncertainty_full_scale_kw: 3.0
   optimizer_terminal_soc_tolerance_pct: 3.0
