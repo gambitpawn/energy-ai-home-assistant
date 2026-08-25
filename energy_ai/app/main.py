@@ -18,6 +18,8 @@ from .llm import LLMExplainer
 from .load_evaluation import evaluate_matured_load_forecasts, evaluation_report as load_evaluation_report, insert_load_forecast, latest_load_forecast
 from .load_forecast import LoadForecaster
 from .models import ExplainRequest, ExplainResponse
+from .optimizer import build_plan
+from .optimizer_store import insert_plan, latest_plan, plan_history
 from .pv_evaluation import evaluate_matured_forecasts, evaluation_report
 from .training_routes import router as training_router
 
@@ -41,6 +43,10 @@ async def _refresh_load_forecast():
     forecast=await asyncio.to_thread(load_forecaster.refresh); inserted=await asyncio.to_thread(insert_load_forecast,forecast)
     return {"ok":True,"generated_at":forecast["generated_at"],"intervals":inserted,"interval_minutes":forecast["interval_minutes"],"horizon_hours":forecast["horizon_hours"],"model":forecast["model"],"composition":forecast.get("composition"),"energy_kwh":forecast.get("energy_kwh")}
 
+async def _refresh_optimizer_plan():
+    plan=await asyncio.to_thread(build_plan,cfg); inserted=await asyncio.to_thread(insert_plan,plan)
+    return {"ok":True,"generated_at":plan["generated_at"],"planner":plan["planner"],"mode":plan["mode"],"intervals":inserted,"horizon_hours":plan["horizon_hours"],"initial_soc_pct":plan["initial_soc_pct"],"summary":plan["summary"]}
+
 def _seconds_to_next_quarter():
     now=datetime.now(timezone.utc); next_minute=((now.minute//15)+1)*15; target=now.replace(minute=0,second=20,microsecond=0)+timedelta(hours=1) if next_minute>=60 else now.replace(minute=next_minute,second=20,microsecond=0); return max(5.0,(target-now).total_seconds())
 
@@ -54,6 +60,8 @@ async def _forecast_maintenance_loop():
         except Exception: pass
         try: await _refresh_load_forecast()
         except Exception: pass
+        try: await _refresh_optimizer_plan()
+        except Exception: pass
 
 @asynccontextmanager
 async def lifespan(app):
@@ -61,7 +69,7 @@ async def lifespan(app):
     init_db()
     try: await collector.run_once(); rebuild_recent_15m(collector.poll_seconds,lookback_hours=48)
     except Exception as exc: collector.last_error=repr(exc)
-    for coro in (_refresh_price_horizon,_refresh_pv_forecast,_refresh_load_forecast):
+    for coro in (_refresh_price_horizon,_refresh_pv_forecast,_refresh_load_forecast,_refresh_optimizer_plan):
         try: await coro()
         except Exception: pass
     for fn in (evaluate_matured_forecasts,evaluate_matured_load_forecasts):
@@ -71,7 +79,7 @@ async def lifespan(app):
     for task in (collector_task,maintenance_task):
         if task: task.cancel()
 
-app=FastAPI(title="Energy AI",version=RUNTIME_VERSION,description="Read-only HA energy data, component-based forecasts, continuous evaluation and LLM analysis",lifespan=lifespan,docs_url=None,redoc_url=None)
+app=FastAPI(title="Energy AI",version=RUNTIME_VERSION,description="Read-only HA energy data, component-based forecasts, deterministic shadow planning, continuous evaluation and LLM analysis",lifespan=lifespan,docs_url=None,redoc_url=None)
 app.include_router(training_router)
 
 POWER_CATEGORIES={"pv_power","house_load","grid_power","battery_power"}
@@ -121,12 +129,29 @@ def _table(rows,show_score=True):
 
 @app.get("/",response_class=HTMLResponse)
 async def root():
-    return f'''<!doctype html><html lang="sv"><head><meta charset="utf-8"><title>Energy AI</title></head><body><h1>Energy AI</h1><p>Runtime <code>{RUNTIME_VERSION}</code>. Fysisk styrning är avstängd.</p><ul><li><a href="components">Load component registry</a></li><li><a href="forecast/load">Load forecast</a></li><li><a href="forecast/load/evaluation">Load online evaluation</a></li><li><a href="forecast/pv">PV forecast</a></li><li><a href="forecast/pv/evaluation">PV online evaluation</a></li><li><a href="flexible-loads">EV / sauna state</a></li><li><a href="discover/flexible">Discover flexible loads</a></li><li><a href="training">Training data</a></li><li><a href="prices">15-minute prices</a></li><li><a href="discover">Discover HA entities</a></li><li><a href="health">Health</a></li><li><a href="config">Configuration</a></li><li><a href="docs">API docs</a></li></ul></body></html>'''
+    return f'''<!doctype html><html lang="sv"><head><meta charset="utf-8"><title>Energy AI</title></head><body><h1>Energy AI</h1><p>Runtime <code>{RUNTIME_VERSION}</code>. Fysisk styrning är avstängd.</p><ul><li><a href="optimizer/plan">Deterministic shadow plan</a></li><li><a href="optimizer/status">Optimizer status</a></li><li><a href="components">Load component registry</a></li><li><a href="forecast/load">Load forecast</a></li><li><a href="forecast/load/evaluation">Load online evaluation</a></li><li><a href="forecast/pv">PV forecast</a></li><li><a href="forecast/pv/evaluation">PV online evaluation</a></li><li><a href="flexible-loads">EV / sauna state</a></li><li><a href="discover/flexible">Discover flexible loads</a></li><li><a href="training">Training data</a></li><li><a href="prices">15-minute prices</a></li><li><a href="discover">Discover HA entities</a></li><li><a href="health">Health</a></li><li><a href="config">Configuration</a></li><li><a href="docs">API docs</a></li></ul></body></html>'''
 
 @app.get("/docs",include_in_schema=False)
 async def custom_docs(): return get_swagger_ui_html(openapi_url="openapi.json",title="Energy AI API docs")
 @app.get("/components")
 async def components(): return registry_status(cfg)
+@app.get("/optimizer/refresh")
+async def optimizer_refresh():
+    try: return await _refresh_optimizer_plan()
+    except Exception as exc: raise HTTPException(500,f"Optimizer plan failed: {exc!r}")
+@app.get("/optimizer/plan")
+async def optimizer_plan(limit:int=Query(144,ge=1,le=500)):
+    result=latest_plan(limit)
+    if result.get("generated_at") is None:
+        try: await _refresh_optimizer_plan(); result=latest_plan(limit)
+        except Exception as exc: raise HTTPException(500,f"Optimizer plan failed: {exc!r}")
+    return result
+@app.get("/optimizer/status")
+async def optimizer_status():
+    plan=latest_plan(1)
+    return {"runtime_build":RUNTIME_VERSION,"mode":"shadow_read_only","planner":(cfg.get("optimizer") or {}).get("planner"),"configured":cfg.get("optimizer") or {},"latest_plan_generated_at":plan.get("generated_at"),"latest_summary":plan.get("summary"),"physical_writes_enabled":False}
+@app.get("/optimizer/history")
+async def optimizer_history(limit:int=Query(20,ge=1,le=100)): return {"plans":plan_history(limit)}
 @app.get("/forecast/pv/refresh")
 async def forecast_pv_refresh(): return await _refresh_pv_forecast()
 @app.get("/forecast/pv")
@@ -164,7 +189,9 @@ async def discover():
 async def discover_json():
     states=await collector.ha.all_states(); return {"ranked":_discover_candidates(states),"generic":_generic_energy_candidates(states)}
 @app.get("/health")
-async def health(): return {"ok":collector.last_error is None,"runtime_build":RUNTIME_VERSION,"read_only":True,"collector_running":collector.running,"forecast_evaluation_running":maintenance_task is not None and not maintenance_task.done(),"ha_api_authenticated":collector.ha.authenticated,"last_error":collector.last_error,"component_count":len(registry_status(cfg)["active_ids"]),"openai_configured":explainer.client is not None,"llm_model":explainer.model}
+async def health():
+    plan=latest_plan(1)
+    return {"ok":collector.last_error is None,"runtime_build":RUNTIME_VERSION,"read_only":True,"collector_running":collector.running,"forecast_evaluation_running":maintenance_task is not None and not maintenance_task.done(),"ha_api_authenticated":collector.ha.authenticated,"last_error":collector.last_error,"component_count":len(registry_status(cfg)["active_ids"]),"optimizer_mode":"shadow_read_only","optimizer_latest_plan":plan.get("generated_at"),"openai_configured":explainer.client is not None,"llm_model":explainer.model}
 @app.get("/config")
 async def config(): return cfg
 @app.get("/state")
