@@ -9,7 +9,7 @@ from typing import Any
 
 from .db import DB_PATH
 
-PLANNER_NAME = "deterministic_battery_dp_v3"
+PLANNER_NAME = "deterministic_battery_dp_v3_1"
 DT_HOURS = 0.25
 
 
@@ -239,7 +239,7 @@ def _continuation_profile(
             "reference_price_ore_kwh": None,
         }
 
-    import_limit = float(opt.get("grid_import_limit_kw", 8.0))
+    import_limit = float(opt.get("physical_grid_import_limit_kw", 13.8))
     coverage_fraction = max(
         0.0, min(1.0, float(opt.get("unknown_price_energy_coverage_fraction", 0.35)))
     )
@@ -308,12 +308,12 @@ def _interval_result(
 ) -> dict[str, float]:
     opt = cfg.get("optimizer") or {}
     econ = (cfg.get("policy") or {}).get("economics") or {}
-    import_limit = float(opt.get("grid_import_limit_kw", 8.0))
+    import_limit = float(opt.get("physical_grid_import_limit_kw", 13.8))
     export_limit = float(opt.get("grid_export_limit_kw", 10.0))
     import_overhead = float(econ.get("import_overhead_ore_kwh", 0.0))
     export_overhead = float(econ.get("export_overhead_ore_kwh", 0.0))
     degradation = float(opt.get("battery_degradation_ore_kwh", 5.0))
-    arbitrage_margin = float(econ.get("minimum_arbitrage_margin_ore_kwh", 20.0))
+    minimum_shift_margin = float(econ.get("minimum_arbitrage_margin_ore_kwh", 20.0))
 
     load_kw = float(row["load_kw"])
     pv_kw = float(row["pv_kw"])
@@ -336,6 +336,11 @@ def _interval_result(
             grid_export, max(0.0, action_kw - discharge_needed_for_self_consumption)
         )
 
+    required_physical_discharge_kw = max(0.0, net_before_battery - import_limit)
+    discretionary_discharge_kw = 0.0
+    if action_kw > 0.0:
+        discretionary_discharge_kw = max(0.0, action_kw - required_physical_discharge_kw)
+
     feasible = grid_import <= import_limit + 1e-9
     price_known = bool(row.get("price_known"))
 
@@ -345,14 +350,12 @@ def _interval_result(
         if grid_charge_kw > 1e-6 or battery_export_kw > 1e-6:
             feasible = False
         # Battery discharge is reserved for a physical import-limit need; otherwise hold.
-        # If the limit is exceeded, the discrete SOC grid may require a small overshoot.
-        required_discharge_kw = max(0.0, net_before_battery - import_limit)
-        if required_discharge_kw <= 1e-6 and action_kw > 1e-6:
+        if required_physical_discharge_kw <= 1e-6 and action_kw > 1e-6:
             feasible = False
         energy_cost = 0.0
         degradation_cost = abs(action_kw) * DT_HOURS * degradation
         cash_cost = degradation_cost
-        arbitrage_hurdle_cost = 0.0
+        discretionary_shift_hurdle_cost = 0.0
         objective_cost = cash_cost
     else:
         price = float(row["price_ore_kwh"])
@@ -360,9 +363,14 @@ def _interval_result(
         sell = max(0.0, price - export_overhead)
         energy_cost = grid_import * DT_HOURS * buy - grid_export * DT_HOURS * sell
         degradation_cost = abs(action_kw) * DT_HOURS * degradation
-        arbitrage_hurdle_cost = battery_export_kw * DT_HOURS * arbitrage_margin
+        # The minimum margin applies to every discretionary use of stored energy,
+        # whether it offsets household import or is exported. Physical fuse support
+        # is exempt because it is a constraint, not an arbitrage decision.
+        discretionary_shift_hurdle_cost = (
+            discretionary_discharge_kw * DT_HOURS * minimum_shift_margin
+        )
         cash_cost = energy_cost + degradation_cost
-        objective_cost = cash_cost + arbitrage_hurdle_cost
+        objective_cost = cash_cost + discretionary_shift_hurdle_cost
 
     return {
         "feasible": 1.0 if feasible else 0.0,
@@ -371,11 +379,15 @@ def _interval_result(
         "battery_export_kw": battery_export_kw,
         "pv_charge_kw": pv_charge_kw,
         "grid_charge_kw": grid_charge_kw,
+        "required_physical_discharge_kw": required_physical_discharge_kw,
+        "discretionary_discharge_kw": discretionary_discharge_kw,
         "curtailed_kw": curtailed,
         "energy_cost_ore": energy_cost,
         "degradation_cost_ore": degradation_cost,
         "cash_cost_ore": cash_cost,
-        "arbitrage_hurdle_cost_ore": arbitrage_hurdle_cost,
+        "discretionary_shift_hurdle_cost_ore": discretionary_shift_hurdle_cost,
+        # Legacy alias retained in stored payloads/history readers.
+        "arbitrage_hurdle_cost_ore": discretionary_shift_hurdle_cost,
         "interval_cost_ore": objective_cost,
     }
 
@@ -580,7 +592,8 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
     objective_cost = 0.0
     cash_cost = 0.0
     total_battery_export_kwh = 0.0
-    total_arbitrage_hurdle_ore = 0.0
+    total_discretionary_discharge_kwh = 0.0
+    total_shift_hurdle_ore = 0.0
     total_policy_adjustment_ore = 0.0
     boundary_soc_pct = None
 
@@ -592,8 +605,11 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
         total_battery_export_kwh += (
             result.get("battery_export_kw", 0.0) * DT_HOURS
         )
-        total_arbitrage_hurdle_ore += result.get(
-            "arbitrage_hurdle_cost_ore", 0.0
+        total_discretionary_discharge_kwh += (
+            result.get("discretionary_discharge_kw", 0.0) * DT_HOURS
+        )
+        total_shift_hurdle_ore += result.get(
+            "discretionary_shift_hurdle_cost_ore", 0.0
         )
         total_policy_adjustment_ore += policy_adjustment
         if boundary_idx is not None and t == boundary_idx:
@@ -611,6 +627,12 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
                 "battery_export_kw": round(
                     result.get("battery_export_kw", 0.0), 4
                 ),
+                "required_physical_discharge_kw": round(
+                    result.get("required_physical_discharge_kw", 0.0), 4
+                ),
+                "discretionary_discharge_kw": round(
+                    result.get("discretionary_discharge_kw", 0.0), 4
+                ),
                 "curtailed_kw": round(result["curtailed_kw"], 4),
                 "energy_cost_ore": (
                     round(result["energy_cost_ore"], 4)
@@ -621,8 +643,11 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
                     result["degradation_cost_ore"], 4
                 ),
                 "cash_cost_ore": round(result["cash_cost_ore"], 4),
+                "discretionary_shift_hurdle_cost_ore": round(
+                    result.get("discretionary_shift_hurdle_cost_ore", 0.0), 4
+                ),
                 "arbitrage_hurdle_cost_ore": round(
-                    result.get("arbitrage_hurdle_cost_ore", 0.0), 4
+                    result.get("discretionary_shift_hurdle_cost_ore", 0.0), 4
                 ),
                 "policy_adjustment_ore": round(policy_adjustment, 4),
                 "objective_cost_ore": round(
@@ -693,7 +718,9 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             ),
             "battery_max_charge_kw": max_charge_kw,
             "battery_max_discharge_kw": max_discharge_kw,
-            "grid_import_limit_kw": float(opt.get("grid_import_limit_kw", 8.0)),
+            "physical_grid_import_limit_kw": float(
+                opt.get("physical_grid_import_limit_kw", 13.8)
+            ),
             "grid_export_limit_kw": float(opt.get("grid_export_limit_kw", 10.0)),
             "charge_efficiency": eta_charge,
             "discharge_efficiency": eta_discharge,
@@ -706,11 +733,14 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             "dynamic_uncertainty_reserve": True,
             "fair_terminal_soc_constraint_when_fully_priced": True,
             "battery_export_arbitrage": True,
-            "minimum_net_arbitrage_margin_ore_kwh": float(
+            "minimum_net_discretionary_shift_margin_ore_kwh": float(
                 ((cfg.get("policy") or {}).get("economics") or {}).get(
                     "minimum_arbitrage_margin_ore_kwh", 20.0
                 )
             ),
+            "discretionary_self_consumption_hurdle": True,
+            "physical_limit_discharge_exempt_from_margin": True,
+            "grid_import_soft_target": False,
             "variable_price_horizon": True,
             "unknown_price_grid_charging": False,
             "unknown_price_battery_export": False,
@@ -774,9 +804,13 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             "terminal_soc_delta_pct": round(terminal_delta_pct, 2),
             "terminal_soc_constraint_applied": terminal_constraint_applied,
             "battery_export_kwh": round(total_battery_export_kwh, 3),
-            "arbitrage_hurdle_cost_ore": round(
-                total_arbitrage_hurdle_ore, 2
+            "discretionary_discharge_kwh": round(
+                total_discretionary_discharge_kwh, 3
             ),
+            "discretionary_shift_hurdle_cost_ore": round(
+                total_shift_hurdle_ore, 2
+            ),
+            "arbitrage_hurdle_cost_ore": round(total_shift_hurdle_ore, 2),
             "policy_adjustment_ore": round(total_policy_adjustment_ore, 2),
         },
         "rows": out_rows,
