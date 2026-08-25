@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -318,6 +318,15 @@ async def production_month_replay(
     optimal_eval = (optimal.get("tariffs") or {}).get("production_demand") or {}
     base_public = _public_solution(base)
     base_public["production_tariff_evaluation"] = base_eval
+    base_energy_deg_ore = float((base.get("economics") or {}).get("energy_cost_ore") or 0.0) + float((base.get("economics") or {}).get("battery_degradation_cost_ore") or 0.0)
+    base_total_ore = base_energy_deg_ore + float(base_eval.get("cost_sek") or 0.0) * 100.0
+    optimal_total_ore = float((optimal.get("economics") or {}).get("cash_plus_tariff_ore") or 0.0)
+    base_public["economics_with_production_tariff"] = {
+        "energy_plus_degradation_ore": round(base_energy_deg_ore, 2),
+        "production_tariff_cost_ore": round(float(base_eval.get("cost_sek") or 0.0) * 100.0, 2),
+        "cash_plus_tariff_ore": round(base_total_ore, 2),
+        "cash_plus_tariff_sek": round(base_total_ore / 100.0, 2),
+    }
     return {
         "engine": ENGINE_NAME,
         "test": "production_month_replay",
@@ -330,6 +339,7 @@ async def production_month_replay(
         "comparison": {
             "export_peak_reduction_kw": round(float(base_eval.get("metric_kw") or 0.0) - float(optimal_eval.get("metric_kw") or 0.0), 4),
             "tariff_cost_reduction_sek": round(float(base_eval.get("cost_sek") or 0.0) - float(optimal_eval.get("cost_sek") or 0.0), 2),
+            "net_cash_saving_sek": round((base_total_ore - optimal_total_ore) / 100.0, 2),
         },
     }
 
@@ -391,6 +401,9 @@ def combined_live_test(cfg: dict[str, Any], initial_soc_pct: float | None = None
         "consumption_demand": _evaluate(base["_rows"], consumption, True),
         "production_demand": _evaluate(base["_rows"], production, True),
     }
+    base_tariff_cost_ore = sum(float(v.get("cost_sek") or 0.0) * 100.0 for v in base_tariffs.values())
+    base_energy_deg_ore = float((base.get("economics") or {}).get("energy_cost_ore") or 0.0) + float((base.get("economics") or {}).get("battery_degradation_cost_ore") or 0.0)
+    combined_tariffs = combined.get("tariffs") or {}
     return {
         "engine": ENGINE_NAME,
         "test": "combined_live_counterfactual",
@@ -398,8 +411,17 @@ def combined_live_test(cfg: dict[str, Any], initial_soc_pct: float | None = None
         "force_window": True,
         "known_price_intervals": len(rows),
         "initial_soc_pct": initial,
-        "base": {**_public_solution(base), "tariffs": base_tariffs},
+        "base": {
+            **_public_solution(base),
+            "tariffs": base_tariffs,
+            "cash_plus_both_tariffs_ore": round(base_energy_deg_ore + base_tariff_cost_ore, 2),
+        },
         "combined": _public_solution(combined),
+        "comparison": {
+            "consumption_metric_reduction_kw": round(float(base_tariffs["consumption_demand"].get("metric_kw") or 0.0) - float((combined_tariffs.get("consumption_demand") or {}).get("metric_kw") or 0.0), 4),
+            "production_metric_reduction_kw": round(float(base_tariffs["production_demand"].get("metric_kw") or 0.0) - float((combined_tariffs.get("production_demand") or {}).get("metric_kw") or 0.0), 4),
+            "net_cash_saving_ore": round((base_energy_deg_ore + base_tariff_cost_ore) - float((combined.get("economics") or {}).get("cash_plus_tariff_ore") or 0.0), 2),
+        },
         "pass": combined.get("status") in {"optimal", "feasible"},
         "note": "Both tariff clock windows are forced active for a counterfactual simultaneous-objective test; normal calendar eligibility is intentionally ignored.",
     }
