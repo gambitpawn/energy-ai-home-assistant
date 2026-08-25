@@ -6,7 +6,7 @@ from statistics import median
 from typing import Any
 from .db import DB_PATH
 
-PLANNER_NAME = "deterministic_battery_dp_v3_3"
+PLANNER_NAME = "deterministic_battery_dp_v3_4"
 DT_HOURS = 0.25
 
 
@@ -181,6 +181,49 @@ def _dynamic_reserve_kwh(row: dict[str, Any], cfg: dict[str, Any], cap: float) -
     return cap * pct / 100, pct
 
 
+def _zone_shortfall_kwh(energy_kwh: float, lower_kwh: float, upper_kwh: float) -> float:
+    """Missing energy inside one marginal reserve zone, with no overlap between zones."""
+    if upper_kwh <= lower_kwh + 1e-12 or energy_kwh >= upper_kwh:
+        return 0.0
+    return max(0.0, upper_kwh - max(energy_kwh, lower_kwh))
+
+
+def _reserve_policy_penalty_ore(
+    energy_kwh: float,
+    reserve_kwh: float,
+    cfg: dict[str, Any],
+    cap: float,
+    hard_min_soc_pct: float,
+    preferred_min_soc_pct: float,
+) -> float:
+    """Piecewise marginal risk cost: critical > preferred > reserve-target zone."""
+    o = cfg.get("optimizer") or {}
+    preferred_pct = max(hard_min_soc_pct, preferred_min_soc_pct)
+    critical_pct = min(
+        preferred_pct,
+        max(hard_min_soc_pct, float(o.get("reserve_critical_soc_pct", 10.0))),
+    )
+    hard_min_kwh = cap * hard_min_soc_pct / 100
+    critical_kwh = cap * critical_pct / 100
+    preferred_kwh = cap * preferred_pct / 100
+    target_kwh = max(hard_min_kwh, reserve_kwh)
+
+    critical_hi = min(critical_kwh, target_kwh)
+    preferred_hi = min(preferred_kwh, target_kwh)
+    critical_missing = _zone_shortfall_kwh(energy_kwh, hard_min_kwh, critical_hi)
+    preferred_missing = _zone_shortfall_kwh(energy_kwh, critical_kwh, preferred_hi)
+    target_missing = _zone_shortfall_kwh(energy_kwh, preferred_kwh, target_kwh)
+
+    critical_rate = max(0.0, float(o.get("reserve_critical_penalty_ore_per_kwh_hour", 300.0)))
+    preferred_rate = max(0.0, float(o.get("reserve_preferred_penalty_ore_per_kwh_hour", 100.0)))
+    target_rate = max(0.0, float(o.get("reserve_target_penalty_ore_per_kwh_hour", 25.0)))
+    return (
+        critical_missing * critical_rate
+        + preferred_missing * preferred_rate
+        + target_missing * target_rate
+    ) * DT_HOURS
+
+
 def _continuation_profile(rows, cfg, cap, preferred_max_kwh, eta_discharge):
     o, e = cfg.get("optimizer") or {}, (cfg.get("policy") or {}).get("economics") or {}
     unknown, known = [r for r in rows if not r["price_known"]], [r for r in rows if r["price_known"]]
@@ -270,11 +313,11 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
     cmax, dmax = float(o.get("battery_max_charge_kw", 8)), float(o.get("battery_max_discharge_kw", 8))
     ec, ed = float(o.get("battery_charge_efficiency", .95)), float(o.get("battery_discharge_efficiency", .95))
     reqstep = float(o.get("soc_grid_step_kwh", .5))
-    reserve_penalty_hour = float(o.get("reserve_shortfall_penalty_ore_per_kwh_hour", 100))
     termtol = float(o.get("terminal_soc_tolerance_pct", 3))
     termtie = float(o.get("terminal_soc_tiebreak_ore_per_kwh", 5))
     soc = _latest_soc_pct()
-    if soc is None: raise RuntimeError("Current battery SOC is unavailable")
+    if soc is None:
+        raise RuntimeError("Current battery SOC is unavailable")
     initial = cap * soc / 100
     mink, maxk, pmink, pmaxk = cap*hmin/100, cap*hmax/100, cap*pmin/100, cap*pmax/100
     states, effstep = _state_grid(mink, maxk, reqstep, initial)
@@ -284,34 +327,39 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
     boundary = known_n-1 if 0 < known_n < len(rows) else None
     costs = {init_idx: 0.0}
     parents = []
+    excess_rate = max(0.0, float(o.get("preferred_max_excess_penalty_ore_per_kwh_hour", 2.0)))
+
     for t, row in enumerate(rows):
         rk, rp = _dynamic_reserve_kwh(row, cfg, cap)
         nxt, back = {}, {}
         for i0, prior in costs.items():
             for i1, e1 in enumerate(states):
                 a = _transition_action_kw(states[i0], e1, ec, ed)
-                if a < -cmax-1e-9 or a > dmax+1e-9: continue
+                if a < -cmax-1e-9 or a > dmax+1e-9:
+                    continue
                 res = _interval_result(row, a, cfg)
-                if not res["feasible"]: continue
-                adj = 0.0
-                # SOC policy penalties are expressed per kWh shortfall (or excess)
-                # per hour. Multiplying by the 15-minute interval prevents the same
-                # shortfall from being charged four times too strongly each hour.
-                if e1 < rk: adj += (rk-e1)*reserve_penalty_hour*DT_HOURS
-                if e1 < pmink: adj += (pmink-e1)*reserve_penalty_hour*.10*DT_HOURS
-                if e1 > pmaxk: adj += (e1-pmaxk)*reserve_penalty_hour*.02*DT_HOURS
+                if not res["feasible"]:
+                    continue
+
+                reserve_adj = _reserve_policy_penalty_ore(e1, rk, cfg, cap, hmin, pmin)
+                upper_adj = max(0.0, e1-pmaxk) * excess_rate * DT_HOURS
+                continuation_adj = 0.0
                 if boundary is not None and t == boundary:
                     target = float(continuation.get("target_kwh") or 0)
                     ref = float(continuation.get("reference_price_ore_kwh") or 0)
                     risk = float(continuation.get("risk_premium_ore_kwh") or 0)
-                    adj -= e1*ref
-                    if e1 < target: adj += (target-e1)*risk
+                    continuation_adj -= e1 * ref
+                    if e1 < target:
+                        continuation_adj += (target-e1) * risk
+                adj = reserve_adj + upper_adj + continuation_adj
                 total = prior + res["interval_cost_ore"] + adj
                 if i1 not in nxt or total < nxt[i1]:
                     nxt[i1] = total
-                    back[i1] = (i0, a, res, rk, rp, adj)
-        if not nxt: raise RuntimeError(f"No feasible optimizer states at {row['start']}; check grid/battery limits")
+                    back[i1] = (i0, a, res, rk, rp, adj, reserve_adj, upper_adj, continuation_adj)
+        if not nxt:
+            raise RuntimeError(f"No feasible optimizer states at {row['start']}; check grid/battery limits")
         costs, parents = nxt, parents+[back]
+
     if continuation.get("enabled"):
         best, term_applied = min(costs, key=costs.get), False
     else:
@@ -321,63 +369,127 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             d = min(abs(states[i]-initial) for i in costs)
             cand = [i for i in costs if abs(abs(states[i]-initial)-d) <= 1e-9]
         best, term_applied = min(cand, key=lambda i: costs[i]+abs(states[i]-initial)*termtie), True
+
     path, idx = [], best
     for t in range(len(rows)-1, -1, -1):
-        prev, a, res, rk, rp, adj = parents[t][idx]
-        path.append((prev, idx, a, res, rk, rp, adj)); idx = prev
+        prev, a, res, rk, rp, adj, radj, uadj, cadj = parents[t][idx]
+        path.append((prev, idx, a, res, rk, rp, adj, radj, uadj, cadj))
+        idx = prev
     path.reverse()
 
-    out, obj, cash, bexp, ddis, hurdle, padj, boundary_soc = [], 0., 0., 0., 0., 0., 0., None
-    for t, (row, (_, i1, a, res, rk, rp, adj)) in enumerate(zip(rows, path)):
-        obj += res["interval_cost_ore"]+adj; cash += res["cash_cost_ore"]
-        bexp += res["battery_export_kw"]*DT_HOURS; ddis += res["discretionary_discharge_kw"]*DT_HOURS
-        hurdle += res["discretionary_shift_hurdle_cost_ore"]; padj += adj
-        if boundary is not None and t == boundary: boundary_soc = states[i1]/cap*100
+    out = []
+    obj = cash = bexp = ddis = hurdle = padj = 0.0
+    reserve_padj = upper_padj = continuation_padj = 0.0
+    boundary_soc = None
+    for t, (row, (_, i1, a, res, rk, rp, adj, radj, uadj, cadj)) in enumerate(zip(rows, path)):
+        obj += res["interval_cost_ore"] + adj
+        cash += res["cash_cost_ore"]
+        bexp += res["battery_export_kw"] * DT_HOURS
+        ddis += res["discretionary_discharge_kw"] * DT_HOURS
+        hurdle += res["discretionary_shift_hurdle_cost_ore"]
+        padj += adj
+        reserve_padj += radj
+        upper_padj += uadj
+        continuation_padj += cadj
+        if boundary is not None and t == boundary:
+            boundary_soc = states[i1]/cap*100
         reason, flow = _classify_action(row, a, res)
-        out.append({**row, "battery_action_kw": round(a,4), "expected_soc_pct": round(states[i1]/cap*100,2),
-                    "reserve_soc_pct": round(rp,2), "grid_import_kw": round(res["grid_import_kw"],4),
-                    "grid_export_kw": round(res["grid_export_kw"],4), "battery_export_kw": round(res["battery_export_kw"],4),
-                    "required_physical_discharge_kw": round(res["required_physical_discharge_kw"],4),
-                    "discretionary_discharge_kw": round(res["discretionary_discharge_kw"],4),
-                    "curtailed_kw": round(res["curtailed_kw"],4),
-                    "energy_cost_ore": round(res["energy_cost_ore"],4) if row["price_known"] else None,
-                    "degradation_cost_ore": round(res["degradation_cost_ore"],4), "cash_cost_ore": round(res["cash_cost_ore"],4),
-                    "discretionary_shift_hurdle_cost_ore": round(res["discretionary_shift_hurdle_cost_ore"],4),
-                    "arbitrage_hurdle_cost_ore": round(res["discretionary_shift_hurdle_cost_ore"],4),
-                    "policy_adjustment_ore": round(adj,4), "objective_cost_ore": round(res["interval_cost_ore"]+adj,4),
-                    "reason": reason, "flow_breakdown_kw": {k: round(v,4) for k,v in flow.items()}})
+        out.append({
+            **row,
+            "battery_action_kw": round(a,4),
+            "expected_soc_pct": round(states[i1]/cap*100,2),
+            "reserve_soc_pct": round(rp,2),
+            "grid_import_kw": round(res["grid_import_kw"],4),
+            "grid_export_kw": round(res["grid_export_kw"],4),
+            "battery_export_kw": round(res["battery_export_kw"],4),
+            "required_physical_discharge_kw": round(res["required_physical_discharge_kw"],4),
+            "discretionary_discharge_kw": round(res["discretionary_discharge_kw"],4),
+            "curtailed_kw": round(res["curtailed_kw"],4),
+            "energy_cost_ore": round(res["energy_cost_ore"],4) if row["price_known"] else None,
+            "degradation_cost_ore": round(res["degradation_cost_ore"],4),
+            "cash_cost_ore": round(res["cash_cost_ore"],4),
+            "discretionary_shift_hurdle_cost_ore": round(res["discretionary_shift_hurdle_cost_ore"],4),
+            "arbitrage_hurdle_cost_ore": round(res["discretionary_shift_hurdle_cost_ore"],4),
+            "reserve_policy_penalty_ore": round(radj,4),
+            "preferred_max_excess_penalty_ore": round(uadj,4),
+            "continuation_policy_adjustment_ore": round(cadj,4),
+            "policy_adjustment_ore": round(adj,4),
+            "objective_cost_ore": round(res["interval_cost_ore"]+adj,4),
+            "reason": reason,
+            "flow_breakdown_kw": {k: round(v,4) for k,v in flow.items()},
+        })
+
     baseline, diag = _baseline_cost(rows,cfg), horizon_diagnostics(cfg)
     term_soc = states[best]/cap*100
-    ref, risk, target = float(continuation.get("reference_price_ore_kwh") or 0), float(continuation.get("risk_premium_ore_kwh") or 0), float(continuation.get("target_kwh") or 0)
+    ref = float(continuation.get("reference_price_ore_kwh") or 0)
+    risk = float(continuation.get("risk_premium_ore_kwh") or 0)
+    target = float(continuation.get("target_kwh") or 0)
     bk = cap*boundary_soc/100 if boundary_soc is not None else states[best]
-    opt_asset = base_asset = 0.
+    opt_asset = base_asset = 0.0
     if continuation.get("enabled"):
         opt_asset = bk*ref + min(bk,target)*risk
         base_asset = initial*ref + min(initial,target)*risk
-    cash_save = baseline-cash; econ_save = cash_save+opt_asset-base_asset
+    cash_save = baseline-cash
+    econ_save = cash_save+opt_asset-base_asset
+
+    critical_pct = min(max(hmin, float(o.get("reserve_critical_soc_pct",10.0))), max(hmin,pmin))
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(), "planner": PLANNER_NAME, "mode":"shadow_read_only",
-        "interval_minutes":15, "horizon_hours":len(rows)//4, "initial_soc_pct":round(soc,2), "horizon_diagnostics":diag,
-        "constraints":{"battery_capacity_kwh":cap,"hard_min_soc_pct":hmin,"hard_max_soc_pct":hmax,
-            "preferred_min_soc_pct":pmin,"preferred_max_soc_pct":pmax,"normal_reserve_soc_pct":normal,
-            "high_uncertainty_reserve_soc_pct":high,"reserve_uncertainty_full_scale_kw":float(o.get("reserve_uncertainty_full_scale_kw",3)),
-            "reserve_shortfall_penalty_ore_per_kwh_hour":reserve_penalty_hour,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "planner": PLANNER_NAME,
+        "mode":"shadow_read_only",
+        "interval_minutes":15,
+        "horizon_hours":len(rows)//4,
+        "initial_soc_pct":round(soc,2),
+        "horizon_diagnostics":diag,
+        "constraints":{
+            "battery_capacity_kwh":cap,
+            "hard_min_soc_pct":hmin,
+            "hard_max_soc_pct":hmax,
+            "preferred_min_soc_pct":pmin,
+            "preferred_max_soc_pct":pmax,
+            "normal_reserve_soc_pct":normal,
+            "high_uncertainty_reserve_soc_pct":high,
+            "reserve_uncertainty_full_scale_kw":float(o.get("reserve_uncertainty_full_scale_kw",3)),
+            "reserve_penalty_mode":"piecewise_marginal",
+            "reserve_critical_soc_pct":critical_pct,
+            "reserve_critical_penalty_ore_per_kwh_hour":float(o.get("reserve_critical_penalty_ore_per_kwh_hour",300)),
+            "reserve_preferred_penalty_ore_per_kwh_hour":float(o.get("reserve_preferred_penalty_ore_per_kwh_hour",100)),
+            "reserve_target_penalty_ore_per_kwh_hour":float(o.get("reserve_target_penalty_ore_per_kwh_hour",25)),
+            "preferred_max_excess_penalty_ore_per_kwh_hour":excess_rate,
             "reserve_penalty_interval_hours":DT_HOURS,
-            "battery_max_charge_kw":cmax,"battery_max_discharge_kw":dmax,
+            "battery_max_charge_kw":cmax,
+            "battery_max_discharge_kw":dmax,
             "physical_grid_import_limit_kw":float(o.get("physical_grid_import_limit_kw",13.8)),
-            "grid_export_limit_kw":float(o.get("grid_export_limit_kw",10)),"charge_efficiency":ec,"discharge_efficiency":ed,
-            "soc_grid_requested_step_kwh":reqstep,"soc_grid_effective_max_step_kwh":round(effstep,6),
-            "soc_grid_state_count":len(states),"soc_grid_includes_hard_boundaries":True,"soc_grid_includes_initial_soc":True,
-            "terminal_soc_tolerance_pct":termtol},
-        "objective":{"energy_cost_on_published_prices_only":True,"battery_degradation_cost":True,
-            "dynamic_uncertainty_reserve":True,"time_calibrated_reserve_shortfall_penalty":True,
+            "grid_export_limit_kw":float(o.get("grid_export_limit_kw",10)),
+            "charge_efficiency":ec,
+            "discharge_efficiency":ed,
+            "soc_grid_requested_step_kwh":reqstep,
+            "soc_grid_effective_max_step_kwh":round(effstep,6),
+            "soc_grid_state_count":len(states),
+            "soc_grid_includes_hard_boundaries":True,
+            "soc_grid_includes_initial_soc":True,
+            "terminal_soc_tolerance_pct":termtol,
+        },
+        "objective":{
+            "energy_cost_on_published_prices_only":True,
+            "battery_degradation_cost":True,
+            "dynamic_uncertainty_reserve":True,
+            "time_calibrated_reserve_shortfall_penalty":True,
+            "piecewise_marginal_reserve_penalty":True,
             "fair_terminal_soc_constraint_when_fully_priced":True,
             "battery_export_arbitrage":True,
             "minimum_net_discretionary_shift_margin_ore_kwh":float(((cfg.get("policy") or {}).get("economics") or {}).get("minimum_arbitrage_margin_ore_kwh",20)),
-            "discretionary_self_consumption_hurdle":True,"physical_limit_discharge_exempt_from_margin":True,
-            "grid_import_soft_target":False,"variable_price_horizon":True,"unknown_price_grid_charging":False,
-            "unknown_price_battery_export":False,"continuation_value_from_physical_forecast":True,"component_forecasts_included":True},
-        "continuation":{"enabled":bool(continuation.get("enabled")),
+            "discretionary_self_consumption_hurdle":True,
+            "physical_limit_discharge_exempt_from_margin":True,
+            "grid_import_soft_target":False,
+            "variable_price_horizon":True,
+            "unknown_price_grid_charging":False,
+            "unknown_price_battery_export":False,
+            "continuation_value_from_physical_forecast":True,
+            "component_forecasts_included":True,
+        },
+        "continuation":{
+            "enabled":bool(continuation.get("enabled")),
             "price_boundary_soc_pct":round(boundary_soc,2) if boundary_soc is not None else None,
             "target_soc_pct":round(float(continuation["target_soc_pct"]),2) if continuation.get("target_soc_pct") is not None else None,
             "value_ore_per_kwh":round(float(continuation["value_ore_per_kwh"]),2) if continuation.get("value_ore_per_kwh") is not None else None,
@@ -385,16 +497,33 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             "risk_premium_ore_kwh":round(float(continuation.get("risk_premium_ore_kwh") or 0),2),
             "unknown_net_deficit_kwh":round(float(continuation.get("unknown_net_deficit_kwh") or 0),3),
             "unknown_peak_support_kwh":round(float(continuation.get("unknown_peak_support_kwh") or 0),3),
-            "energy_coverage_fraction":round(float(continuation.get("coverage_fraction") or 0),3)},
-        "summary":{"objective_cost_ore":round(obj,2),"expected_cash_cost_ore":round(cash,2),
-            "baseline_cash_cost_ore":round(baseline,2),"expected_cash_saving_ore":round(cash_save,2),
-            "expected_cash_saving_sek":round(cash_save/100,2),"optimized_continuation_asset_value_ore":round(opt_asset,2),
-            "baseline_continuation_asset_value_ore":round(base_asset,2),"expected_saving_ore":round(econ_save,2),
-            "expected_saving_sek":round(econ_save/100,2),"expected_saving_scope":"published_prices_plus_continuation_asset_value",
+            "energy_coverage_fraction":round(float(continuation.get("coverage_fraction") or 0),3),
+        },
+        "summary":{
+            "objective_cost_ore":round(obj,2),
+            "expected_cash_cost_ore":round(cash,2),
+            "baseline_cash_cost_ore":round(baseline,2),
+            "expected_cash_saving_ore":round(cash_save,2),
+            "expected_cash_saving_sek":round(cash_save/100,2),
+            "optimized_continuation_asset_value_ore":round(opt_asset,2),
+            "baseline_continuation_asset_value_ore":round(base_asset,2),
+            "expected_saving_ore":round(econ_save,2),
+            "expected_saving_sek":round(econ_save/100,2),
+            "expected_saving_scope":"published_prices_plus_continuation_asset_value",
             "cash_cost_scope":"published_price_intervals_plus_battery_degradation",
-            "priced_horizon_hours":diag["known_price_horizon_hours"],"unpriced_horizon_hours":diag["unknown_price_horizon_hours"],
-            "terminal_soc_pct":round(term_soc,2),"terminal_soc_delta_pct":round(term_soc-soc,2),
-            "terminal_soc_constraint_applied":term_applied,"battery_export_kwh":round(bexp,3),
-            "discretionary_discharge_kwh":round(ddis,3),"discretionary_shift_hurdle_cost_ore":round(hurdle,2),
-            "arbitrage_hurdle_cost_ore":round(hurdle,2),"policy_adjustment_ore":round(padj,2)},
-        "rows":out}
+            "priced_horizon_hours":diag["known_price_horizon_hours"],
+            "unpriced_horizon_hours":diag["unknown_price_horizon_hours"],
+            "terminal_soc_pct":round(term_soc,2),
+            "terminal_soc_delta_pct":round(term_soc-soc,2),
+            "terminal_soc_constraint_applied":term_applied,
+            "battery_export_kwh":round(bexp,3),
+            "discretionary_discharge_kwh":round(ddis,3),
+            "discretionary_shift_hurdle_cost_ore":round(hurdle,2),
+            "arbitrage_hurdle_cost_ore":round(hurdle,2),
+            "reserve_policy_penalty_ore":round(reserve_padj,2),
+            "preferred_max_excess_penalty_ore":round(upper_padj,2),
+            "continuation_policy_adjustment_ore":round(continuation_padj,2),
+            "policy_adjustment_ore":round(padj,2),
+        },
+        "rows":out,
+    }
