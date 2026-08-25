@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.47"
+RUNTIME_BUILD = "1.0.48"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -86,6 +86,13 @@ def load_config() -> dict[str, Any]:
             options.get("optimizer_reserve_penalty_ore_per_kwh", 100.0),
         )
     )
+    target_reserve_raw = options.get("optimizer_reserve_target_penalty_ore_per_kwh_hour")
+    # v1.0.47 introduced 25.0 as the default for the 15%-to-reserve zone.
+    # Migrate that untouched default to 10.0, while preserving any other explicit value.
+    if target_reserve_raw is None or abs(float(target_reserve_raw) - 25.0) < 1e-9:
+        reserve_target_penalty = 10.0
+    else:
+        reserve_target_penalty = float(target_reserve_raw)
 
     return {
         "runtime_build": RUNTIME_BUILD,
@@ -119,7 +126,7 @@ def load_config() -> dict[str, Any]:
         },
         "optimizer": {
             "mode": "shadow_read_only",
-            "planner": "deterministic_battery_dp_v3_4",
+            "planner": "deterministic_battery_dp_v3_5",
             "battery_max_charge_kw": float(options.get("optimizer_battery_max_charge_kw", 8.0)),
             "battery_max_discharge_kw": float(options.get("optimizer_battery_max_discharge_kw", 8.0)),
             "battery_charge_efficiency": float(options.get("optimizer_battery_charge_efficiency", 0.95)),
@@ -131,7 +138,7 @@ def load_config() -> dict[str, Any]:
             "reserve_critical_soc_pct": float(options.get("optimizer_reserve_critical_soc_pct", 10.0)),
             "reserve_critical_penalty_ore_per_kwh_hour": float(options.get("optimizer_reserve_critical_penalty_ore_per_kwh_hour", legacy_reserve_penalty * 3.0)),
             "reserve_preferred_penalty_ore_per_kwh_hour": float(options.get("optimizer_reserve_preferred_penalty_ore_per_kwh_hour", legacy_reserve_penalty)),
-            "reserve_target_penalty_ore_per_kwh_hour": float(options.get("optimizer_reserve_target_penalty_ore_per_kwh_hour", legacy_reserve_penalty * 0.25)),
+            "reserve_target_penalty_ore_per_kwh_hour": reserve_target_penalty,
             "preferred_max_excess_penalty_ore_per_kwh_hour": float(options.get("optimizer_preferred_max_excess_penalty_ore_per_kwh_hour", legacy_reserve_penalty * 0.02)),
             "reserve_uncertainty_full_scale_kw": float(options.get("optimizer_reserve_uncertainty_full_scale_kw", 3.0)),
             "terminal_soc_tolerance_pct": float(options.get("optimizer_terminal_soc_tolerance_pct", 3.0)),
