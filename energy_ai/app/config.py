@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.48"
+RUNTIME_BUILD = "1.0.52"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -66,6 +66,19 @@ def _component_json(options: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
 
+def _int_list(raw: Any, default: list[int]) -> list[int]:
+    if raw in (None, ""):
+        return list(default)
+    if isinstance(raw, list):
+        values = raw
+    else:
+        values = [x.strip() for x in str(raw).split(",") if x.strip()]
+    try:
+        return sorted(set(int(x) for x in values))
+    except Exception:
+        return list(default)
+
+
 def load_config() -> dict[str, Any]:
     options = {}
     if OPTIONS_PATH.exists():
@@ -87,8 +100,6 @@ def load_config() -> dict[str, Any]:
         )
     )
     target_reserve_raw = options.get("optimizer_reserve_target_penalty_ore_per_kwh_hour")
-    # v1.0.47 introduced 25.0 as the default for the 15%-to-reserve zone.
-    # Migrate that untouched default to 10.0, while preserving any other explicit value.
     if target_reserve_raw is None or abs(float(target_reserve_raw) - 25.0) < 1e-9:
         reserve_target_penalty = 10.0
     else:
@@ -127,6 +138,7 @@ def load_config() -> dict[str, Any]:
         "optimizer": {
             "mode": "shadow_read_only",
             "planner": "deterministic_battery_dp_v3_5",
+            "tariff_capable_planner": "tariff_aware_battery_milp_v1",
             "battery_max_charge_kw": float(options.get("optimizer_battery_max_charge_kw", 8.0)),
             "battery_max_discharge_kw": float(options.get("optimizer_battery_max_discharge_kw", 8.0)),
             "battery_charge_efficiency": float(options.get("optimizer_battery_charge_efficiency", 0.95)),
@@ -147,7 +159,32 @@ def load_config() -> dict[str, Any]:
             "unknown_price_risk_premium_ore_kwh": float(options.get("optimizer_unknown_price_risk_premium_ore_kwh", 40.0)),
             "unknown_price_default_continuation_value_ore_kwh": float(options.get("optimizer_unknown_price_default_continuation_value_ore_kwh", 150.0)),
         },
-        "tariffs": {"enabled": False, "rules": []},
+        "tariffs": {
+            "enabled": bool(options.get("tariff_enabled", False)),
+            "consumption_demand": {
+                "enabled": bool(options.get("tariff_consumption_enabled", False)),
+                "kind": "import_top3_mean",
+                "rate_sek_per_kw": float(options.get("tariff_consumption_rate_sek_per_kw", 105.0)),
+                "start_hour": int(options.get("tariff_consumption_start_hour", 7)),
+                "end_hour": int(options.get("tariff_consumption_end_hour", 19)),
+                "active_months": _int_list(options.get("tariff_consumption_active_months", "1,2,11,12"), [1,2,11,12]),
+                "day_rule": str(options.get("tariff_consumption_day_rule", "workdays")),
+                "top_n": 3,
+                "measurement": "clock_hour_average_import_kw",
+                "source_status": "user_configured",
+            },
+            "production_demand": {
+                "enabled": bool(options.get("tariff_production_enabled", False)),
+                "kind": "export_max_hour",
+                "rate_sek_per_kw": float(options.get("tariff_production_rate_sek_per_kw", 10.0)),
+                "start_hour": int(options.get("tariff_production_start_hour", 8)),
+                "end_hour": int(options.get("tariff_production_end_hour", 16)),
+                "active_months": _int_list(options.get("tariff_production_active_months", "4,5,6,7,8"), [4,5,6,7,8]),
+                "day_rule": str(options.get("tariff_production_day_rule", "weekends_holidays_midsummer_eve")),
+                "measurement": "clock_hour_average_export_kw",
+                "source_status": "preliminary_default_requires_verification_before_enable",
+            },
+        },
         "forecast": {
             "interval_minutes": 15,
             "horizon_hours": 36,
