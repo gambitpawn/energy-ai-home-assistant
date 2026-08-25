@@ -7,8 +7,15 @@ from fastapi import HTTPException, Query
 from . import main as core
 from .monthly_replay import ENGINE_NAME as MONTHLY_ENGINE_NAME, replay_status, run_month_replay, run_winter_replay
 from .tariff_scenarios import DEFAULT_TEMPLATES, ENGINE_NAME, run_edge_cases, run_live_scenario
+from .tariff_validation import (
+    ENGINE_NAME as VALIDATION_ENGINE_NAME,
+    combined_live_test,
+    disabled_tariff_regression,
+    minimum_feasible_import_cap,
+    production_month_replay,
+)
 
-RUNTIME_BUILD = "1.0.50"
+RUNTIME_BUILD = "1.0.51"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 core.app.version = RUNTIME_BUILD
@@ -46,6 +53,7 @@ async def tariff_test_config():
         "runtime_build": RUNTIME_BUILD,
         "engine": ENGINE_NAME,
         "monthly_replay_engine": MONTHLY_ENGINE_NAME,
+        "validation_engine": VALIDATION_ENGINE_NAME,
         "test_only": True,
         "base_planner_unchanged": (core.cfg.get("optimizer") or {}).get("planner"),
         "templates": DEFAULT_TEMPLATES,
@@ -54,6 +62,7 @@ async def tariff_test_config():
             "production": "10 SEK/kW preliminary test assumption; max clock-hour export; prior rule itself remains unverified.",
             "force_window": "When true, ignores month/day eligibility but keeps the tariff clock-hour window. Useful for counterfactual testing on today's forecast.",
             "monthly_replay": "Full-month perfect-hindsight benchmark. It does not impose a 0 kW target unless running the explicit fixed-cap benchmark.",
+            "disabled_contract": "No tariffs, or tariffs explicitly disabled, must leave deterministic_battery_dp_v3_5 output unchanged.",
         },
     }
 
@@ -92,6 +101,24 @@ async def tariff_test_edge_cases():
         raise HTTPException(500, f"Tariff edge-case tests failed: {exc!r}")
 
 
+@app.get("/optimizer/tariff-test/combined", tags=["tariff-test"])
+async def tariff_test_combined(
+    initial_soc_pct: float | None = Query(None, ge=5.0, le=100.0),
+):
+    try:
+        return await asyncio.to_thread(combined_live_test, core.cfg, initial_soc_pct)
+    except Exception as exc:
+        raise HTTPException(500, f"Combined tariff test failed: {exc!r}")
+
+
+@app.get("/optimizer/tariff-test/regression-disabled", tags=["tariff-test"])
+async def tariff_test_regression_disabled():
+    try:
+        return await asyncio.to_thread(disabled_tariff_regression, core.cfg)
+    except Exception as exc:
+        raise HTTPException(500, f"Disabled-tariff regression test failed: {exc!r}")
+
+
 @app.get("/optimizer/tariff-replay/status", tags=["tariff-replay"])
 async def tariff_replay_status():
     try:
@@ -127,3 +154,45 @@ async def tariff_replay_winter(
         raise
     except Exception as exc:
         raise HTTPException(500, f"Winter tariff replay failed: {exc!r}")
+
+
+@app.get("/optimizer/tariff-replay/min-feasible", tags=["tariff-replay"])
+async def tariff_replay_min_feasible(
+    month: str = Query("2026-01", pattern=r"^\d{4}-\d{2}$"),
+    refresh_market: bool = Query(False),
+    initial_soc_pct: float = Query(50.0, ge=5.0, le=100.0),
+    precision_kw: float = Query(0.01, ge=0.001, le=0.25),
+    max_cap_kw: float = Query(2.0, ge=0.01, le=13.8),
+):
+    try:
+        return await minimum_feasible_import_cap(
+            core.cfg,
+            month,
+            refresh_market=refresh_market,
+            initial_soc_pct=initial_soc_pct,
+            precision_kw=precision_kw,
+            max_cap_kw=max_cap_kw,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Minimum-feasible tariff replay failed: {exc!r}")
+
+
+@app.get("/optimizer/tariff-replay/production", tags=["tariff-replay"])
+async def tariff_replay_production(
+    month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    refresh_market: bool = Query(False),
+    initial_soc_pct: float = Query(50.0, ge=5.0, le=100.0),
+):
+    try:
+        return await production_month_replay(
+            core.cfg,
+            month,
+            refresh_market=refresh_market,
+            initial_soc_pct=initial_soc_pct,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Production tariff monthly replay failed: {exc!r}")
