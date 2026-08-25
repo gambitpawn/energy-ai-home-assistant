@@ -6,6 +6,7 @@ from fastapi import HTTPException, Query
 
 from . import main as core
 from .monthly_replay import ENGINE_NAME as MONTHLY_ENGINE_NAME, replay_status, run_month_replay, run_winter_replay
+from .tariff_live import PLANNER_NAME as LIVE_TARIFF_PLANNER_NAME, active_tariff_names, build_shadow_plan, tariff_state
 from .tariff_scenarios import DEFAULT_TEMPLATES, ENGINE_NAME, run_edge_cases, run_live_scenario
 from .tariff_validation import (
     ENGINE_NAME as VALIDATION_ENGINE_NAME,
@@ -15,9 +16,10 @@ from .tariff_validation import (
     production_month_replay,
 )
 
-RUNTIME_BUILD = "1.0.51"
+RUNTIME_BUILD = "1.0.52"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
+core.build_plan = build_shadow_plan
 core.app.version = RUNTIME_BUILD
 app = core.app
 
@@ -54,17 +56,29 @@ async def tariff_test_config():
         "engine": ENGINE_NAME,
         "monthly_replay_engine": MONTHLY_ENGINE_NAME,
         "validation_engine": VALIDATION_ENGINE_NAME,
+        "live_tariff_planner": LIVE_TARIFF_PLANNER_NAME,
         "test_only": True,
         "base_planner_unchanged": (core.cfg.get("optimizer") or {}).get("planner"),
+        "configured_tariffs": core.cfg.get("tariffs") or {},
+        "currently_active_tariff_names": active_tariff_names(core.cfg),
         "templates": DEFAULT_TEMPLATES,
         "notes": {
             "consumption": "105 SEK/kW; mean of top three clock-hour import values; current requested test window 07-19.",
             "production": "10 SEK/kW preliminary test assumption; max clock-hour export; prior rule itself remains unverified.",
             "force_window": "When true, ignores month/day eligibility but keeps the tariff clock-hour window. Useful for counterfactual testing on today's forecast.",
             "monthly_replay": "Full-month perfect-hindsight benchmark. It does not impose a 0 kW target unless running the explicit fixed-cap benchmark.",
-            "disabled_contract": "No tariffs, or tariffs explicitly disabled, must leave deterministic_battery_dp_v3_5 output unchanged.",
+            "disabled_contract": "No tariffs, or tariffs explicitly disabled, use deterministic_battery_dp_v3_5 unchanged.",
+            "live_tariff_horizon": "Tariff-aware economic actions use contiguous published spot-price intervals; the physical 36h tail remains represented through v3.5 continuation value.",
         },
     }
+
+
+@app.get("/optimizer/tariff-state", tags=["tariff-live"])
+async def optimizer_tariff_state():
+    try:
+        return await asyncio.to_thread(tariff_state, core.cfg)
+    except Exception as exc:
+        raise HTTPException(500, f"Tariff state failed: {exc!r}")
 
 
 @app.get("/optimizer/tariff-test/consumption", tags=["tariff-test"])
