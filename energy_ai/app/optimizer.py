@@ -6,7 +6,7 @@ from statistics import median
 from typing import Any
 from .db import DB_PATH
 
-PLANNER_NAME = "deterministic_battery_dp_v3_2"
+PLANNER_NAME = "deterministic_battery_dp_v3_3"
 DT_HOURS = 0.25
 
 
@@ -270,7 +270,7 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
     cmax, dmax = float(o.get("battery_max_charge_kw", 8)), float(o.get("battery_max_discharge_kw", 8))
     ec, ed = float(o.get("battery_charge_efficiency", .95)), float(o.get("battery_discharge_efficiency", .95))
     reqstep = float(o.get("soc_grid_step_kwh", .5))
-    reserve_penalty = float(o.get("reserve_penalty_ore_per_kwh", 100))
+    reserve_penalty_hour = float(o.get("reserve_shortfall_penalty_ore_per_kwh_hour", 100))
     termtol = float(o.get("terminal_soc_tolerance_pct", 3))
     termtie = float(o.get("terminal_soc_tiebreak_ore_per_kwh", 5))
     soc = _latest_soc_pct()
@@ -294,9 +294,12 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
                 res = _interval_result(row, a, cfg)
                 if not res["feasible"]: continue
                 adj = 0.0
-                if e1 < rk: adj += (rk-e1)*reserve_penalty
-                if e1 < pmink: adj += (pmink-e1)*reserve_penalty*.10
-                if e1 > pmaxk: adj += (e1-pmaxk)*reserve_penalty*.02
+                # SOC policy penalties are expressed per kWh shortfall (or excess)
+                # per hour. Multiplying by the 15-minute interval prevents the same
+                # shortfall from being charged four times too strongly each hour.
+                if e1 < rk: adj += (rk-e1)*reserve_penalty_hour*DT_HOURS
+                if e1 < pmink: adj += (pmink-e1)*reserve_penalty_hour*.10*DT_HOURS
+                if e1 > pmaxk: adj += (e1-pmaxk)*reserve_penalty_hour*.02*DT_HOURS
                 if boundary is not None and t == boundary:
                     target = float(continuation.get("target_kwh") or 0)
                     ref = float(continuation.get("reference_price_ore_kwh") or 0)
@@ -358,6 +361,8 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
         "constraints":{"battery_capacity_kwh":cap,"hard_min_soc_pct":hmin,"hard_max_soc_pct":hmax,
             "preferred_min_soc_pct":pmin,"preferred_max_soc_pct":pmax,"normal_reserve_soc_pct":normal,
             "high_uncertainty_reserve_soc_pct":high,"reserve_uncertainty_full_scale_kw":float(o.get("reserve_uncertainty_full_scale_kw",3)),
+            "reserve_shortfall_penalty_ore_per_kwh_hour":reserve_penalty_hour,
+            "reserve_penalty_interval_hours":DT_HOURS,
             "battery_max_charge_kw":cmax,"battery_max_discharge_kw":dmax,
             "physical_grid_import_limit_kw":float(o.get("physical_grid_import_limit_kw",13.8)),
             "grid_export_limit_kw":float(o.get("grid_export_limit_kw",10)),"charge_efficiency":ec,"discharge_efficiency":ed,
@@ -365,7 +370,8 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
             "soc_grid_state_count":len(states),"soc_grid_includes_hard_boundaries":True,"soc_grid_includes_initial_soc":True,
             "terminal_soc_tolerance_pct":termtol},
         "objective":{"energy_cost_on_published_prices_only":True,"battery_degradation_cost":True,
-            "dynamic_uncertainty_reserve":True,"fair_terminal_soc_constraint_when_fully_priced":True,
+            "dynamic_uncertainty_reserve":True,"time_calibrated_reserve_shortfall_penalty":True,
+            "fair_terminal_soc_constraint_when_fully_priced":True,
             "battery_export_arbitrage":True,
             "minimum_net_discretionary_shift_margin_ore_kwh":float(((cfg.get("policy") or {}).get("economics") or {}).get("minimum_arbitrage_margin_ore_kwh",20)),
             "discretionary_self_consumption_hurdle":True,"physical_limit_discharge_exempt_from_margin":True,
