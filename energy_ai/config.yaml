@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.46"
+version: "1.0.47"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, deterministic shadow planning, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -75,7 +75,11 @@ options:
   optimizer_physical_grid_import_limit_kw: 13.8
   optimizer_grid_export_limit_kw: 10.0
   optimizer_soc_grid_step_kwh: 0.5
-  optimizer_reserve_shortfall_penalty_ore_per_kwh_hour: 100.0
+  optimizer_reserve_critical_soc_pct: 10.0
+  optimizer_reserve_critical_penalty_ore_per_kwh_hour: 300.0
+  optimizer_reserve_preferred_penalty_ore_per_kwh_hour: 100.0
+  optimizer_reserve_target_penalty_ore_per_kwh_hour: 25.0
+  optimizer_preferred_max_excess_penalty_ore_per_kwh_hour: 2.0
   optimizer_reserve_uncertainty_full_scale_kw: 3.0
   optimizer_terminal_soc_tolerance_pct: 3.0
   optimizer_terminal_soc_tiebreak_ore_per_kwh: 5.0
@@ -140,7 +144,11 @@ schema:
   optimizer_physical_grid_import_limit_kw: "float(0,30)"
   optimizer_grid_export_limit_kw: "float(0,30)"
   optimizer_soc_grid_step_kwh: "float(0.1,2)"
-  optimizer_reserve_shortfall_penalty_ore_per_kwh_hour: "float(0,1000)"
+  optimizer_reserve_critical_soc_pct: "float(5,30)"
+  optimizer_reserve_critical_penalty_ore_per_kwh_hour: "float(0,2000)"
+  optimizer_reserve_preferred_penalty_ore_per_kwh_hour: "float(0,1000)"
+  optimizer_reserve_target_penalty_ore_per_kwh_hour: "float(0,1000)"
+  optimizer_preferred_max_excess_penalty_ore_per_kwh_hour: "float(0,500)"
   optimizer_reserve_uncertainty_full_scale_kw: "float(0.1,20)"
   optimizer_terminal_soc_tolerance_pct: "float(0,20)"
   optimizer_terminal_soc_tiebreak_ore_per_kwh: "float(0,500)"
