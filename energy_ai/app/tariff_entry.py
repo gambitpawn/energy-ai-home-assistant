@@ -7,11 +7,11 @@ from fastapi import HTTPException, Query
 from . import main as core
 from .monthly_replay import ENGINE_NAME as MONTHLY_ENGINE_NAME, replay_status, run_month_replay, run_winter_replay
 from .tariff_live import PLANNER_NAME as LIVE_TARIFF_PLANNER_NAME, active_tariff_names, build_shadow_plan, tariff_state
+from .tariff_regression import disabled_tariff_wrapper_regression
 from .tariff_scenarios import DEFAULT_TEMPLATES, ENGINE_NAME, run_edge_cases, run_live_scenario
 from .tariff_validation import (
     ENGINE_NAME as VALIDATION_ENGINE_NAME,
     combined_live_test,
-    disabled_tariff_regression,
     minimum_feasible_import_cap,
     production_month_replay,
 )
@@ -128,7 +128,7 @@ async def tariff_test_combined(
 @app.get("/optimizer/tariff-test/regression-disabled", tags=["tariff-test"])
 async def tariff_test_regression_disabled():
     try:
-        return await asyncio.to_thread(disabled_tariff_regression, core.cfg)
+        return await asyncio.to_thread(disabled_tariff_wrapper_regression, core.cfg)
     except Exception as exc:
         raise HTTPException(500, f"Disabled-tariff regression test failed: {exc!r}")
 
