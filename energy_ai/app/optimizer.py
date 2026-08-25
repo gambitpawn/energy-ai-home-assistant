@@ -19,6 +19,11 @@ def _parse_ts(value: str) -> datetime:
     return d.astimezone(timezone.utc)
 
 
+def _canonical_ts(value: str) -> str:
+    """Normalize equivalent timestamps to one UTC ISO-8601 representation."""
+    return _parse_ts(value).replace(second=0, microsecond=0).isoformat()
+
+
 def _latest_soc_pct() -> float | None:
     with sqlite3.connect(DB_PATH) as c:
         row = c.execute("SELECT payload_json FROM raw_state ORDER BY id DESC LIMIT 1").fetchone()
@@ -40,11 +45,14 @@ def _latest_load_rows() -> dict[str, dict[str, Any]]:
         generated = row[0] if row else None
         if not generated:
             return {}
-        rows = c.execute("SELECT start_utc,payload_json FROM load_forecast_15m WHERE generated_at=? ORDER BY start_utc", (generated,)).fetchall()
+        rows = c.execute(
+            "SELECT start_utc,payload_json FROM load_forecast_15m WHERE generated_at=? ORDER BY start_utc",
+            (generated,),
+        ).fetchall()
     out = {}
     for start, payload in rows:
         try:
-            out[str(start)] = json.loads(payload)
+            out[_canonical_ts(str(start))] = json.loads(payload)
         except Exception:
             continue
     return out
@@ -56,27 +64,42 @@ def _latest_pv_rows() -> dict[str, dict[str, Any]]:
         generated = row[0] if row else None
         if not generated:
             return {}
-        rows = c.execute("SELECT start_utc,payload_json,forecast_kw,uncertainty_kw FROM pv_forecast_15m WHERE generated_at=? ORDER BY start_utc", (generated,)).fetchall()
+        rows = c.execute(
+            "SELECT start_utc,payload_json,forecast_kw,uncertainty_kw FROM pv_forecast_15m WHERE generated_at=? ORDER BY start_utc",
+            (generated,),
+        ).fetchall()
     out = {}
     for start, payload, forecast_kw, uncertainty_kw in rows:
-        item = {"pv_power_forecast_kw": float(forecast_kw), "pv_power_uncertainty_kw": float(uncertainty_kw)}
+        item = {
+            "pv_power_forecast_kw": float(forecast_kw),
+            "pv_power_uncertainty_kw": float(uncertainty_kw),
+        }
         if payload:
             try:
                 item.update(json.loads(payload))
             except Exception:
                 pass
-        out[str(start)] = item
+        try:
+            out[_canonical_ts(str(start))] = item
+        except Exception:
+            continue
     return out
 
 
 def _price_rows() -> dict[str, float]:
     with sqlite3.connect(DB_PATH) as c:
         rows = c.execute("SELECT start_utc,price_ore_kwh FROM price_15m ORDER BY start_utc").fetchall()
-    return {str(start): float(price) for start, price in rows}
+    out = {}
+    for start, price in rows:
+        try:
+            out[_canonical_ts(str(start))] = float(price)
+        except Exception:
+            continue
+    return out
 
 
 def _nearest_price(stamp: datetime, prices: dict[str, float]) -> float | None:
-    exact = prices.get(stamp.isoformat())
+    exact = prices.get(_canonical_ts(stamp.isoformat()))
     if exact is not None:
         return exact
     best = None
@@ -92,6 +115,24 @@ def _nearest_price(stamp: datetime, prices: dict[str, float]) -> float | None:
     return best
 
 
+def horizon_diagnostics(cfg: dict[str, Any]) -> dict[str, Any]:
+    load = _latest_load_rows()
+    pv = _latest_pv_rows()
+    prices = _price_rows()
+    matched = sorted(set(load).intersection(pv), key=_parse_ts)
+    return {
+        "load_intervals": len(load),
+        "pv_intervals": len(pv),
+        "price_intervals": len(prices),
+        "matched_load_pv_intervals": len(matched),
+        "first_load": min(load, key=_parse_ts) if load else None,
+        "first_pv": min(pv, key=_parse_ts) if pv else None,
+        "first_match": matched[0] if matched else None,
+        "requested_horizon_intervals": int((cfg.get("forecast") or {}).get("horizon_hours", 36)) * 4,
+        "timestamp_join": "normalized_utc_minute",
+    }
+
+
 def _build_horizon(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     load = _latest_load_rows()
     pv = _latest_pv_rows()
@@ -100,7 +141,8 @@ def _build_horizon(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     horizon_intervals = int((cfg.get("forecast") or {}).get("horizon_hours", 36)) * 4
     starts = starts[:horizon_intervals]
     if not starts:
-        raise RuntimeError("No overlapping load and PV forecast rows are available")
+        diag = horizon_diagnostics(cfg)
+        raise RuntimeError(f"No overlapping load and PV forecast rows are available after UTC normalization; diagnostics={diag}")
     fallback_price = sorted(prices.values())[len(prices) // 2] if prices else None
     rows = []
     for start in starts:
@@ -137,10 +179,8 @@ def _state_grid(min_kwh: float, max_kwh: float, step_kwh: float, initial_kwh: fl
 def _transition_action_kw(e0: float, e1: float, eta_charge: float, eta_discharge: float) -> float:
     delta = e1 - e0
     if delta > 0:
-        # Charging is negative AC power. Stored energy = AC charge * eta_charge.
         return -(delta / eta_charge) / DT_HOURS
     if delta < 0:
-        # Positive AC discharge. AC delivered = stored energy reduction * eta_discharge.
         return ((-delta) * eta_discharge) / DT_HOURS
     return 0.0
 
@@ -212,7 +252,6 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
     states = _state_grid(min_kwh, max_kwh, state_step, initial_kwh)
     initial_idx = min(range(len(states)), key=lambda i: abs(states[i] - initial_kwh))
 
-    # DP maps state index to total future cost. Backpointers are stored per interval.
     costs = {initial_idx: 0.0}
     parents: list[dict[int, tuple[int, float, dict[str, float], float]]] = []
     for row in rows:
@@ -232,7 +271,6 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
                 penalty = 0.0
                 if e1 < reserve_kwh:
                     penalty += (reserve_kwh - e1) * reserve_penalty
-                # Softly discourage sitting outside the preferred band without making it impossible.
                 if e1 < preferred_min_kwh:
                     penalty += (preferred_min_kwh - e1) * reserve_penalty * 0.10
                 if e1 > preferred_max_kwh:
@@ -246,7 +284,6 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
         costs = next_costs
         parents.append(back)
 
-    # Terminal value prefers ending near the initial SOC, preventing end-of-horizon battery dumping.
     best_idx = None
     best_cost = None
     for idx, c in costs.items():
@@ -298,6 +335,7 @@ def build_plan(cfg: dict[str, Any]) -> dict[str, Any]:
         "interval_minutes": 15,
         "horizon_hours": len(rows) // 4,
         "initial_soc_pct": round(soc, 2),
+        "horizon_diagnostics": horizon_diagnostics(cfg),
         "constraints": {
             "battery_capacity_kwh": capacity,
             "hard_min_soc_pct": hard_min_pct,
