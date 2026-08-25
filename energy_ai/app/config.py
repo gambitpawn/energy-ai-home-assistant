@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 OPTIONS_PATH = Path("/data/options.json")
-RUNTIME_BUILD = "1.0.41"
+RUNTIME_BUILD = "1.0.42"
 
 ENTITY_DEFAULTS = {
     "pv_power": "sensor.solinteg_inverter_pv_power_total",
@@ -111,7 +111,7 @@ def load_config() -> dict[str, Any]:
         },
         "optimizer": {
             "mode": "shadow_read_only",
-            "planner": "deterministic_battery_dp_v2",
+            "planner": "deterministic_battery_dp_v3",
             "battery_max_charge_kw": float(options.get("optimizer_battery_max_charge_kw", 8.0)),
             "battery_max_discharge_kw": float(options.get("optimizer_battery_max_discharge_kw", 8.0)),
             "battery_charge_efficiency": float(options.get("optimizer_battery_charge_efficiency", 0.95)),
@@ -124,6 +124,9 @@ def load_config() -> dict[str, Any]:
             "reserve_uncertainty_full_scale_kw": float(options.get("optimizer_reserve_uncertainty_full_scale_kw", 3.0)),
             "terminal_soc_tolerance_pct": float(options.get("optimizer_terminal_soc_tolerance_pct", 3.0)),
             "terminal_soc_tiebreak_ore_per_kwh": float(options.get("optimizer_terminal_soc_tiebreak_ore_per_kwh", 5.0)),
+            "unknown_price_energy_coverage_fraction": float(options.get("optimizer_unknown_price_energy_coverage_fraction", 0.35)),
+            "unknown_price_risk_premium_ore_kwh": float(options.get("optimizer_unknown_price_risk_premium_ore_kwh", 40.0)),
+            "unknown_price_default_continuation_value_ore_kwh": float(options.get("optimizer_unknown_price_default_continuation_value_ore_kwh", 150.0)),
         },
         "tariffs": {"enabled": False, "rules": []},
         "forecast": {
