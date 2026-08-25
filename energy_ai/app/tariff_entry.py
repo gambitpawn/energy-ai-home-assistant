@@ -6,6 +6,12 @@ from fastapi import HTTPException, Query
 
 from . import main as core
 from .monthly_replay import ENGINE_NAME as MONTHLY_ENGINE_NAME, replay_status, run_month_replay, run_winter_replay
+from .optimizer_evaluation import (
+    ENGINE_NAME as OPTIMIZER_EVALUATION_ENGINE_NAME,
+    evaluate_day as evaluate_optimizer_day,
+    evaluate_matured_optimizer_days,
+    evaluation_report as optimizer_evaluation_report,
+)
 from .tariff_live import PLANNER_NAME as LIVE_TARIFF_PLANNER_NAME, active_tariff_names, build_shadow_plan, tariff_state
 from .tariff_regression import disabled_tariff_wrapper_regression
 from .tariff_scenarios import DEFAULT_TEMPLATES, ENGINE_NAME, run_edge_cases, run_live_scenario
@@ -16,7 +22,7 @@ from .tariff_validation import (
     production_month_replay,
 )
 
-RUNTIME_BUILD = "1.0.52"
+RUNTIME_BUILD = "1.0.53"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 core.build_plan = build_shadow_plan
@@ -57,6 +63,7 @@ async def tariff_test_config():
         "monthly_replay_engine": MONTHLY_ENGINE_NAME,
         "validation_engine": VALIDATION_ENGINE_NAME,
         "live_tariff_planner": LIVE_TARIFF_PLANNER_NAME,
+        "optimizer_evaluation_engine": OPTIMIZER_EVALUATION_ENGINE_NAME,
         "test_only": True,
         "base_planner_unchanged": (core.cfg.get("optimizer") or {}).get("planner"),
         "configured_tariffs": core.cfg.get("tariffs") or {},
@@ -69,6 +76,7 @@ async def tariff_test_config():
             "monthly_replay": "Full-month perfect-hindsight benchmark. It does not impose a 0 kW target unless running the explicit fixed-cap benchmark.",
             "disabled_contract": "No tariffs, or tariffs explicitly disabled, use deterministic_battery_dp_v3_5 unchanged.",
             "live_tariff_horizon": "Tariff-aware economic actions use contiguous published spot-price intervals; the physical 36h tail remains represented through v3.5 continuation value.",
+            "optimizer_evaluation": "Replays the first receding-horizon shadow action against realized load/PV/prices with virtual SOC, then compares it with a same-terminal-SOC perfect-hindsight optimizer.",
         },
     }
 
@@ -79,6 +87,30 @@ async def optimizer_tariff_state():
         return await asyncio.to_thread(tariff_state, core.cfg)
     except Exception as exc:
         raise HTTPException(500, f"Tariff state failed: {exc!r}")
+
+
+@app.get("/optimizer/evaluation", tags=["optimizer-evaluation"])
+async def optimizer_evaluation(days: int = Query(30, ge=1, le=180)):
+    try:
+        return await asyncio.to_thread(optimizer_evaluation_report, days)
+    except Exception as exc:
+        raise HTTPException(500, f"Optimizer evaluation report failed: {exc!r}")
+
+
+@app.post("/optimizer/evaluation/evaluate-now", tags=["optimizer-evaluation"])
+async def optimizer_evaluation_now(lookback_days: int = Query(7, ge=1, le=90)):
+    try:
+        return await asyncio.to_thread(evaluate_matured_optimizer_days, core.cfg, lookback_days)
+    except Exception as exc:
+        raise HTTPException(500, f"Optimizer hindsight evaluation failed: {exc!r}")
+
+
+@app.get("/optimizer/evaluation/day", tags=["optimizer-evaluation"])
+async def optimizer_evaluation_day(local_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$")):
+    try:
+        return await asyncio.to_thread(evaluate_optimizer_day, core.cfg, local_date)
+    except Exception as exc:
+        raise HTTPException(500, f"Optimizer day evaluation failed: {exc!r}")
 
 
 @app.get("/optimizer/tariff-test/consumption", tags=["tariff-test"])
