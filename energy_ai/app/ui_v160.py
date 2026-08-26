@@ -32,7 +32,7 @@ function evConnectedState(raw,power){
   if(typeof raw==='boolean')return raw;
   const s=String(raw).trim().toLowerCase();
   if(['off','false','0','disconnected','not_connected','unplugged','frånkopplad'].includes(s))return false;
-  if(['on','true','1','connected','charging','ready','paused','waiting','ansluten','laddar'].includes(s))return true;
+  if(['on','true','1','connected','charging','ready','paused','waiting','ansluten','laddar','connected_charging','connected_requesting','connected_finished'].includes(s))return true;
   return null;
 }
 
@@ -95,6 +95,9 @@ def install_ui_v160(app: FastAPI, live_cache: Any) -> None:
             "ev_power_kw": values.get("ev_power_kw"),
             "ev_connected": values.get("ev_connected"),
             "ev_soc_pct": values.get("ev_soc_pct"),
+            "ev_target_soc_pct": values.get("ev_target_soc_pct"),
+            "ev_ready_by": values.get("ev_ready_by"),
+            "ev_charging_status": values.get("ev_charging_status"),
             "websocket_connected": bool(snap.get("connected")),
             "websocket_connected_at": snap.get("connected_at"),
             "websocket_last_event_at": snap.get("last_event_at"),
@@ -104,6 +107,7 @@ def install_ui_v160(app: FastAPI, live_cache: Any) -> None:
             "websocket_bootstrap_matched": snap.get("bootstrap_matched"),
             "transport": snap.get("transport"),
             "field_entities": snap.get("field_entities"),
+            "mapping_origin": snap.get("mapping_origin"),
             "configured_entities": snap.get("configured_entities"),
             "source_updated": snap.get("source_updated"),
             "served_at": snap.get("served_at"),
