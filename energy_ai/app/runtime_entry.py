@@ -17,8 +17,9 @@ from .ui_v160 import install_ui_v160
 from .ui_v161 import install_ui_v161
 from .ui_v161_fix import install_ui_v161_fix
 from .ui_v163 import install_ui_v163
+from .ui_v164 import install_ui_v164
 
-RUNTIME_BUILD = "1.0.63"
+RUNTIME_BUILD = "1.0.64"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
@@ -64,6 +65,7 @@ install_ui_v160(app, live_state_cache)
 install_ui_v161(app, core.cfg, core.collector.ha)
 install_ui_v161_fix(app)
 install_ui_v163(app, live_state_cache)
+install_ui_v164(app)
 
 
 @app.get(
