@@ -17,7 +17,7 @@ from .ui_v160 import install_ui_v160
 from .ui_v161 import install_ui_v161
 from .ui_v161_fix import install_ui_v161_fix
 
-RUNTIME_BUILD = "1.0.61"
+RUNTIME_BUILD = "1.0.62"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
