@@ -14,8 +14,9 @@ from .tariff_entry import app
 from .ui_v158 import install_ui_v158
 from .ui_v159 import install_ui_v159
 from .ui_v160 import install_ui_v160
+from .ui_v161 import install_ui_v161
 
-RUNTIME_BUILD = "1.0.60"
+RUNTIME_BUILD = "1.0.61"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
@@ -58,6 +59,7 @@ install_overview_extension(app)
 install_ui_v158(app, core.cfg)
 install_ui_v159(app, core.cfg)
 install_ui_v160(app, live_state_cache)
+install_ui_v161(app, core.cfg, core.collector.ha)
 
 
 @app.get(
