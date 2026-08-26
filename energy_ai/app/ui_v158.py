@@ -28,7 +28,7 @@ drawOverview=function(){
   }
 };
 
-// Evaluation 2.0 series. Actual = solid, forecast/plan = dashed, hindsight = dotted.
+// Evaluation 2.0 series.
 C.hindsight='#e6d36f';
 Object.assign(pick.eval,{
   forecastLoad:false,forecastPv:false,hindsightBattery:false,plannedSoc:false,hindsightSoc:false
@@ -58,19 +58,19 @@ function drawEval158(){
   const hAction=rr.map(r=>hm.get(Date.parse(r.start))?.action_kw??null);
   const hSoc=rr.map(r=>hm.get(Date.parse(r.start))?.soc_end_pct??null);
   lineChart($('evalChart'),[
-    {name:'Actual load',axis:'power',color:C.load,values:rr.map(r=>r.actual_load_kw),on:ps.load},
-    {name:'Forecast load',axis:'power',color:C.load,values:rr.map(r=>r.forecast_load_kw),on:ps.forecastLoad,dashed:true},
-    {name:'Actual PV',axis:'power',color:C.pv,values:rr.map(r=>r.actual_pv_kw),on:ps.pv},
-    {name:'Forecast PV',axis:'power',color:C.pv,values:rr.map(r=>r.forecast_pv_kw),on:ps.forecastPv,dashed:true},
-    {name:'Applied battery',axis:'power',color:C.battery,values:rr.map(r=>r.applied_action_kw),on:ps.battery},
-    {name:'Planned battery',axis:'power',color:C.battery,values:rr.map(r=>r.requested_action_kw),on:ps.plannedBattery,dashed:true},
-    {name:'Hindsight battery',axis:'power',color:C.hindsight,values:hAction,on:ps.hindsightBattery,dashed:true,width:1.8},
-    {name:'Spot price',axis:'price',color:C.price,values:rr.map(r=>r.price_ore_kwh),on:ps.price},
-    {name:'Virtual SOC',axis:'soc',color:C.soc,values:rr.map(r=>r.virtual_soc_end_pct),on:ps.soc},
-    {name:'Planned SOC',axis:'soc',color:C.soc,values:rr.map(r=>r.forecast_soc_end_pct),on:ps.plannedSoc,dashed:true},
-    {name:'Hindsight SOC',axis:'soc',color:C.hindsight,values:hSoc,on:ps.hindsightSoc,dashed:true,width:1.8},
-    {name:'Grid import',axis:'power',color:C.gridImport,values:rr.map(r=>r.grid_import_kw),on:ps.gridImport},
-    {name:'Grid export',axis:'power',color:C.gridExport,values:rr.map(r=>r.grid_export_kw==null?null:-Number(r.grid_export_kw)),on:ps.gridExport}
+    {label:'Actual load',kind:'actual',axis:'power',color:C.load,values:rr.map(r=>r.actual_load_kw),on:ps.load},
+    {label:'Forecast load',kind:'forecast',axis:'power',color:C.load,values:rr.map(r=>r.forecast_load_kw),on:ps.forecastLoad,dashed:true},
+    {label:'Actual PV',kind:'actual',axis:'power',color:C.pv,values:rr.map(r=>r.actual_pv_kw),on:ps.pv},
+    {label:'Forecast PV',kind:'forecast',axis:'power',color:C.pv,values:rr.map(r=>r.forecast_pv_kw),on:ps.forecastPv,dashed:true},
+    {label:'Applied battery',kind:'applied',axis:'power',color:C.battery,values:rr.map(r=>r.applied_action_kw),on:ps.battery},
+    {label:'Planned battery',kind:'plan',axis:'power',color:C.battery,values:rr.map(r=>r.requested_action_kw),on:ps.plannedBattery,dashed:true},
+    {label:'Hindsight battery',kind:'hindsight',axis:'power',color:C.hindsight,values:hAction,on:ps.hindsightBattery,dashed:true,width:1.8},
+    {label:'Spot price',kind:'actual',axis:'price',color:C.price,values:rr.map(r=>r.price_ore_kwh),on:ps.price},
+    {label:'Virtual SOC',kind:'replay',axis:'soc',color:C.soc,values:rr.map(r=>r.virtual_soc_end_pct),on:ps.soc},
+    {label:'Planned SOC',kind:'plan',axis:'soc',color:C.soc,values:rr.map(r=>r.forecast_soc_end_pct),on:ps.plannedSoc,dashed:true},
+    {label:'Hindsight SOC',kind:'hindsight',axis:'soc',color:C.hindsight,values:hSoc,on:ps.hindsightSoc,dashed:true,width:1.8},
+    {label:'Grid import',kind:'replay',axis:'power',color:C.gridImport,values:rr.map(r=>r.grid_import_kw),on:ps.gridImport},
+    {label:'Grid export',kind:'replay',axis:'power',color:C.gridExport,values:rr.map(r=>r.grid_export_kw==null?null:-Number(r.grid_export_kw)),on:ps.gridExport}
   ],rr.map(r=>r.start));
 }
 
