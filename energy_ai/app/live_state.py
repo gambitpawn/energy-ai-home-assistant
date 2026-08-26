@@ -41,10 +41,13 @@ class LiveStateCache:
         self.ha = ha
         entities = cfg.get("entities") or {}
         self.entity_to_field: dict[str, tuple[str, str | None]] = {}
+        self.field_to_entity: dict[str, str] = {}
         for output_field, (config_key, target_unit) in LIVE_FIELDS.items():
             entity_id = entities.get(config_key)
             if entity_id:
-                self.entity_to_field[str(entity_id)] = (output_field, target_unit)
+                entity_id = str(entity_id)
+                self.entity_to_field[entity_id] = (output_field, target_unit)
+                self.field_to_entity[output_field] = entity_id
         self.values: dict[str, Any] = {field: None for field in LIVE_FIELDS}
         self.source_updated: dict[str, str | None] = {field: None for field in LIVE_FIELDS}
         self.connected = False
@@ -52,10 +55,13 @@ class LiveStateCache:
         self.connected_at: str | None = None
         self.last_event_at: str | None = None
         self.last_error: str | None = None
+        self.bootstrap_at: str | None = None
+        self.bootstrap_matched = 0
         self.reconnects = 0
         self.running = False
 
     def seed(self, state: Any | None) -> None:
+        """Temporary fallback until the websocket get_states bootstrap completes."""
         if state is None:
             return
         for field in LIVE_FIELDS:
@@ -75,7 +81,10 @@ class LiveStateCache:
             "last_event_at": self.last_event_at,
             "last_error": self.last_error,
             "reconnects": self.reconnects,
+            "bootstrap_at": self.bootstrap_at,
+            "bootstrap_matched": self.bootstrap_matched,
             "configured_entities": sorted(self.entity_to_field),
+            "field_entities": dict(self.field_to_entity),
             "values": dict(self.values),
             "source_updated": dict(self.source_updated),
             "served_at": _now(),
@@ -95,7 +104,25 @@ class LiveStateCache:
         available = raw not in (None, "unknown", "unavailable", "")
         self.values[output_field] = _normalize_value(raw, attrs.get("unit_of_measurement"), target_unit) if available else None
         self.source_updated[output_field] = new_state.get("last_updated") or new_state.get("last_changed")
-        self.last_event_at = _now()
+
+    def _bootstrap_states(self, states: list[dict[str, Any]]) -> int:
+        matched = 0
+        seen: set[str] = set()
+        for state in states:
+            entity_id = str(state.get("entity_id") or "")
+            if entity_id not in self.entity_to_field:
+                continue
+            self._apply_new_state(entity_id, state)
+            matched += 1
+            seen.add(entity_id)
+        # A configured entity missing from get_states is not a valid live source.
+        for entity_id, (field, _target_unit) in self.entity_to_field.items():
+            if entity_id not in seen:
+                self.values[field] = None
+                self.source_updated[field] = None
+        self.bootstrap_at = _now()
+        self.bootstrap_matched = matched
+        return matched
 
     async def _subscribe_once(self) -> None:
         if not self.ha.token:
@@ -114,7 +141,18 @@ class LiveStateCache:
             auth = json.loads(await ws.recv())
             if auth.get("type") != "auth_ok":
                 raise RuntimeError(f"Home Assistant websocket authentication failed: {auth}")
-            await ws.send(json.dumps({"id": 1, "type": "subscribe_events", "event_type": "state_changed"}))
+
+            # Always bootstrap from Home Assistant's current state table before
+            # declaring the cache live. This prevents stale collector seed values
+            # from being presented as current simply because no state_changed event
+            # has happened since the add-on started.
+            await ws.send(json.dumps({"id": 1, "type": "get_states"}))
+            current = json.loads(await ws.recv())
+            if current.get("type") != "result" or not current.get("success") or not isinstance(current.get("result"), list):
+                raise RuntimeError(f"Could not bootstrap Home Assistant states: {current}")
+            self._bootstrap_states(current["result"])
+
+            await ws.send(json.dumps({"id": 2, "type": "subscribe_events", "event_type": "state_changed"}))
             result = json.loads(await ws.recv())
             if result.get("type") != "result" or not result.get("success"):
                 raise RuntimeError(f"Could not subscribe to Home Assistant state_changed: {result}")
@@ -130,6 +168,7 @@ class LiveStateCache:
                 entity_id = str(data.get("entity_id") or "")
                 if entity_id in self.entity_to_field:
                     self._apply_new_state(entity_id, data.get("new_state"))
+                    self.last_event_at = _now()
 
     async def run(self) -> None:
         self.running = True
