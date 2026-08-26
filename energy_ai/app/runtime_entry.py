@@ -11,6 +11,7 @@ from .overview_extension import install_overview_extension
 from .tariff_entry import app
 from .ui_v158 import install_ui_v158
 from .ui_v159 import install_ui_v159
+from .ui_v159_pvgrid import install_ui_v159_pvgrid
 
 RUNTIME_BUILD = "1.0.59"
 core.RUNTIME_VERSION = RUNTIME_BUILD
@@ -29,6 +30,7 @@ install_dashboard(app, core.cfg)
 install_overview_extension(app)
 install_ui_v158(app, core.cfg)
 install_ui_v159(app, core.cfg)
+install_ui_v159_pvgrid(app)
 
 
 @app.get(
