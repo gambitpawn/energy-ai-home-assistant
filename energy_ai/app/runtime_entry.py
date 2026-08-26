@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import HTTPException, Query
 
 from . import main as core
-from .app_comparison import compare_app_vs_planner
+from .app_comparison_v2 import compare_app_vs_planner
 from .dashboard import install_dashboard
 from .live_state import LiveStateCache
 from .optimizer_evaluation import evaluate_matured_optimizer_days
