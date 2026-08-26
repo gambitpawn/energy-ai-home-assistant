@@ -100,7 +100,11 @@ def install_ui_v160(app: FastAPI, live_cache: Any) -> None:
             "websocket_last_event_at": snap.get("last_event_at"),
             "websocket_error": snap.get("last_error"),
             "websocket_reconnects": snap.get("reconnects"),
+            "websocket_bootstrap_at": snap.get("bootstrap_at"),
+            "websocket_bootstrap_matched": snap.get("bootstrap_matched"),
             "transport": snap.get("transport"),
+            "field_entities": snap.get("field_entities"),
+            "configured_entities": snap.get("configured_entities"),
             "source_updated": snap.get("source_updated"),
             "served_at": snap.get("served_at"),
         })
