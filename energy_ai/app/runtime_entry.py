@@ -7,6 +7,7 @@ from fastapi import HTTPException, Query
 from . import main as core
 from .dashboard import install_dashboard
 from .optimizer_evaluation import evaluate_matured_optimizer_days
+from .overview_extension import install_overview_extension
 from .tariff_entry import app
 
 RUNTIME_BUILD = "1.0.56"
@@ -23,6 +24,7 @@ app.openapi_schema = None
 # Install the read-only optimizer evaluation UI. The middleware in dashboard.py
 # redirects the ingress root to /ui without replacing the existing API routes.
 install_dashboard(app, core.cfg)
+install_overview_extension(app)
 
 
 @app.get(
