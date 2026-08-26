@@ -17,9 +17,11 @@ from .ui_v158 import V158_EXTENSION
 V159_EXTENSION = r'''
 <style>
 .live-flow-card{margin:12px 0 0}.live-flow-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px}.live-flow-status{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:11px}.live-flow-status .lf-dot{width:7px;height:7px;border-radius:50%;background:var(--warn)}.live-flow-status.fresh .lf-dot{background:var(--good)}.live-flow-wrap{position:relative;min-height:270px}.live-flow-svg{width:100%;height:270px;display:block;overflow:visible}.lf-base{fill:none;stroke:#2d4051;stroke-width:5;stroke-linecap:round}.lf-active{fill:none;stroke-width:4;stroke-linecap:round;stroke-dasharray:3 12;opacity:.95;animation:lfDash var(--lf-speed,1.5s) linear infinite}.lf-active.reverse{animation-direction:reverse}.lf-active.idle{animation:none;stroke:#3a4c5d;stroke-dasharray:none;opacity:.45}.lf-node{fill:#172330;stroke:#314558;stroke-width:1.5}.lf-node-title{fill:#91a2b3;font-size:12px;text-anchor:middle}.lf-node-value{fill:#eef4f8;font-size:20px;font-weight:750;text-anchor:middle}.lf-node-sub{fill:#91a2b3;font-size:10px;text-anchor:middle}.lf-arrow{fill:#91a2b3;font-size:14px;font-weight:700;text-anchor:middle}.lf-pv{stroke:#ffbf5a}.lf-battery{stroke:#a78bfa}.lf-grid{stroke:#5ad5d5}.lf-ev{stroke:#ef9f63}.lf-note{color:var(--muted);font-size:10px;margin-top:-2px}.lf-off{opacity:.38}
+.dev-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.dev-card a{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);color:var(--text);text-decoration:none}.dev-card a:last-child{border-bottom:0}.dev-card a:hover{color:var(--accent)}.dev-path{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--muted);overflow-wrap:anywhere}.dev-arrow{color:var(--muted);font-size:12px}.dev-note{margin-bottom:12px}.dev-tab{opacity:.82}
 @keyframes lfDash{to{stroke-dashoffset:-30}}
 @media(prefers-reduced-motion:reduce){.lf-active{animation:none;stroke-dasharray:none}}
-@media(max-width:620px){.live-flow-svg{height:245px}.live-flow-wrap{min-height:245px}.lf-node-value{font-size:17px}.lf-node-title{font-size:11px}}
+@media(max-width:1000px){.dev-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:620px){.live-flow-svg{height:245px}.live-flow-wrap{min-height:245px}.lf-node-value{font-size:17px}.lf-node-title{font-size:11px}.dev-grid{grid-template-columns:1fr}}
 </style>
 <script>
 let liveFlowTimer=null;
@@ -78,7 +80,50 @@ function installLiveFlow(){
   if(liveFlowTimer)clearInterval(liveFlowTimer);liveFlowTimer=setInterval(()=>{if(document.querySelector('#overview.view.active'))loadLiveFlow()},15000);
 }
 
+function devLink(label,path,description=''){
+  return `<a href="${path}" target="_blank" rel="noopener"><span><strong>${label}</strong>${description?`<div class="dev-path">${description}</div>`:''}<div class="dev-path">${path}</div></span><span class="dev-arrow">↗</span></a>`;
+}
+
+function installDeveloperTab(){
+  const tabs=$('tabs');if(!tabs||$('developer'))return;
+  tabs.insertAdjacentHTML('beforeend','<button class="tab dev-tab" data-view="developer">Developer</button>');
+  const footer=document.querySelector('.footer');if(!footer)return;
+  const html=`<section id="developer" class="view">
+    <div class="notice dev-note"><strong>Temporary development tools.</strong> Direct links to API documentation, diagnostics and raw backend endpoints. This tab can be removed before the UI is treated as production-ready.</div>
+    <div class="dev-grid">
+      <div class="card dev-card"><h2>API & health</h2>
+        ${devLink('Swagger / API docs','docs','Interactive OpenAPI interface')}
+        ${devLink('OpenAPI JSON','openapi.json','Raw API schema')}
+        ${devLink('Health','health','Collector/runtime health')}
+        ${devLink('Configuration','config','Normalized runtime configuration')}
+        ${devLink('HA diagnostics','ha-diagnostics','Home Assistant API diagnostics')}
+      </div>
+      <div class="card dev-card"><h2>Optimizer & forecasts</h2>
+        ${devLink('Optimizer status','optimizer/status')}
+        ${devLink('Current optimizer plan','optimizer/plan')}
+        ${devLink('Optimizer history','optimizer/history')}
+        ${devLink('Load forecast','forecast/load')}
+        ${devLink('Load evaluation','forecast/load/evaluation')}
+        ${devLink('PV forecast','forecast/pv')}
+        ${devLink('PV evaluation','forecast/pv/evaluation')}
+        ${devLink('Prices','prices')}
+      </div>
+      <div class="card dev-card"><h2>Discovery & components</h2>
+        ${devLink('Entity discovery','discover','Human-readable HA entity discovery')}
+        ${devLink('Entity discovery JSON','discover.json','Raw discovery output')}
+        ${devLink('Load components','components')}
+        ${devLink('Flexible loads','flexible-loads','EV / sauna runtime state')}
+        ${devLink('Flexible-load discovery','discover/flexible')}
+        ${devLink('Training data','training','Training-data tools')}
+        ${devLink('Live-flow JSON','ui/live-flow','Raw values used by Overview live flow')}
+      </div>
+    </div>
+  </section>`;
+  footer.insertAdjacentHTML('beforebegin',html);
+}
+
 installLiveFlow();
+installDeveloperTab();
 $('tabs').addEventListener('click',e=>{const b=e.target.closest('.tab');if(b?.dataset?.view==='overview')loadLiveFlow()});
 </script>
 '''
