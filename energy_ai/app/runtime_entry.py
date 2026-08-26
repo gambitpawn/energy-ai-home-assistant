@@ -9,8 +9,9 @@ from .dashboard import install_dashboard
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .overview_extension import install_overview_extension
 from .tariff_entry import app
+from .ui_v158 import install_ui_v158
 
-RUNTIME_BUILD = "1.0.57"
+RUNTIME_BUILD = "1.0.58"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
@@ -21,10 +22,11 @@ app.version = RUNTIME_BUILD
 app.servers = [{"url": ".", "description": "Current Home Assistant Ingress path"}]
 app.openapi_schema = None
 
-# Install the read-only optimizer evaluation UI. The middleware in dashboard.py
-# redirects the ingress root to /ui without replacing the existing API routes.
+# Layer the dashboard extensions. The latest UI middleware serves the combined
+# HTML while the earlier extension keeps its history endpoint available.
 install_dashboard(app, core.cfg)
 install_overview_extension(app)
+install_ui_v158(app, core.cfg)
 
 
 @app.get(
