@@ -9,7 +9,7 @@ from .dashboard import install_dashboard
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .tariff_entry import app
 
-RUNTIME_BUILD = "1.0.55"
+RUNTIME_BUILD = "1.0.56"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
