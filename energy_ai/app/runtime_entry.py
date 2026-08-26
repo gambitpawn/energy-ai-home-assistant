@@ -5,10 +5,11 @@ import asyncio
 from fastapi import HTTPException, Query
 
 from . import main as core
+from .dashboard import install_dashboard
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .tariff_entry import app
 
-RUNTIME_BUILD = "1.0.54"
+RUNTIME_BUILD = "1.0.55"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
@@ -18,6 +19,10 @@ app.version = RUNTIME_BUILD
 # the same ingress path from which openapi.json was loaded, instead of HA root.
 app.servers = [{"url": ".", "description": "Current Home Assistant Ingress path"}]
 app.openapi_schema = None
+
+# Install the read-only optimizer evaluation UI. The middleware in dashboard.py
+# redirects the ingress root to /ui without replacing the existing API routes.
+install_dashboard(app, core.cfg)
 
 
 @app.get(
