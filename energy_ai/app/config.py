@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .settings_store import apply_setting_overrides
+
 OPTIONS_PATH = Path("/data/options.json")
 RUNTIME_BUILD = "1.0.52"
 
@@ -79,10 +81,21 @@ def _int_list(raw: Any, default: list[int]) -> list[int]:
         return list(default)
 
 
+def _read_supervisor_options() -> dict[str, Any]:
+    if not OPTIONS_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
 def load_config() -> dict[str, Any]:
-    options = {}
-    if OPTIONS_PATH.exists():
-        options = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
+    # Precedence is deliberate: packaged defaults < Supervisor options <
+    # Energy AI's persistent SQLite overrides. The DB lives under /data and is
+    # therefore stable across add-on restarts and upgrades.
+    options = apply_setting_overrides(_read_supervisor_options())
 
     entities = {**ENTITY_DEFAULTS}
     for key in (
@@ -105,6 +118,13 @@ def load_config() -> dict[str, Any]:
     else:
         reserve_target_penalty = float(target_reserve_raw)
 
+    legacy_import_overhead = float(options.get("import_overhead_ore_kwh", 0.0))
+    import_fixed_default = legacy_import_overhead if abs(legacy_import_overhead) > 1e-12 else 36.0
+    import_fixed = float(options.get("import_fixed_including_energy_tax_ore_kwh", import_fixed_default))
+    legacy_export_overhead = float(options.get("export_overhead_ore_kwh", 0.0))
+    export_fixed_default = -legacy_export_overhead if abs(legacy_export_overhead) > 1e-12 else 2.84
+    export_fixed = float(options.get("export_fixed_compensation_ore_kwh", export_fixed_default))
+
     return {
         "runtime_build": RUNTIME_BUILD,
         "collector": {
@@ -124,8 +144,17 @@ def load_config() -> dict[str, Any]:
                 "high_uncertainty_reserve_soc_pct": float(options.get("high_uncertainty_reserve_soc_pct", 28)),
             },
             "economics": {
-                "import_overhead_ore_kwh": float(options.get("import_overhead_ore_kwh", 0)),
-                "export_overhead_ore_kwh": float(options.get("export_overhead_ore_kwh", 0)),
+                "pricing_model": "spot_linked_grid_v1",
+                "import_fixed_including_energy_tax_ore_kwh": import_fixed,
+                "import_spot_percentage": float(options.get("import_spot_percentage", 6.86)),
+                "export_fixed_compensation_ore_kwh": export_fixed,
+                "export_spot_percentage": float(options.get("export_spot_percentage", 6.05)),
+                "economics_valid_from": str(options.get("economics_valid_from", "")),
+                "import_fixed_tax_basis": "energy_tax_2026_excluding_vat",
+                # Compatibility aliases for old/report-only modules. Runtime
+                # economics uses the explicit spot-linked fields above.
+                "import_overhead_ore_kwh": import_fixed,
+                "export_overhead_ore_kwh": -export_fixed,
                 "minimum_arbitrage_margin_ore_kwh": float(options.get("minimum_arbitrage_margin_ore_kwh", 20)),
             },
             "sauna": {

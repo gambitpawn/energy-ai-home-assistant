@@ -15,7 +15,8 @@ CURRENT_ECONOMICS = "current_economics"
 HISTORICAL_ECONOMICS = "historical_economics"
 
 # Swedish energy tax from 2026-01-01, excluding VAT. This is the default fixed
-# import component; installations can override it in Home Assistant options.
+# import component; installations can override it in Home Assistant options or
+# through the app-owned SQLite parameter store.
 DEFAULT_IMPORT_FIXED_INCLUDING_ENERGY_TAX_ORE_KWH = 36.00
 DEFAULT_IMPORT_SPOT_PERCENTAGE = 6.86
 DEFAULT_EXPORT_FIXED_COMPENSATION_ORE_KWH = 2.84
@@ -30,7 +31,8 @@ def _options() -> dict[str, Any]:
     if not OPTIONS_PATH.exists():
         return {}
     try:
-        return json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
     except Exception:
         return {}
 
@@ -57,25 +59,18 @@ def _legacy_or_default_import_fixed(base: dict[str, Any], opts: dict[str, Any]) 
 
 
 def current_economics_from_options(base_economics: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Load the active import/export energy-price terms from add-on options.
+    """Return active economics with the already-loaded runtime config authoritative.
 
-    The default fixed import component is the 2026 Swedish energy tax,
-    36.00 ore/kWh excluding VAT. For migration, a pre-existing non-zero legacy
-    import_overhead_ore_kwh is preserved when the new explicit field is absent.
-    Values already loaded into base_economics are respected if options.json is
-    unavailable or does not yet contain a newer field.
+    `base_economics` comes from load_config(), where SQLite UI overrides have
+    already been layered above Supervisor options. Raw /data/options.json is
+    therefore only a fallback for callers that do not supply a complete base.
     """
     base = dict(base_economics or {})
-    opts = _options()
-    import_fixed = _legacy_or_default_import_fixed(base, opts)
+    merged = {**_options(), **base}
+    import_fixed = _legacy_or_default_import_fixed(merged, {})
 
-    legacy_export_overhead = _f(
-        opts.get("export_overhead_ore_kwh", base.get("export_overhead_ore_kwh", 0.0))
-    )
-    explicit_export = opts.get(
-        "export_fixed_compensation_ore_kwh",
-        base.get("export_fixed_compensation_ore_kwh"),
-    )
+    legacy_export_overhead = _f(merged.get("export_overhead_ore_kwh", 0.0))
+    explicit_export = merged.get("export_fixed_compensation_ore_kwh")
     export_fixed = _f(
         explicit_export,
         -legacy_export_overhead if legacy_export_overhead else DEFAULT_EXPORT_FIXED_COMPENSATION_ORE_KWH,
@@ -86,21 +81,16 @@ def current_economics_from_options(base_economics: dict[str, Any] | None = None)
         "pricing_model": PRICING_MODEL,
         "import_fixed_including_energy_tax_ore_kwh": import_fixed,
         "import_spot_percentage": _f(
-            opts.get("import_spot_percentage", base.get("import_spot_percentage")),
-            DEFAULT_IMPORT_SPOT_PERCENTAGE,
+            merged.get("import_spot_percentage"), DEFAULT_IMPORT_SPOT_PERCENTAGE
         ),
         "export_fixed_compensation_ore_kwh": export_fixed,
         "export_spot_percentage": _f(
-            opts.get("export_spot_percentage", base.get("export_spot_percentage")),
-            DEFAULT_EXPORT_SPOT_PERCENTAGE,
+            merged.get("export_spot_percentage"), DEFAULT_EXPORT_SPOT_PERCENTAGE
         ),
         "minimum_arbitrage_margin_ore_kwh": _f(
-            opts.get("minimum_arbitrage_margin_ore_kwh", base.get("minimum_arbitrage_margin_ore_kwh", 20.0)),
-            20.0,
+            merged.get("minimum_arbitrage_margin_ore_kwh"), 20.0
         ),
-        "economics_valid_from": str(
-            opts.get("economics_valid_from", base.get("economics_valid_from", "")) or ""
-        ),
+        "economics_valid_from": str(merged.get("economics_valid_from") or ""),
         "replay_default": CURRENT_ECONOMICS,
         "import_fixed_tax_basis": "energy_tax_2026_excluding_vat",
         # Compatibility values for old/report-only code paths. New economic
