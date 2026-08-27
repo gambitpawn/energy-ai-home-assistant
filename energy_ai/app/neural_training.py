@@ -17,6 +17,7 @@ from .app_comparison import _actual_rows
 from .db import DB_PATH
 from .engine_contract import EngineInput, input_from_optimizer_plan
 from .neural_features import FEATURE_NAMES, FEATURE_SCHEMA, feature_metadata, vectorize
+from .optimizer_evaluation import DECISION_GRACE_SECONDS, MAX_PLAN_AGE_MINUTES
 from .optimizer_v35_replay import solve_v35_from_rows
 
 MODEL_DIR = Path("/data/models")
@@ -28,6 +29,13 @@ LABEL_SOURCE = "perfect_information_v35_teacher_v1"
 ACTION_CLASSES_KW = tuple(float(x) for x in range(-8, 9))
 MIN_SHADOW_SAMPLES = 64
 MIN_VALIDATION_SAMPLES = 12
+
+
+def _utc(value: str) -> datetime:
+    d = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(timezone.utc)
 
 
 def _init_tables() -> None:
@@ -70,10 +78,19 @@ def _engine_input_from_payload(payload: dict[str, Any]) -> EngineInput:
     )
 
 
-def _candidate_inputs(cfg: dict[str, Any], limit: int = 1000) -> list[EngineInput]:
+def _candidate_inputs(cfg: dict[str, Any], limit: int = 1000) -> tuple[list[EngineInput], dict[str, Any]]:
+    """Return one canonical information vintage per 15-minute decision opportunity.
+
+    Multiple manual/restart refreshes may create several vintages for the same
+    decision_start. Training on all of them would overweight that interval and can
+    leak near-duplicates across chronological train/validation splits. We therefore
+    use the freshest vintage inside the same -30m/+180s live timing window.
+    """
     _init_tables()
-    seen: set[str] = set()
-    candidates: list[EngineInput] = []
+    seen_vintages: set[str] = set()
+    raw_candidates: list[EngineInput] = []
+    contract_rows = 0
+    legacy_rows = 0
     with sqlite3.connect(DB_PATH) as c:
         try:
             rows = c.execute(
@@ -87,9 +104,10 @@ def _candidate_inputs(cfg: dict[str, Any], limit: int = 1000) -> list[EngineInpu
                 item = _engine_input_from_payload(json.loads(raw))
             except Exception:
                 continue
-            if item.information_vintage_id not in seen:
-                seen.add(item.information_vintage_id)
-                candidates.append(item)
+            contract_rows += 1
+            if item.information_vintage_id not in seen_vintages:
+                seen_vintages.add(item.information_vintage_id)
+                raw_candidates.append(item)
 
         try:
             legacy = c.execute(
@@ -106,31 +124,108 @@ def _candidate_inputs(cfg: dict[str, Any], limit: int = 1000) -> list[EngineInpu
                 item = input_from_optimizer_plan(plan, cfg)
             except Exception:
                 continue
-            if item.information_vintage_id not in seen:
-                seen.add(item.information_vintage_id)
-                candidates.append(item)
-    candidates.sort(key=lambda x: x.decision_start)
-    return candidates
+            legacy_rows += 1
+            if item.information_vintage_id not in seen_vintages:
+                seen_vintages.add(item.information_vintage_id)
+                raw_candidates.append(item)
+
+    canonical: dict[str, EngineInput] = {}
+    timing_rejected = 0
+    for item in raw_candidates:
+        start = _utc(item.decision_start)
+        generated = _utc(item.generated_at)
+        lag = (generated - start).total_seconds()
+        if lag > DECISION_GRACE_SECONDS or lag < -MAX_PLAN_AGE_MINUTES * 60:
+            timing_rejected += 1
+            continue
+        key = start.isoformat()
+        current = canonical.get(key)
+        if current is None or generated > _utc(current.generated_at):
+            canonical[key] = item
+
+    candidates = sorted(canonical.values(), key=lambda x: _utc(x.decision_start))
+    return candidates, {
+        "contract_rows_seen": contract_rows,
+        "legacy_v35_rows_seen": legacy_rows,
+        "unique_information_vintages_seen": len(raw_candidates),
+        "timing_rejected_vintages": timing_rejected,
+        "canonical_decision_intervals": len(candidates),
+        "duplicate_vintages_removed": max(0, len(raw_candidates) - timing_rejected - len(candidates)),
+        "canonical_rule": "freshest information vintage per decision_start within -30m/+180s live timing window",
+    }
+
+
+def _latest_actual_start() -> datetime | None:
+    try:
+        with sqlite3.connect(DB_PATH) as c:
+            row = c.execute("SELECT MAX(bucket_start) FROM state_15m").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        return _utc(str(row[0]))
+    except Exception:
+        return None
+
+
+def _required_actual_until(engine_input: EngineInput) -> datetime:
+    last = _utc(engine_input.horizon_rows[-1]["start"])
+    return last + timedelta(minutes=int(engine_input.interval_minutes))
+
+
+def training_maturity_status(cfg: dict[str, Any], candidate_limit: int = 2000) -> dict[str, Any]:
+    candidates, candidate_diag = _candidate_inputs(cfg, candidate_limit)
+    latest = _latest_actual_start()
+    latest_complete_until = None if latest is None else latest + timedelta(minutes=15)
+    existing: set[str]
+    _init_tables()
+    with sqlite3.connect(DB_PATH) as c:
+        existing = {r[0] for r in c.execute("SELECT information_vintage_id FROM neural_training_sample").fetchall()}
+
+    pending = [c for c in candidates if c.information_vintage_id not in existing]
+    mature = []
+    immature = []
+    for item in pending:
+        required_until = _required_actual_until(item)
+        if latest_complete_until is not None and required_until <= latest_complete_until:
+            mature.append(item)
+        else:
+            immature.append(item)
+
+    return {
+        "engine_id": ENGINE_ID,
+        "label_source": LABEL_SOURCE,
+        "candidate_diagnostics": candidate_diag,
+        "training_samples_existing": len(existing),
+        "pending_canonical_candidates": len(pending),
+        "chronologically_mature_pending_candidates": len(mature),
+        "not_yet_mature_pending_candidates": len(immature),
+        "first_canonical_decision_start": candidates[0].decision_start if candidates else None,
+        "last_canonical_decision_start": candidates[-1].decision_start if candidates else None,
+        "earliest_required_actual_until": _required_actual_until(candidates[0]).isoformat() if candidates else None,
+        "latest_available_actual_start": None if latest is None else latest.isoformat(),
+        "latest_available_actual_complete_until": None if latest_complete_until is None else latest_complete_until.isoformat(),
+        "next_pending_required_actual_until": _required_actual_until(immature[0]).isoformat() if immature else None,
+        "note": "chronological maturity only; a mature candidate can still fail teacher construction if one or more required load/PV/price intervals are missing",
+    }
 
 
 def _perfect_information_teacher(cfg: dict[str, Any], engine_input: EngineInput) -> tuple[float, dict[str, Any]] | None:
     horizon = list(engine_input.horizon_rows)
     if not horizon:
         return None
-    start = datetime.fromisoformat(horizon[0]["start"].replace("Z", "+00:00")).astimezone(timezone.utc)
-    last = datetime.fromisoformat(horizon[-1]["start"].replace("Z", "+00:00")).astimezone(timezone.utc)
+    start = _utc(horizon[0]["start"])
+    last = _utc(horizon[-1]["start"])
     end = last + timedelta(minutes=engine_input.interval_minutes)
     actual, data = _actual_rows(start, end)
-    actual_map = {
-        datetime.fromisoformat(r["start"].replace("Z", "+00:00")).astimezone(timezone.utc): r
-        for r in actual
-    }
+    actual_map = {_utc(r["start"]): r for r in actual}
     if len(actual_map) != len(horizon):
         return None
 
     injected: list[dict[str, Any]] = []
     for row in horizon:
-        stamp = datetime.fromisoformat(row["start"].replace("Z", "+00:00")).astimezone(timezone.utc)
+        stamp = _utc(row["start"])
         observed = actual_map.get(stamp)
         if observed is None:
             return None
@@ -157,20 +252,31 @@ def build_training_samples(cfg: dict[str, Any], max_new: int = 32, candidate_lim
     with sqlite3.connect(DB_PATH) as c:
         existing = {r[0] for r in c.execute("SELECT information_vintage_id FROM neural_training_sample").fetchall()}
 
-    candidates = _candidate_inputs(cfg, candidate_limit)
+    candidates, candidate_diag = _candidate_inputs(cfg, candidate_limit)
+    latest_actual = _latest_actual_start()
+    latest_complete_until = None if latest_actual is None else latest_actual + timedelta(minutes=15)
     created = 0
-    immature = 0
+    not_yet_mature = 0
+    coverage_gaps = 0
     failures = 0
     now = datetime.now(timezone.utc).isoformat()
+    first_pending_required_until: datetime | None = None
+
     for engine_input in candidates:
         if created >= max_new:
             break
         if engine_input.information_vintage_id in existing:
             continue
+        required_until = _required_actual_until(engine_input)
+        if latest_complete_until is None or required_until > latest_complete_until:
+            not_yet_mature += 1
+            if first_pending_required_until is None:
+                first_pending_required_until = required_until
+            continue
         try:
             teacher = _perfect_information_teacher(cfg, engine_input)
             if teacher is None:
-                immature += 1
+                coverage_gaps += 1
                 continue
             teacher_action, _diag = teacher
             label = _round_action(teacher_action)
@@ -202,11 +308,18 @@ def build_training_samples(cfg: dict[str, Any], max_new: int = 32, candidate_lim
         "ok": True,
         "label_source": LABEL_SOURCE,
         "created_samples": created,
-        "immature_candidates_seen": immature,
+        "not_yet_mature_candidates": not_yet_mature,
+        "mature_but_incomplete_coverage_candidates": coverage_gaps,
         "failures": failures,
         "total_samples": sample_count(),
         "feature_schema": FEATURE_SCHEMA,
         "action_classes_kw": list(ACTION_CLASSES_KW),
+        "candidate_diagnostics": candidate_diag,
+        "maturity": {
+            "latest_available_actual_start": None if latest_actual is None else latest_actual.isoformat(),
+            "latest_available_actual_complete_until": None if latest_complete_until is None else latest_complete_until.isoformat(),
+            "next_pending_required_actual_until": None if first_pending_required_until is None else first_pending_required_until.isoformat(),
+        },
     }
 
 
