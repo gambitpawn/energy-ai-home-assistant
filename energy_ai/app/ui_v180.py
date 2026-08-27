@@ -12,7 +12,6 @@ from . import ui_v164
 from .dashboard import DASHBOARD_HTML
 from .overview_extension import OVERVIEW_EXTENSION
 from .settings_store import (
-    apply_setting_overrides,
     delete_setting_overrides,
     load_setting_overrides,
     set_setting_overrides,
@@ -146,7 +145,7 @@ V180_EXTENSION = r'''
 function renderParamEditor(d){
  paramMeta=d;paramOriginal={...d.values};const grid=$('parameterGrid');const sections={};for(const m of d.parameters)(sections[m.section]??=[]).push(m);
  const cards=Object.entries(sections).map(([section,items])=>`<div class="card param-section-edit"><h2>${esc(section)}<span class="param-section-count">${items.length} parameters</span></h2>${items.map(m=>{const v=d.values[m.key],src=(d.sources||{})[m.key]||'default',isDb=src==='db_override';return `<div class="param-edit-row"><div class="param-label-wrap"><span class="param-name">${esc(m.label)}</span>${isDb?'<span class="param-source param-source-db">DB override</span>':''}<span class="param-info" tabindex="0">i<span class="param-tip">${tipHtml(m)}</span></span></div><div class="param-input-wrap">${fieldHtml(m,v)}<span class="param-unit">${esc(m.unit||'')}</span>${isDb?`<button class="param-reset" data-reset-param="${esc(m.key)}" title="Remove Energy AI override and use Home Assistant/default value">Use HA/default</button>`:''}</div></div>`}).join('')}</div>`).join('');
- const p=$('parameters');p.querySelector('.notice').innerHTML='<strong>Persistent Energy AI settings.</strong> Values saved here are stored in the Energy AI database and override Home Assistant add-on options after restart. “Use HA/default” removes the database override for that parameter.';
+ const p=$('parameters');p.querySelector('.notice').innerHTML='<strong>Persistent Energy AI settings.</strong> Values saved here are stored in the Energy AI database and override Home Assistant add-on options after restart. Home Assistant options are left unchanged as the fallback layer. “Use HA/default” removes the database override for that parameter.';
  grid.innerHTML=cards;grid.querySelectorAll('.param-input').forEach(el=>el.addEventListener('input',()=>markParamChanged(el)));grid.querySelectorAll('[data-reset-param]').forEach(el=>el.addEventListener('click',()=>resetParameter(el.dataset.resetParam)));
 }
 async function resetParameter(key){const status=$('paramSaveState');status.textContent='Resetting…';try{await api('ui/parameters-reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys:[key],restart:false})});status.textContent='Override removed · restart required';await loadParameterEditor()}catch(e){status.textContent=`Reset failed: ${e.message}`;status.classList.add('param-error')}}
@@ -229,21 +228,8 @@ def install_ui_v180(app: FastAPI) -> None:
             except Exception as exc:
                 return JSONResponse({"error": f"Could not persist settings in SQLite: {exc!r}"}, status_code=500)
 
-            # Supervisor sync is best-effort only. SQLite is authoritative for
-            # Energy AI UI settings and must succeed even without a token.
-            supervisor_saved = False
-            supervisor_error: str | None = None
-            if os.getenv("SUPERVISOR_TOKEN"):
-                try:
-                    merged = apply_setting_overrides(_raw_supervisor_options())
-                    status, result = await _supervisor_post("/addons/self/options", {"options": merged})
-                    if 200 <= status < 300:
-                        supervisor_saved = True
-                    else:
-                        supervisor_error = f"Supervisor returned HTTP {status}: {result!r}"
-                except Exception as exc:
-                    supervisor_error = repr(exc)
-
+            # Do not rewrite Supervisor options. They remain the fallback layer;
+            # the Supervisor token is used only for optional automatic restart.
             restart_scheduled = False
             manual_restart_required = bool(restart)
             if restart and os.getenv("SUPERVISOR_TOKEN"):
@@ -263,8 +249,7 @@ def install_ui_v180(app: FastAPI) -> None:
                     "saved": sorted(clean),
                     "persistent_store": "sqlite",
                     "db_result": db_result,
-                    "supervisor_synced": supervisor_saved,
-                    "supervisor_error": supervisor_error,
+                    "supervisor_options_modified": False,
                     "restart_required": not restart_scheduled,
                     "restart_scheduled": restart_scheduled,
                     "manual_restart_required": manual_restart_required,
