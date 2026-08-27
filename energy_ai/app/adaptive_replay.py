@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from statistics import median
 from typing import Any
 
@@ -40,7 +40,7 @@ class DailyReplayEvaluator:
         if not self.rows:
             raise RuntimeError(f"no actual rows for {self.local_date}")
         expected_first = self.start.isoformat()
-        expected_last = (self.end - __import__('datetime').timedelta(minutes=15)).isoformat()
+        expected_last = (self.end - timedelta(minutes=15)).isoformat()
         if self.data.get("first") != expected_first or self.data.get("last") != expected_last:
             raise RuntimeError("actual replay day is not boundary-complete")
 
