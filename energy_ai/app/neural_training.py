@@ -257,6 +257,16 @@ def train_model() -> dict[str, Any]:
         return {"ok": False, "status": "insufficient_validation_samples", "samples": n, "shadow_ready": False}
     x_train, x_val = x[:split], x[split:]
     y_train, y_val = y[:split], y[split:]
+    train_classes = sorted({float(v) for v in y_train.tolist()})
+    if len(train_classes) < 2:
+        return {
+            "ok": False,
+            "status": "insufficient_train_action_diversity",
+            "samples": n,
+            "train_samples": len(y_train),
+            "train_classes": train_classes,
+            "shadow_ready": False,
+        }
 
     pipeline = Pipeline([
         ("scale", StandardScaler()),
@@ -268,9 +278,7 @@ def train_model() -> dict[str, Any]:
             batch_size=min(32, max(8, split // 4)),
             learning_rate_init=0.001,
             max_iter=500,
-            early_stopping=True,
-            validation_fraction=0.15,
-            n_iter_no_change=25,
+            early_stopping=False,
             random_state=3501,
         )),
     ])
@@ -298,6 +306,7 @@ def train_model() -> dict[str, Any]:
         "training_first": starts[0],
         "training_last": starts[-1],
         "observed_classes_kw": classes,
+        "train_classes_kw": train_classes,
         "validation_accuracy": round(accuracy, 4),
         "validation_action_mae_kw": round(mae, 4),
         "validation_direction_accuracy": round(direction_accuracy, 4),
