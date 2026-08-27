@@ -13,6 +13,10 @@ from app.price_economics import (
     effective_prices,
     register_current_economics,
 )
+from app.price_economics_compat import (
+    _TARIFF_LIVE_CONTEXT,
+    _economics_aware_tariff_live_lp,
+)
 from app.price_economics_runtime import _adaptive_interval_result, _optimizer_interval_result
 
 
@@ -45,6 +49,17 @@ def test_2026_energy_tax_default_is_36_ore_excluding_vat(monkeypatch, tmp_path: 
     economics = current_economics_from_options({"import_overhead_ore_kwh": 0.0})
     assert economics["import_fixed_including_energy_tax_ore_kwh"] == pytest.approx(36.0)
     assert economics["import_fixed_tax_basis"] == "energy_tax_2026_excluding_vat"
+
+
+def test_loaded_explicit_import_fixed_beats_default_when_options_missing(monkeypatch, tmp_path: Path):
+    import app.price_economics as pe
+
+    monkeypatch.setattr(pe, "OPTIONS_PATH", tmp_path / "missing-options.json")
+    economics = current_economics_from_options({
+        "import_fixed_including_energy_tax_ore_kwh": 41.25,
+        "import_overhead_ore_kwh": 0.0,
+    })
+    assert economics["import_fixed_including_energy_tax_ore_kwh"] == pytest.approx(41.25)
 
 
 def test_legacy_nonzero_import_overhead_is_migrated_when_new_field_absent(monkeypatch, tmp_path: Path):
@@ -89,6 +104,39 @@ def test_adaptive_interval_uses_same_external_economics():
     result = _adaptive_interval_result(row, 0.0, cfg, AdaptiveParameters())
     assert result["effective_import_price_ore_kwh"] == pytest.approx(142.86)
     assert result["energy_cost_ore"] == pytest.approx(142.86 * 0.25)
+
+
+def test_live_tariff_lp_replaces_legacy_import_export_coefficients():
+    class FakeLP:
+        def __init__(self):
+            self.names = {}
+            self.obj = []
+
+        def add_vars(self, name, count, lb=0.0, ub=float("inf"), integral=False):
+            start = len(self.obj)
+            idx = list(range(start, start + count))
+            self.names[name] = idx
+            self.obj.extend([0.0] * count)
+            return idx
+
+        def set_obj(self, idx, coeff):
+            self.obj[int(idx)] += float(coeff)
+
+    cfg = _cfg()
+    rows = [{"price_ore_kwh": 100.0, "price_known": True}]
+    token = _TARIFF_LIVE_CONTEXT.set((cfg, rows))
+    try:
+        LP = _economics_aware_tariff_live_lp(FakeLP)
+        lp = LP()
+        imp = lp.add_vars("import", 1)
+        exp = lp.add_vars("export", 1)
+        lp.set_obj(imp[0], 999.0)
+        lp.set_obj(exp[0], -999.0)
+    finally:
+        _TARIFF_LIVE_CONTEXT.reset(token)
+
+    assert lp.obj[imp[0]] == pytest.approx(142.86 * 0.25)
+    assert lp.obj[exp[0]] == pytest.approx(-108.89 * 0.25)
 
 
 def test_historical_economics_uses_version_valid_at_timestamp(monkeypatch, tmp_path: Path):
