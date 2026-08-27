@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+from datetime import timedelta
 from typing import Any
 
 from .app_comparison import _actual_rows
@@ -48,13 +50,70 @@ def _selected_tariff(engine_input: EngineInput) -> tuple[str | None, dict[str, A
     return name, tariff, peaks
 
 
+def _cfg_from_input(base_cfg: dict[str, Any], engine_input: EngineInput) -> dict[str, Any]:
+    """Reconstruct the teacher's policy/physical config from the frozen input vintage."""
+    cfg = copy.deepcopy(base_cfg)
+    constraints = engine_input.constraints or {}
+    objective = engine_input.objective or {}
+    installation = objective.get("installation") or {}
+    economics = objective.get("economics") or {}
+
+    policy = cfg.setdefault("policy", {})
+    battery = policy.setdefault("battery", {})
+    for target, source in (
+        ("capacity_kwh", "battery_capacity_kwh"),
+        ("hard_min_soc_pct", "hard_min_soc_pct"),
+        ("hard_max_soc_pct", "hard_max_soc_pct"),
+        ("preferred_min_soc_pct", "preferred_min_soc_pct"),
+        ("preferred_max_soc_pct", "preferred_max_soc_pct"),
+        ("normal_reserve_soc_pct", "normal_reserve_soc_pct"),
+        ("high_uncertainty_reserve_soc_pct", "high_uncertainty_reserve_soc_pct"),
+    ):
+        if source in constraints:
+            battery[target] = float(constraints[source])
+    if "battery_capacity_kwh" in installation:
+        battery["capacity_kwh"] = float(installation["battery_capacity_kwh"])
+
+    policy["economics"] = {
+        "import_overhead_ore_kwh": float(economics.get("import_overhead_ore_kwh", 0.0)),
+        "export_overhead_ore_kwh": float(economics.get("export_overhead_ore_kwh", 0.0)),
+        "minimum_arbitrage_margin_ore_kwh": float(economics.get("minimum_arbitrage_margin_ore_kwh", 20.0)),
+    }
+
+    optimizer = cfg.setdefault("optimizer", {})
+    mapping = {
+        "battery_max_charge_kw": (installation, "battery_max_charge_kw"),
+        "battery_max_discharge_kw": (installation, "battery_max_discharge_kw"),
+        "physical_grid_import_limit_kw": (installation, "physical_grid_import_limit_kw"),
+        "grid_export_limit_kw": (installation, "grid_export_limit_kw"),
+        "battery_charge_efficiency": (installation, "charge_efficiency"),
+        "battery_discharge_efficiency": (installation, "discharge_efficiency"),
+        "unknown_price_energy_coverage_fraction": (installation, "unknown_price_energy_coverage_fraction"),
+        "unknown_price_risk_premium_ore_kwh": (installation, "unknown_price_risk_premium_ore_kwh"),
+        "unknown_price_default_continuation_value_ore_kwh": (installation, "unknown_price_default_continuation_value_ore_kwh"),
+        "reserve_uncertainty_full_scale_kw": (constraints, "reserve_uncertainty_full_scale_kw"),
+        "reserve_critical_soc_pct": (constraints, "reserve_critical_soc_pct"),
+        "reserve_critical_penalty_ore_per_kwh_hour": (constraints, "reserve_critical_penalty_ore_per_kwh_hour"),
+        "reserve_preferred_penalty_ore_per_kwh_hour": (constraints, "reserve_preferred_penalty_ore_per_kwh_hour"),
+        "reserve_target_penalty_ore_per_kwh_hour": (constraints, "reserve_target_penalty_ore_per_kwh_hour"),
+        "preferred_max_excess_penalty_ore_per_kwh_hour": (constraints, "preferred_max_excess_penalty_ore_per_kwh_hour"),
+        "terminal_soc_tolerance_pct": (constraints, "terminal_soc_tolerance_pct"),
+    }
+    for target, (source_dict, source_key) in mapping.items():
+        if source_key in source_dict:
+            optimizer[target] = float(source_dict[source_key])
+    optimizer["battery_degradation_ore_kwh"] = float(economics.get("battery_degradation_ore_kwh", optimizer.get("battery_degradation_ore_kwh", 5.0)))
+
+    cfg["tariffs"] = copy.deepcopy(objective.get("tariffs") or cfg.get("tariffs") or {})
+    return cfg
+
+
 def perfect_information_teacher_v2(cfg: dict[str, Any], engine_input: EngineInput) -> tuple[float, dict[str, Any]] | None:
     horizon = list(engine_input.horizon_rows)
     if not horizon:
         return None
     start = _utc(horizon[0]["start"])
     last = _utc(horizon[-1]["start"])
-    from datetime import timedelta
     end = last + timedelta(minutes=engine_input.interval_minutes)
     actual, data = _actual_rows(start, end)
     actual_map = {_utc(r["start"]): r for r in actual}
@@ -76,11 +135,12 @@ def perfect_information_teacher_v2(cfg: dict[str, Any], engine_input: EngineInpu
         item["price_ore_kwh"] = float(observed["price_ore_kwh"])
         injected.append(item)
 
+    teacher_cfg = _cfg_from_input(cfg, engine_input)
     tariff_name, tariff, historical_peaks = _selected_tariff(engine_input)
     if tariff is not None:
         solved = _solve_rows(
             injected,
-            cfg,
+            teacher_cfg,
             tariff,
             force_window=False,
             historical_peaks_kw=historical_peaks,
@@ -100,7 +160,7 @@ def perfect_information_teacher_v2(cfg: dict[str, Any], engine_input: EngineInpu
             "teacher_tariff_metric_kw": (solved.get("tariff") or {}).get("metric_kw"),
         }
 
-    solved = solve_v35_from_rows(cfg, injected, float(engine_input.initial_soc_pct))
+    solved = solve_v35_from_rows(teacher_cfg, injected, float(engine_input.initial_soc_pct))
     return float(solved["first_action_kw"]), {
         "actual_coverage_fraction": data.get("actual_coverage_fraction"),
         "teacher_engine": solved.get("engine"),
