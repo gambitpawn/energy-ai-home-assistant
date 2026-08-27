@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .engine_contract import EngineDescriptor, EngineDecision, EngineInput, input_from_optimizer_plan
+from .engine_contract import EngineDescriptor, EngineDecision, EngineInput
+from .engine_input_v2 import input_from_optimizer_plan_v2
 from .optimizer import PLANNER_NAME
 from .optimizer_v35_replay import solve_v35_from_rows
 
@@ -134,6 +135,6 @@ class DeterministicV35Adapter:
 
 
 def baseline_decision_from_plan(cfg: dict[str, Any], plan: dict[str, Any]) -> tuple[EngineInput, EngineDecision]:
-    engine_input = input_from_optimizer_plan(plan, cfg)
+    engine_input = input_from_optimizer_plan_v2(plan, cfg)
     decision = DeterministicV35Adapter(cfg).decide(engine_input)
     return engine_input, decision
