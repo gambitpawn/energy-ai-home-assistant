@@ -7,7 +7,7 @@ import numpy as np
 from .engine_contract import EngineDecision, EngineInput
 from .engine_registry import descriptor
 from .neural_features import FEATURE_SCHEMA, vectorize
-from .neural_training import ENGINE_ID, load_model, model_status
+from .neural_training import ENGINE_ID, load_model, model_status, sample_count
 
 
 class NeuralV1Engine:
@@ -79,4 +79,11 @@ class NeuralV1Engine:
 
 
 def neural_runtime_status() -> dict[str, Any]:
-    return model_status()
+    status = model_status()
+    dataset_samples = sample_count()
+    active_training_samples = int(status.get("samples") or 0) if status.get("model_exists") else 0
+    status["active_model_training_samples"] = active_training_samples
+    status["dataset_samples"] = dataset_samples
+    status["new_samples_since_active_model"] = max(0, dataset_samples - active_training_samples)
+    status["samples"] = dataset_samples
+    return status
