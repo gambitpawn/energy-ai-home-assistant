@@ -4,7 +4,6 @@ import csv
 import json
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -50,13 +49,16 @@ def _payload_mean(payload_json: str, key: str) -> float | None:
 
 
 def _runtime_rows() -> list[dict[str, Any]]:
-    """Pair actual 15-minute PV with the latest forecast vintage available before that interval."""
-    cutoff = (datetime.now(timezone.utc).timestamp() - LOOKBACK_DAYS * 86400.0)
-    cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat()
+    """Pair actual PV with the latest ex-ante forecast, using completed local days only."""
+    now = datetime.now(timezone.utc)
+    cutoff_iso = datetime.fromtimestamp(now.timestamp() - LOOKBACK_DAYS * 86400.0, timezone.utc).isoformat()
+    local_now = now.astimezone(STOCKHOLM)
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    upper_iso = local_midnight.astimezone(timezone.utc).isoformat()
     with sqlite3.connect(DB_PATH) as c:
         states = c.execute(
-            "SELECT bucket_start,payload_json FROM state_15m WHERE bucket_start>=? ORDER BY bucket_start ASC",
-            (cutoff_iso,),
+            "SELECT bucket_start,payload_json FROM state_15m WHERE bucket_start>=? AND bucket_start<? ORDER BY bucket_start ASC",
+            (cutoff_iso, upper_iso),
         ).fetchall()
         rows: list[dict[str, Any]] = []
         for start_utc, payload_json in states:
@@ -110,13 +112,15 @@ def materialize_runtime_training_files() -> dict[str, Any]:
         for row in rows:
             writer.writerow({"time": row["timestamp"].isoformat(), "global_tilted_irradiance": row["gti_w_m2"],
                              "cloud_cover": row["cloud_cover_pct"], "temperature_2m": row["temperature_c"]})
-    daylight = [r for r in rows if r["gti_w_m2"] >= 5.0 and r["pv_power_kw"] >= 0.0]
+    daylight = [r for r in rows if r["gti_w_m2"] >= 5.0]
     dates = sorted({r["timestamp"].astimezone(STOCKHOLM).date().isoformat() for r in daylight})
     return {
         "rows": len(rows), "daylight_rows": len(daylight), "dates": dates,
         "latest_timestamp": rows[-1]["timestamp"].isoformat() if rows else None,
+        "latest_complete_local_date": dates[-1] if dates else None,
         "actual_path": str(RUNTIME_ACTUAL_PATH), "environment_path": str(RUNTIME_ENV_PATH),
         "feature_vintage": "latest_forecast_generated_at_at_or_before_interval_start",
+        "day_completeness_policy": "exclude_current_local_calendar_day",
     }
 
 
@@ -135,7 +139,7 @@ def _baseline_mae(report: dict[str, Any] | None) -> float | None:
 
 
 def automatic_pv_retraining_once(*, force: bool = False) -> dict[str, Any]:
-    """Retrain at most once per newly observed local day and promote only a validated candidate."""
+    """Retrain once per newly completed local day and promote only a validated candidate."""
     existing = load_model()
     if not existing:
         return {"ok": True, "status": "not_ready", "reason": "no_existing_calibrated_model"}
@@ -146,6 +150,7 @@ def automatic_pv_retraining_once(*, force: bool = False) -> dict[str, Any]:
     runtime = materialize_runtime_training_files()
     daylight_rows = int(runtime["daylight_rows"])
     latest_timestamp = runtime.get("latest_timestamp")
+    latest_complete_date = runtime.get("latest_complete_local_date")
     state = _state()
     previous_source = state.get("last_source_timestamp")
     if not force:
@@ -153,8 +158,8 @@ def automatic_pv_retraining_once(*, force: bool = False) -> dict[str, Any]:
             return {"ok": True, "status": "waiting_for_data", "runtime": runtime, "minimum_new_daylight_rows": MIN_NEW_DAYLIGHT_ROWS}
         if latest_timestamp and previous_source and latest_timestamp <= previous_source:
             return {"ok": True, "status": "not_due", "reason": "no_new_runtime_training_rows", "runtime": runtime, "state": state}
-        if state.get("last_attempt_local_date") and runtime.get("dates") and state["last_attempt_local_date"] == runtime["dates"][-1]:
-            return {"ok": True, "status": "not_due", "reason": "already_attempted_latest_local_day", "runtime": runtime, "state": state}
+        if state.get("last_attempt_local_date") and latest_complete_date and state["last_attempt_local_date"] == latest_complete_date:
+            return {"ok": True, "status": "not_due", "reason": "already_attempted_latest_complete_local_day", "runtime": runtime, "state": state}
 
     dataset = build_dataset()
     old_model = MODEL_PATH.read_bytes() if MODEL_PATH.exists() else None
@@ -181,7 +186,7 @@ def automatic_pv_retraining_once(*, force: bool = False) -> dict[str, Any]:
                 REPORT_PATH.write_bytes(old_report_bytes)
         state = {
             "updated_at": _now(),
-            "last_attempt_local_date": runtime["dates"][-1] if runtime.get("dates") else None,
+            "last_attempt_local_date": latest_complete_date,
             "last_source_timestamp": latest_timestamp,
             "last_status": "promoted" if promoted else "rejected",
             "promoted": promoted,
@@ -218,6 +223,7 @@ def pv_auto_status() -> dict[str, Any]:
         "minimum_new_daylight_rows": MIN_NEW_DAYLIGHT_ROWS,
         "minimum_relative_improvement_over_physical_baseline": MIN_BASELINE_IMPROVEMENT,
         "maximum_candidate_to_prior_report_mae_ratio": MAX_PRIOR_REPORT_MAE_RATIO,
+        "completed_day_only": True,
         "runtime_training": runtime,
         "state": state,
     }
