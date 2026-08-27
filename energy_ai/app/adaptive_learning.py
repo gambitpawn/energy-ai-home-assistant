@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -29,6 +29,7 @@ PARAMETER_GRIDS: dict[str, tuple[float, ...]] = {
     "cycling_penalty_ore_kwh": (0.0, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0),
 }
 
+CANDIDATE_LEARNING_RATE = 0.20
 EvaluationFn = Callable[[AdaptiveParameters], float]
 
 
@@ -42,8 +43,7 @@ def init_adaptive_learning_store() -> None:
                 role TEXT NOT NULL,
                 source_run_id INTEGER,
                 parameters_json TEXT NOT NULL,
-                score_ore REAL,
-                UNIQUE(role, created_at)
+                score_ore REAL
             );
             CREATE INDEX IF NOT EXISTS idx_adaptive_parameter_state_role
                 ON adaptive_parameter_state(role, created_at DESC);
@@ -60,6 +60,8 @@ def init_adaptive_learning_store() -> None:
                 status TEXT NOT NULL,
                 diagnostics_json TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_adaptive_learning_run_date
+                ON adaptive_learning_run(replay_date, status);
 
             CREATE TABLE IF NOT EXISTS adaptive_learning_trial(
                 trial_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,19 +100,13 @@ def current_parameters(role: str = "candidate") -> AdaptiveParameters:
     init_adaptive_learning_store()
     with sqlite3.connect(DB_PATH) as c:
         row = c.execute(
-            "SELECT parameters_json FROM adaptive_parameter_state WHERE role=? ORDER BY created_at DESC LIMIT 1",
+            "SELECT parameters_json FROM adaptive_parameter_state WHERE role=? ORDER BY state_id DESC LIMIT 1",
             (role,),
         ).fetchone()
     return _from_json(row[0] if row else None)
 
 
-def persist_parameters(
-    params: AdaptiveParameters,
-    role: str,
-    *,
-    score_ore: float | None = None,
-    source_run_id: int | None = None,
-) -> None:
+def persist_parameters(params: AdaptiveParameters, role: str, *, score_ore: float | None = None, source_run_id: int | None = None) -> None:
     init_adaptive_learning_store()
     with sqlite3.connect(DB_PATH) as c:
         c.execute(
@@ -125,18 +121,25 @@ def _replace_parameter(params: AdaptiveParameters, name: str, value: float) -> A
     return replace(params, **{name: float(value)}).bounded()
 
 
-def single_parameter_sweeps(
-    params: AdaptiveParameters,
-    evaluate: EvaluationFn,
-) -> tuple[AdaptiveParameters, list[dict[str, Any]]]:
-    """Isolate every learnable dimension while holding all other dimensions fixed."""
+def _blend(old: AdaptiveParameters, target: AdaptiveParameters, rate: float = CANDIDATE_LEARNING_RATE) -> AdaptiveParameters:
+    rate = min(1.0, max(0.0, float(rate)))
+    values = {}
+    for f in fields(AdaptiveParameters):
+        a = float(getattr(old, f.name))
+        b = float(getattr(target, f.name))
+        values[f.name] = a + rate * (b - a)
+    return AdaptiveParameters(**values).bounded()
+
+
+def single_parameter_sweeps(params: AdaptiveParameters, evaluate: EvaluationFn) -> tuple[AdaptiveParameters, list[dict[str, Any]]]:
     baseline_score = float(evaluate(params))
     observations: list[dict[str, Any]] = []
-    best_by_parameter: dict[str, tuple[float, float]] = {}
+    best_values: dict[str, float] = {}
     for name in PARAMETER_ORDER:
         best_value = float(getattr(params, name))
         best_score = baseline_score
-        for value in PARAMETER_GRIDS[name]:
+        candidates = sorted(set(PARAMETER_GRIDS[name] + (best_value,)))
+        for value in candidates:
             trial = _replace_parameter(params, name, value)
             score = float(evaluate(trial))
             observations.append({
@@ -149,20 +152,15 @@ def single_parameter_sweeps(
             })
             if score < best_score:
                 best_value, best_score = float(value), score
-        best_by_parameter[name] = (best_value, best_score)
+        best_values[name] = best_value
 
     diagnostic = params
     for name in PARAMETER_ORDER:
-        diagnostic = _replace_parameter(diagnostic, name, best_by_parameter[name][0])
+        diagnostic = _replace_parameter(diagnostic, name, best_values[name])
     return diagnostic, observations
 
 
-def coordinate_descent(
-    params: AdaptiveParameters,
-    evaluate: EvaluationFn,
-    *,
-    passes: int = 2,
-) -> tuple[AdaptiveParameters, list[dict[str, Any]]]:
+def coordinate_descent(params: AdaptiveParameters, evaluate: EvaluationFn, *, passes: int = 2) -> tuple[AdaptiveParameters, list[dict[str, Any]]]:
     current = params.bounded()
     observations: list[dict[str, Any]] = []
     for pass_index in range(max(1, int(passes))):
@@ -170,7 +168,8 @@ def coordinate_descent(
         for name in PARAMETER_ORDER:
             before_score = float(evaluate(current))
             best, best_score = current, before_score
-            for value in PARAMETER_GRIDS[name]:
+            candidates = sorted(set(PARAMETER_GRIDS[name] + (float(getattr(current, name)),)))
+            for value in candidates:
                 trial = _replace_parameter(current, name, value)
                 score = float(evaluate(trial))
                 observations.append({
@@ -184,20 +183,53 @@ def coordinate_descent(
                 if score < best_score:
                     best, best_score = trial, score
             if best != current:
-                changed = True
-                current = best
+                current, changed = best, True
         if not changed:
             break
     return current, observations
 
 
-def run_learning_cycle(
-    replay_date: str,
-    evaluate: EvaluationFn,
-    *,
-    start: AdaptiveParameters | None = None,
-) -> dict[str, Any]:
-    """Run isolated sensitivity and coordinate descent against one fixed external evaluator."""
+def has_completed_run(replay_date: str) -> bool:
+    init_adaptive_learning_store()
+    with sqlite3.connect(DB_PATH) as c:
+        row = c.execute(
+            "SELECT 1 FROM adaptive_learning_run WHERE replay_date=? AND status='complete' LIMIT 1",
+            (replay_date,),
+        ).fetchone()
+    return row is not None
+
+
+def latest_learning_status() -> dict[str, Any]:
+    init_adaptive_learning_store()
+    with sqlite3.connect(DB_PATH) as c:
+        row = c.execute(
+            "SELECT run_id,started_at,completed_at,replay_date,baseline_parameters_json,result_parameters_json,baseline_score_ore,result_score_ore,status,diagnostics_json FROM adaptive_learning_run ORDER BY run_id DESC LIMIT 1"
+        ).fetchone()
+        trials = int(c.execute("SELECT COUNT(*) FROM adaptive_learning_trial").fetchone()[0])
+        runs = int(c.execute("SELECT COUNT(*) FROM adaptive_learning_run WHERE status='complete'").fetchone()[0])
+    latest = None
+    if row:
+        latest = {
+            "run_id": row[0], "started_at": row[1], "completed_at": row[2], "replay_date": row[3],
+            "baseline_parameters": json.loads(row[4]),
+            "daily_optimum_parameters": json.loads(row[5]) if row[5] else None,
+            "baseline_score_ore": row[6], "daily_optimum_score_ore": row[7], "status": row[8],
+            "diagnostics": json.loads(row[9] or "{}"),
+        }
+    return {
+        "engine_id": "adaptive_deterministic_v1",
+        "learning_enabled": True,
+        "physical_writes_enabled": False,
+        "completed_runs": runs,
+        "total_trials": trials,
+        "candidate_learning_rate": CANDIDATE_LEARNING_RATE,
+        "candidate_parameters": current_parameters("candidate").as_dict(),
+        "latest_run": latest,
+    }
+
+
+def run_learning_cycle(replay_date: str, evaluate: EvaluationFn, *, start: AdaptiveParameters | None = None) -> dict[str, Any]:
+    """One 24h feedback cycle: isolated sweeps, joint coordinate search, then slow candidate update."""
     init_adaptive_learning_store()
     initial = (start or current_parameters("candidate")).bounded()
     baseline_score = float(evaluate(initial))
@@ -208,45 +240,59 @@ def run_learning_cycle(
         )
         run_id = int(cur.lastrowid)
 
-    _, isolated = single_parameter_sweeps(initial, evaluate)
-    candidate, coordinate = coordinate_descent(initial, evaluate)
-    result_score = float(evaluate(candidate))
-    observations = isolated + coordinate
+    try:
+        _, isolated = single_parameter_sweeps(initial, evaluate)
+        daily_optimum, coordinate = coordinate_descent(initial, evaluate)
+        daily_score = float(evaluate(daily_optimum))
+        learned_candidate = _blend(initial, daily_optimum)
+        learned_score = float(evaluate(learned_candidate))
+        observations = isolated + coordinate
+        evaluator_details = getattr(evaluate, "diagnostics", None)
+        baseline_details = evaluator_details(initial) if callable(evaluator_details) else None
+        optimum_details = evaluator_details(daily_optimum) if callable(evaluator_details) else None
+        candidate_details = evaluator_details(learned_candidate) if callable(evaluator_details) else None
 
-    with sqlite3.connect(DB_PATH) as c:
-        for item in observations:
+        with sqlite3.connect(DB_PATH) as c:
+            for item in observations:
+                c.execute(
+                    "INSERT INTO adaptive_learning_trial(run_id,stage,parameter_name,parameter_value,parameters_json,score_ore,improvement_ore,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (run_id, item["stage"], item.get("parameter_name"), item.get("parameter_value"),
+                     json.dumps(item["parameters"], sort_keys=True), item["score_ore"], item["improvement_ore"], _now()),
+                )
+            diagnostics = {
+                "trial_count": len(observations),
+                "parameter_order": list(PARAMETER_ORDER),
+                "objective_semantics": "external_fixed_realized_cost",
+                "candidate_learning_rate": CANDIDATE_LEARNING_RATE,
+                "baseline_replay": baseline_details,
+                "daily_optimum_replay": optimum_details,
+                "learned_candidate_replay": candidate_details,
+            }
             c.execute(
-                "INSERT INTO adaptive_learning_trial(run_id,stage,parameter_name,parameter_value,parameters_json,score_ore,improvement_ore,created_at) VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    run_id,
-                    item["stage"],
-                    item.get("parameter_name"),
-                    item.get("parameter_value"),
-                    json.dumps(item["parameters"], sort_keys=True),
-                    item["score_ore"],
-                    item["improvement_ore"],
-                    _now(),
-                ),
+                "UPDATE adaptive_learning_run SET completed_at=?,result_parameters_json=?,result_score_ore=?,status='complete',diagnostics_json=? WHERE run_id=?",
+                (_now(), json.dumps(daily_optimum.as_dict(), sort_keys=True), daily_score, json.dumps(diagnostics), run_id),
             )
-        diagnostics = {
-            "trial_count": len(observations),
-            "parameter_order": list(PARAMETER_ORDER),
-            "objective_semantics": "external_fixed_realized_cost",
-        }
-        c.execute(
-            "UPDATE adaptive_learning_run SET completed_at=?,result_parameters_json=?,result_score_ore=?,status=?,diagnostics_json=? WHERE run_id=?",
-            (_now(), json.dumps(candidate.as_dict(), sort_keys=True), result_score, "complete", json.dumps(diagnostics), run_id),
-        )
 
-    persist_parameters(candidate, "daily_optimum", score_ore=result_score, source_run_id=run_id)
-    persist_parameters(candidate, "candidate", score_ore=result_score, source_run_id=run_id)
-    return {
-        "run_id": run_id,
-        "replay_date": replay_date,
-        "baseline_parameters": initial.as_dict(),
-        "candidate_parameters": candidate.as_dict(),
-        "baseline_score_ore": baseline_score,
-        "candidate_score_ore": result_score,
-        "improvement_ore": baseline_score - result_score,
-        "trial_count": len(observations),
-    }
+        persist_parameters(daily_optimum, "daily_optimum", score_ore=daily_score, source_run_id=run_id)
+        persist_parameters(learned_candidate, "candidate", score_ore=learned_score, source_run_id=run_id)
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "replay_date": replay_date,
+            "baseline_parameters": initial.as_dict(),
+            "daily_optimum_parameters": daily_optimum.as_dict(),
+            "candidate_parameters": learned_candidate.as_dict(),
+            "baseline_score_ore": baseline_score,
+            "daily_optimum_score_ore": daily_score,
+            "candidate_score_ore": learned_score,
+            "daily_optimum_improvement_ore": baseline_score - daily_score,
+            "candidate_improvement_ore": baseline_score - learned_score,
+            "trial_count": len(observations),
+        }
+    except Exception as exc:
+        with sqlite3.connect(DB_PATH) as c:
+            c.execute(
+                "UPDATE adaptive_learning_run SET completed_at=?,status='failed',diagnostics_json=? WHERE run_id=?",
+                (_now(), json.dumps({"error": repr(exc)}), run_id),
+            )
+        raise
