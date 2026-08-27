@@ -15,6 +15,7 @@ from .price_economics import (
     register_current_economics,
 )
 from .price_economics_compat import install_compatibility_patches
+from .price_economics_neural_compat import install_neural_teacher_economics
 from .price_economics_runtime import install_economics_patches
 from .runtime_entry_v178 import app, core
 
@@ -25,6 +26,7 @@ CURRENT_ECONOMICS_CONFIG = install_current_economics(core.cfg)
 ECONOMICS_VERSION = register_current_economics(core.cfg)
 ECONOMICS_PATCH_STATUS = install_economics_patches(core.cfg)
 ECONOMICS_COMPAT_STATUS = install_compatibility_patches(core.cfg)
+ECONOMICS_NEURAL_STATUS = install_neural_teacher_economics(core.cfg)
 
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
@@ -55,6 +57,7 @@ async def economics_status():
         "registered_version": ECONOMICS_VERSION,
         "runtime_patches": ECONOMICS_PATCH_STATUS,
         "compatibility_patches": ECONOMICS_COMPAT_STATUS,
+        "neural_teacher_patches": ECONOMICS_NEURAL_STATUS,
         "price_formulas": {
             "import": "spot * (1 + import_spot_percentage / 100) + import_fixed_including_energy_tax_ore_kwh",
             "export": "spot * (1 + export_spot_percentage / 100) + export_fixed_compensation_ore_kwh",
