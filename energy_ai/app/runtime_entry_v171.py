@@ -4,7 +4,7 @@ import asyncio
 
 from fastapi import HTTPException, Query
 
-from .engine_contract import input_from_optimizer_plan
+from .engine_input_v2 import input_from_optimizer_plan_v2
 from .engine_registry import BASELINE_ENGINE_ID, registry_status
 from .engine_store import insert_engine_run, latest_engine_decisions
 from .neural_engine import NeuralV1Engine, neural_runtime_status
@@ -29,7 +29,7 @@ async def _refresh_optimizer_plan_with_neural_challenger():
         plan = latest_plan(500)
         if plan.get("generated_at") is None or not plan.get("rows"):
             return {**result, "neural_v1": {"shadow_decision": False, "status": "no_baseline_information_vintage"}}
-        engine_input = input_from_optimizer_plan(plan, core.cfg)
+        engine_input = input_from_optimizer_plan_v2(plan, core.cfg)
         decision = await asyncio.to_thread(NeuralV1Engine(core.cfg).decide, engine_input)
         await asyncio.to_thread(insert_engine_run, engine_input, [decision])
         return {
