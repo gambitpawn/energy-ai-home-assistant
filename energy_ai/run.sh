@@ -12,7 +12,7 @@ export HA_ACCESS_TOKEN
 export HA_BASE_URL
 export ENERGY_AI_DB=/data/energy_ai.db
 
-exec /opt/energy-ai/venv/bin/uvicorn app.runtime_entry_v169:app \
+exec /opt/energy-ai/venv/bin/uvicorn app.runtime_entry_v170:app \
   --app-dir /opt/energy-ai \
   --host 0.0.0.0 \
   --port 8099 \
