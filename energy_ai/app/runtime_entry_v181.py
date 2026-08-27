@@ -15,9 +15,12 @@ from .model_selector import (
     selector_scores,
     selector_status,
 )
+from .model_selector_state import install_selector_state_patch
 from .neural_engine import neural_runtime_status
 from .optimizer_store import latest_plan
 from .runtime_entry_v180 import app, core
+
+install_selector_state_patch()
 
 RUNTIME_BUILD = "1.0.81"
 core.RUNTIME_VERSION = RUNTIME_BUILD
