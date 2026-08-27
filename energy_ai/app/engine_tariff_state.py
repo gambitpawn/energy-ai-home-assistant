@@ -37,15 +37,15 @@ def _enabled(cfg: dict[str, Any], tariff: dict[str, Any]) -> bool:
     return bool((cfg.get("tariffs") or {}).get("enabled")) and bool(tariff.get("enabled"))
 
 
-def _state_cutoff(decision_start: datetime) -> datetime:
-    # For live/future decisions, never use the currently collecting partial quarter.
-    # For historical decisions, decision_start itself is the causal cutoff.
-    now_complete_until = _quarter_start(datetime.now(timezone.utc))
-    return min(decision_start.astimezone(timezone.utc), now_complete_until)
+def _state_cutoff(decision_start: datetime, information_as_of: datetime) -> datetime:
+    # Only fully completed quarters that existed when the information vintage was
+    # generated may enter tariff state. This makes historical reconstruction stable.
+    complete_until = _quarter_start(information_as_of)
+    return min(decision_start.astimezone(timezone.utc), complete_until)
 
 
-def _state_rows(decision_start: datetime) -> tuple[list[tuple[datetime, float, float]], datetime]:
-    cutoff = _state_cutoff(decision_start)
+def _state_rows(decision_start: datetime, information_as_of: datetime) -> tuple[list[tuple[datetime, float, float]], datetime]:
+    cutoff = _state_cutoff(decision_start, information_as_of)
     local = decision_start.astimezone(LOCAL_TZ)
     month_start_local = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_start = month_start_local.astimezone(timezone.utc)
@@ -121,11 +121,17 @@ def _calendar_flags(decision_start: datetime, tariff: dict[str, Any], enabled: b
     }
 
 
-def tariff_state_for_decision(cfg: dict[str, Any], decision_start: str) -> dict[str, Any]:
+def tariff_state_for_decision(
+    cfg: dict[str, Any],
+    decision_start: str,
+    information_as_of: str | None = None,
+) -> dict[str, Any]:
     decision = _utc(decision_start)
-    rows, cutoff = _state_rows(decision)
+    as_of = _utc(information_as_of or decision_start)
+    rows, cutoff = _state_rows(decision, as_of)
     result: dict[str, Any] = {
-        "as_of": decision.isoformat(),
+        "as_of": as_of.isoformat(),
+        "decision_start": decision.isoformat(),
         "actual_complete_until": cutoff.isoformat(),
         "grid_sign_convention": "state_15m raw Solinteg positive export / negative import; tariff state normalizes import/export positive",
     }
