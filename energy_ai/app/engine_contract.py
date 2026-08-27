@@ -31,6 +31,31 @@ HORIZON_INPUT_FIELDS = (
     "price_ore_kwh",
 )
 
+# Shared constraints are physical/user-policy facts, not implementation details
+# of deterministic_v35 (for example DP state-count/effective grid spacing).
+COMMON_CONSTRAINT_FIELDS = (
+    "battery_capacity_kwh",
+    "hard_min_soc_pct",
+    "hard_max_soc_pct",
+    "preferred_min_soc_pct",
+    "preferred_max_soc_pct",
+    "normal_reserve_soc_pct",
+    "high_uncertainty_reserve_soc_pct",
+    "reserve_uncertainty_full_scale_kw",
+    "reserve_critical_soc_pct",
+    "reserve_critical_penalty_ore_per_kwh_hour",
+    "reserve_preferred_penalty_ore_per_kwh_hour",
+    "reserve_target_penalty_ore_per_kwh_hour",
+    "preferred_max_excess_penalty_ore_per_kwh_hour",
+    "battery_max_charge_kw",
+    "battery_max_discharge_kw",
+    "physical_grid_import_limit_kw",
+    "grid_export_limit_kw",
+    "charge_efficiency",
+    "discharge_efficiency",
+    "terminal_soc_tolerance_pct",
+)
+
 
 def _utc_iso(value: str) -> str:
     d = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -63,6 +88,28 @@ def normalize_horizon_row(raw: dict[str, Any]) -> dict[str, Any]:
     row["price_known"] = bool(row.get("price_known", row.get("price_ore_kwh") is not None))
     row["price_ore_kwh"] = None if row.get("price_ore_kwh") is None else float(row["price_ore_kwh"])
     return row
+
+
+def common_constraints_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(plan.get("constraints") or {})
+    return {key: raw[key] for key in COMMON_CONSTRAINT_FIELDS if key in raw}
+
+
+def common_objective_from_cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    if not cfg:
+        return {}
+    economics = dict(((cfg.get("policy") or {}).get("economics") or {}))
+    optimizer = dict(cfg.get("optimizer") or {})
+    return {
+        "economics": {
+            "import_overhead_ore_kwh": float(economics.get("import_overhead_ore_kwh", 0.0)),
+            "export_overhead_ore_kwh": float(economics.get("export_overhead_ore_kwh", 0.0)),
+            "minimum_arbitrage_margin_ore_kwh": float(economics.get("minimum_arbitrage_margin_ore_kwh", 20.0)),
+            "battery_degradation_ore_kwh": float(optimizer.get("battery_degradation_ore_kwh", 5.0)),
+        },
+        "tariffs": dict(cfg.get("tariffs") or {}),
+        "evaluation_semantics": "common_realized_economic_cost",
+    }
 
 
 @dataclass(frozen=True)
@@ -125,10 +172,12 @@ class EngineInput:
             raise ValueError("interval_minutes must be positive")
         if not (0.0 <= float(self.initial_soc_pct) <= 100.0):
             raise ValueError("initial_soc_pct must be between 0 and 100")
+        object.__setattr__(self, "generated_at", _utc_iso(self.generated_at))
+        object.__setattr__(self, "decision_start", _utc_iso(self.decision_start))
         normalized = tuple(normalize_horizon_row(dict(row)) for row in self.horizon_rows)
         object.__setattr__(self, "horizon_rows", normalized)
         starts = [str(row["start"]) for row in normalized]
-        if starts[0] != _utc_iso(self.decision_start):
+        if starts[0] != self.decision_start:
             raise ValueError("decision_start must equal the first horizon interval")
         if any(b <= a for a, b in zip(starts, starts[1:])):
             raise ValueError("horizon rows must be strictly increasing")
@@ -138,8 +187,8 @@ class EngineInput:
     def vintage_payload(self) -> dict[str, Any]:
         return {
             "schema": self.schema,
-            "generated_at": _utc_iso(self.generated_at),
-            "decision_start": _utc_iso(self.decision_start),
+            "generated_at": self.generated_at,
+            "decision_start": self.decision_start,
             "initial_soc_pct": round(float(self.initial_soc_pct), 6),
             "interval_minutes": int(self.interval_minutes),
             "horizon_rows": list(self.horizon_rows),
@@ -159,8 +208,8 @@ class EngineInput:
         result = {
             "schema": self.schema,
             "information_vintage_id": self.information_vintage_id,
-            "generated_at": _utc_iso(self.generated_at),
-            "decision_start": _utc_iso(self.decision_start),
+            "generated_at": self.generated_at,
+            "decision_start": self.decision_start,
             "initial_soc_pct": round(float(self.initial_soc_pct), 6),
             "interval_minutes": int(self.interval_minutes),
             "horizon_intervals": len(self.horizon_rows),
@@ -201,6 +250,8 @@ class EngineDecision:
             raise ValueError(f"unsupported decision status: {self.status}")
         if self.expected_soc_pct is not None and not (0.0 <= float(self.expected_soc_pct) <= 100.0):
             raise ValueError("expected_soc_pct must be between 0 and 100")
+        object.__setattr__(self, "generated_at", _utc_iso(self.generated_at))
+        object.__setattr__(self, "decision_start", _utc_iso(self.decision_start))
 
     @property
     def decision_id(self) -> str:
@@ -209,7 +260,7 @@ class EngineDecision:
             "engine_id": self.engine_id,
             "engine_version": self.engine_version,
             "information_vintage_id": self.information_vintage_id,
-            "decision_start": _utc_iso(self.decision_start),
+            "decision_start": self.decision_start,
         })
 
     def as_dict(self, *, include_plan_rows: bool = True) -> dict[str, Any]:
@@ -220,8 +271,8 @@ class EngineDecision:
             "engine_version": self.engine_version,
             "family": self.family,
             "information_vintage_id": self.information_vintage_id,
-            "generated_at": _utc_iso(self.generated_at),
-            "decision_start": _utc_iso(self.decision_start),
+            "generated_at": self.generated_at,
+            "decision_start": self.decision_start,
             "status": self.status,
             "requested_action_kw": round(float(self.requested_action_kw), 6),
             "expected_soc_pct": None if self.expected_soc_pct is None else round(float(self.expected_soc_pct), 6),
@@ -247,7 +298,7 @@ class DecisionEngine(Protocol):
         ...
 
 
-def input_from_optimizer_plan(plan: dict[str, Any]) -> EngineInput:
+def input_from_optimizer_plan(plan: dict[str, Any], cfg: dict[str, Any] | None = None) -> EngineInput:
     rows = tuple(normalize_horizon_row(dict(r)) for r in (plan.get("rows") or []))
     if not rows:
         raise ValueError("optimizer plan has no rows")
@@ -257,8 +308,8 @@ def input_from_optimizer_plan(plan: dict[str, Any]) -> EngineInput:
         initial_soc_pct=float(plan["initial_soc_pct"]),
         interval_minutes=int(plan.get("interval_minutes") or 15),
         horizon_rows=rows,
-        constraints=dict(plan.get("constraints") or {}),
-        objective=dict(plan.get("objective") or {}),
+        constraints=common_constraints_from_plan(plan),
+        objective=common_objective_from_cfg(cfg),
         source={
             "kind": "optimizer_plan_information_vintage",
             "source_planner": str(plan.get("planner") or "unknown"),
