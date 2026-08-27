@@ -4,10 +4,12 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .db import DB_PATH
 
 MODES = {"shadow", "active", "paused"}
+LOCAL_TZ = ZoneInfo("Europe/Stockholm")
 
 
 def _now() -> str:
@@ -104,7 +106,7 @@ def mark_actuator_ready(ready: bool, *, detail: str = "") -> dict[str, Any]:
 def _parse(value: str) -> datetime:
     d = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if d.tzinfo is None:
-        d = d.replace(tzinfo=timezone.utc)
+        d = d.replace(tzinfo=LOCAL_TZ)
     return d.astimezone(timezone.utc)
 
 
