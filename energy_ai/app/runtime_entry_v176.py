@@ -5,8 +5,12 @@ import asyncio
 from fastapi import Query
 
 from .adaptive_auto import automatic_maintenance_once, automatic_status
-from .adaptive_learning import latest_learning_status
+from .adaptive_deterministic import AdaptiveDeterministicV1
+from .adaptive_learning import current_parameters, latest_learning_status
 from .adaptive_replay import build_daily_evaluator
+from .engine_input_v2 import input_from_optimizer_plan_v2
+from .engine_store import insert_engine_run, latest_engine_decisions
+from .optimizer_store import latest_plan
 from .runtime_entry_v175 import app, core
 
 RUNTIME_BUILD = "1.0.76"
@@ -15,6 +19,54 @@ core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
 
 _previous_maintenance_loop = core._forecast_maintenance_loop
+_previous_refresh_optimizer_plan = core._refresh_optimizer_plan
+
+
+async def _refresh_optimizer_plan_with_adaptive_challenger():
+    # Preserve the complete established chain first: deterministic v3.5 refresh,
+    # persistence, and neural_v1 shadow decision all run before this challenger.
+    result = await _previous_refresh_optimizer_plan()
+    try:
+        plan = latest_plan(500)
+        if plan.get("generated_at") is None or not plan.get("rows"):
+            return {
+                **result,
+                "adaptive_deterministic_v1": {
+                    "shadow_decision": False,
+                    "status": "no_baseline_information_vintage",
+                },
+            }
+        engine_input = input_from_optimizer_plan_v2(plan, core.cfg)
+        params = await asyncio.to_thread(current_parameters, "candidate")
+        decision = await asyncio.to_thread(
+            AdaptiveDeterministicV1(core.cfg, params).decide,
+            engine_input,
+        )
+        await asyncio.to_thread(insert_engine_run, engine_input, [decision])
+        return {
+            **result,
+            "adaptive_deterministic_v1": {
+                "shadow_decision": True,
+                "information_vintage_id": engine_input.information_vintage_id,
+                "decision_id": decision.decision_id,
+                "requested_action_kw": decision.requested_action_kw,
+                "candidate_parameters": params.as_dict(),
+                "physical_writes_enabled": False,
+            },
+        }
+    except Exception as exc:
+        # A challenger must never impair deterministic_v35, neural training, or data collection.
+        return {
+            **result,
+            "adaptive_deterministic_v1": {
+                "shadow_decision": False,
+                "status": "failed",
+                "error": repr(exc),
+            },
+        }
+
+
+core._refresh_optimizer_plan = _refresh_optimizer_plan_with_adaptive_challenger
 
 
 async def _adaptive_automatic_maintenance_loop():
@@ -48,6 +100,21 @@ core._forecast_maintenance_loop = _maintenance_loop_with_adaptive_learning
 )
 async def adaptive_status():
     return await asyncio.to_thread(automatic_status)
+
+
+@app.get(
+    "/engines/adaptive/latest",
+    tags=["engines-adaptive"],
+    summary="Latest persisted adaptive deterministic shadow decisions",
+)
+async def adaptive_latest(limit: int = Query(5, ge=1, le=100)):
+    decisions = await asyncio.to_thread(latest_engine_decisions, limit)
+    return {
+        "engine_id": "adaptive_deterministic_v1",
+        "decisions": decisions.get("adaptive_deterministic_v1") or [],
+        "candidate_parameters": (await asyncio.to_thread(current_parameters, "candidate")).as_dict(),
+        "physical_writes_enabled": False,
+    }
 
 
 @app.post(
