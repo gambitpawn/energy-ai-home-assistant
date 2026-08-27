@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +25,7 @@ from .optimizer_v35_replay import solve_v35_from_rows
 MODEL_DIR = Path("/data/models")
 MODEL_PATH = MODEL_DIR / "neural_v1.joblib"
 MODEL_META_PATH = MODEL_DIR / "neural_v1.json"
+MODEL_VERSIONS_DIR = MODEL_DIR / "neural_v1_versions"
 ENGINE_ID = "neural_v1"
 MODEL_KIND = "sklearn_mlp_classifier"
 LABEL_SOURCE = "perfect_information_v35_teacher_v1"
@@ -36,6 +39,13 @@ def _utc(value: str) -> datetime:
     if d.tzinfo is None:
         d = d.replace(tzinfo=timezone.utc)
     return d.astimezone(timezone.utc)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _init_tables() -> None:
@@ -79,13 +89,7 @@ def _engine_input_from_payload(payload: dict[str, Any]) -> EngineInput:
 
 
 def _candidate_inputs(cfg: dict[str, Any], limit: int = 1000) -> tuple[list[EngineInput], dict[str, Any]]:
-    """Return one canonical information vintage per 15-minute decision opportunity.
-
-    Multiple manual/restart refreshes may create several vintages for the same
-    decision_start. Training on all of them would overweight that interval and can
-    leak near-duplicates across chronological train/validation splits. We therefore
-    use the freshest vintage inside the same -30m/+180s live timing window.
-    """
+    """Return one canonical information vintage per 15-minute decision opportunity."""
     _init_tables()
     seen_vintages: set[str] = set()
     raw_candidates: list[EngineInput] = []
@@ -178,7 +182,6 @@ def training_maturity_status(cfg: dict[str, Any], candidate_limit: int = 2000) -
     candidates, candidate_diag = _candidate_inputs(cfg, candidate_limit)
     latest = _latest_actual_start()
     latest_complete_until = None if latest is None else latest + timedelta(minutes=15)
-    existing: set[str]
     _init_tables()
     with sqlite3.connect(DB_PATH) as c:
         existing = {r[0] for r in c.execute("SELECT information_vintage_id FROM neural_training_sample").fetchall()}
@@ -343,7 +346,16 @@ def _load_samples() -> tuple[np.ndarray, np.ndarray, list[str]]:
     return x, y, starts
 
 
-def train_model() -> dict[str, Any]:
+def _previous_meta() -> dict[str, Any]:
+    if not MODEL_META_PATH.exists():
+        return {}
+    try:
+        return json.loads(MODEL_META_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def train_model(trigger: str = "manual") -> dict[str, Any]:
     x, y, starts = _load_samples()
     n = len(y)
     if n < MIN_SHADOW_SAMPLES:
@@ -402,17 +414,22 @@ def train_model() -> dict[str, Any]:
     direction = lambda v: -1 if v < -0.5 else (1 if v > 0.5 else 0)
     direction_accuracy = sum(direction(a) == direction(b) for a, b in zip(y_val, pred)) / max(1, len(y_val))
 
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(pipeline, MODEL_PATH)
+    previous = _previous_meta()
+    revision = int(previous.get("model_revision") or 0) + 1
+    model_id = f"{ENGINE_ID}-r{revision:04d}"
+    trained_at = datetime.now(timezone.utc).isoformat()
     meta = {
         "engine_id": ENGINE_ID,
         "model_version": "1",
+        "model_revision": revision,
+        "model_id": model_id,
         "model_kind": MODEL_KIND,
         "feature_schema": FEATURE_SCHEMA,
         "feature_count": len(FEATURE_NAMES),
         "label_source": LABEL_SOURCE,
         "action_classes_kw": list(ACTION_CLASSES_KW),
-        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "trained_at": trained_at,
+        "training_trigger": str(trigger),
         "samples": n,
         "train_samples": len(y_train),
         "validation_samples": len(y_val),
@@ -428,7 +445,18 @@ def train_model() -> dict[str, Any]:
         "active_eligibility_reason": "requires multi-day closed-loop head-to-head evidence against deterministic_v35",
         "architecture": {"hidden_layers": [64, 32], "activation": "relu", "classifier": True},
     }
-    MODEL_META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    MODEL_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    version_model = MODEL_VERSIONS_DIR / f"{model_id}.joblib"
+    version_meta = MODEL_VERSIONS_DIR / f"{model_id}.json"
+    joblib.dump(pipeline, version_model)
+    _atomic_write_text(version_meta, json.dumps(meta, ensure_ascii=False, indent=2))
+
+    active_tmp = MODEL_PATH.with_suffix(".joblib.tmp")
+    shutil.copy2(version_model, active_tmp)
+    os.replace(active_tmp, MODEL_PATH)
+    _atomic_write_text(MODEL_META_PATH, json.dumps(meta, ensure_ascii=False, indent=2))
     return {"ok": True, "status": "trained", **meta}
 
 
@@ -440,6 +468,19 @@ def load_model() -> tuple[Any, dict[str, Any]]:
     if meta.get("feature_schema") != FEATURE_SCHEMA:
         raise RuntimeError("neural model feature schema mismatch")
     return model, meta
+
+
+def model_history(limit: int = 20) -> list[dict[str, Any]]:
+    MODEL_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for path in sorted(MODEL_VERSIONS_DIR.glob(f"{ENGINE_ID}-r*.json"), reverse=True):
+        try:
+            rows.append(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+        if len(rows) >= max(1, min(int(limit), 100)):
+            break
+    return rows
 
 
 def model_status() -> dict[str, Any]:
