@@ -63,7 +63,10 @@ class NeuralV1Engine:
             model={
                 "kind": meta.get("model_kind"),
                 "model_version": meta.get("model_version"),
+                "model_revision": meta.get("model_revision"),
+                "model_id": meta.get("model_id"),
                 "trained_at": meta.get("trained_at"),
+                "training_trigger": meta.get("training_trigger"),
                 "training_samples": meta.get("samples"),
                 "label_source": meta.get("label_source"),
                 "validation_accuracy": meta.get("validation_accuracy"),
