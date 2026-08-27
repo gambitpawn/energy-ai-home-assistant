@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .adaptive_deterministic import AdaptiveDeterministicV1
+from .adaptive_learning import current_parameters
 from .engine_contract import EngineDescriptor, EngineDecision, EngineInput
 from .engine_input_v2 import input_from_optimizer_plan_v2
 from .optimizer import PLANNER_NAME
@@ -144,5 +145,5 @@ def baseline_decision_from_plan(cfg: dict[str, Any], plan: dict[str, Any]) -> tu
 
 def adaptive_decision_from_plan(cfg: dict[str, Any], plan: dict[str, Any]) -> tuple[EngineInput, EngineDecision]:
     engine_input = input_from_optimizer_plan_v2(plan, cfg)
-    decision = AdaptiveDeterministicV1(cfg).decide(engine_input)
+    decision = AdaptiveDeterministicV1(cfg, current_parameters("candidate")).decide(engine_input)
     return engine_input, decision
