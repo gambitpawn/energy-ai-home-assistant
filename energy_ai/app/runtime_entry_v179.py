@@ -32,11 +32,10 @@ core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
 
-# Keep the Parameters page aligned with the actual runtime economics. The
-# add-on option remains one fixed import amount; the label makes explicit that
-# the user-entered amount is inclusive of energy tax.
+# Keep the Parameters page aligned with the actual runtime economics. The fixed
+# import field defaults to the 2026 Swedish energy tax: 36.00 ore/kWh excl. VAT.
 _old_economics_ui = "paramSection('Economics',[['Import overhead',`${n(e.import_overhead_ore_kwh)} öre/kWh`],['Export overhead',`${n(e.export_overhead_ore_kwh)} öre/kWh`],['Minimum arbitrage margin',`${n(e.minimum_arbitrage_margin_ore_kwh)} öre/kWh`],['Battery degradation',`${n(o.battery_degradation_ore_kwh)} öre/kWh throughput`],['Spot-price entity',ent.spot_price||'—','Home Assistant']])"
-_new_economics_ui = "paramSection('Economics',[['Fixed import cost incl. energy tax',`${n(e.import_fixed_including_energy_tax_ore_kwh)} öre/kWh`],['Import spot-linked grid fee',`${n(e.import_spot_percentage)} % of spot`],['Fixed export compensation',`${n(e.export_fixed_compensation_ore_kwh)} öre/kWh`],['Export spot-linked compensation',`${n(e.export_spot_percentage)} % of spot`],['Minimum arbitrage margin',`${n(e.minimum_arbitrage_margin_ore_kwh)} öre/kWh`],['Battery degradation',`${n(o.battery_degradation_ore_kwh)} öre/kWh throughput`],['Spot-price entity',ent.spot_price||'—','Home Assistant']])"
+_new_economics_ui = "paramSection('Economics',[['Fixed import cost incl. energy tax (excl. VAT)',`${n(e.import_fixed_including_energy_tax_ore_kwh)} öre/kWh`],['Import spot-linked grid fee',`${n(e.import_spot_percentage)} % of spot`],['Fixed export compensation',`${n(e.export_fixed_compensation_ore_kwh)} öre/kWh`],['Export spot-linked compensation',`${n(e.export_spot_percentage)} % of spot`],['Minimum arbitrage margin',`${n(e.minimum_arbitrage_margin_ore_kwh)} öre/kWh`],['Battery degradation',`${n(o.battery_degradation_ore_kwh)} öre/kWh throughput`],['Spot-price entity',ent.spot_price||'—','Home Assistant']])"
 if _old_economics_ui in dashboard.DASHBOARD_HTML:
     dashboard.DASHBOARD_HTML = dashboard.DASHBOARD_HTML.replace(_old_economics_ui, _new_economics_ui)
 
@@ -63,6 +62,8 @@ async def economics_status():
             "export": "spot * (1 + export_spot_percentage / 100) + export_fixed_compensation_ore_kwh",
             "raw_spot_history_preserved": True,
             "export_price_clamped_to_zero": False,
+            "default_import_fixed_ore_kwh": 36.0,
+            "default_import_fixed_basis": "Swedish energy tax from 2026-01-01, excluding VAT",
         },
     }
 
