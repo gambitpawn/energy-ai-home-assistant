@@ -134,6 +134,6 @@ class DeterministicV35Adapter:
 
 
 def baseline_decision_from_plan(cfg: dict[str, Any], plan: dict[str, Any]) -> tuple[EngineInput, EngineDecision]:
-    engine_input = input_from_optimizer_plan(plan)
+    engine_input = input_from_optimizer_plan(plan, cfg)
     decision = DeterministicV35Adapter(cfg).decide(engine_input)
     return engine_input, decision
