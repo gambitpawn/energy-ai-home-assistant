@@ -98,11 +98,56 @@ def _wrap_historical_compare(original, cfg: dict[str, Any]):
     return wrapped
 
 
+def _wrap_regret_decomposition(original, cfg: dict[str, Any]):
+    """Make the legacy internal terminal-reference formula equal current economics.
+
+    The decomposition's interval economics are already patched through its bound
+    solver/evaluator hooks. Its one remaining legacy expression is
+    median(spot + import_overhead). Because the configured import formula is
+    affine in spot, we can set a temporary compatibility overhead for exactly
+    that evaluation window so the old expression equals median effective import.
+    """
+    def wrapped(*args, **kwargs):
+        from . import regret_decomposition as rd
+
+        a, b = rd.resolve_window(
+            start=kwargs.get("start"), end=kwargs.get("end"),
+            hours=kwargs.get("hours"), days=kwargs.get("days"),
+        )
+        rows, _ = rd._actual_rows(a, b)
+        econ = (cfg.get("policy") or {}).get("economics") or {}
+        old_alias = econ.get("import_overhead_ore_kwh")
+        if rows:
+            spot_median = float(median([float(r["price_ore_kwh"]) for r in rows]))
+            effective_median = float(median([
+                effective_prices(float(r["price_ore_kwh"]), cfg)["effective_import_price_ore_kwh"]
+                for r in rows
+            ]))
+            econ["import_overhead_ore_kwh"] = effective_median - spot_median
+        try:
+            result = original(*args, **kwargs)
+        finally:
+            if old_alias is None:
+                econ.pop("import_overhead_ore_kwh", None)
+            else:
+                econ["import_overhead_ore_kwh"] = old_alias
+        if isinstance(result, dict):
+            result.setdefault("valuation", {}).update({
+                "economics_mode": CURRENT_ECONOMICS,
+                "pricing": economics_payload(cfg),
+            })
+        return result
+    return wrapped
+
+
 def install_compatibility_patches(cfg: dict[str, Any]) -> dict[str, Any]:
     from . import app_comparison as ac
     from . import app_comparison_v2 as ac2
     from . import historical_closed_loop as h
     from . import historical_closed_loop_v2 as h2
+    from . import optimizer_evaluation as oe
+    from . import regret_decomposition as rd
+    from . import runtime_entry_v169 as rt169
 
     # Importing v2 writes its legacy actual-economics hook into v1; override it
     # after import with the same Solinteg sign correction plus current economics.
@@ -116,6 +161,16 @@ def install_compatibility_patches(cfg: dict[str, Any]) -> dict[str, Any]:
     # the v1 economics wrapper has been installed.
     ac2._compare_v1 = ac.compare_app_vs_planner
 
+    # regret_decomposition imported these functions by value before v1.79. Rebind
+    # all economic hooks and then wrap its one in-function legacy terminal formula.
+    rd._apply_action = oe._apply_action
+    rd._hindsight = oe._hindsight
+    rd.compare_closed_loop = h2.compare_closed_loop
+    original_regret = rd.regret_decomposition
+    rd.regret_decomposition = _wrap_regret_decomposition(original_regret, cfg)
+    # runtime_entry_v169 also imported regret_decomposition by value for the API.
+    rt169.regret_decomposition = rd.regret_decomposition
+
     return {
         "installed": True,
         "patched_paths": [
@@ -123,5 +178,10 @@ def install_compatibility_patches(cfg: dict[str, Any]) -> dict[str, Any]:
             "historical_closed_loop.compare_closed_loop",
             "historical_closed_loop_v2._actual_interval_solinteg",
             "app_comparison_v2._compare_v1",
+            "regret_decomposition._apply_action",
+            "regret_decomposition._hindsight",
+            "regret_decomposition.compare_closed_loop",
+            "regret_decomposition.regret_decomposition",
+            "runtime_entry_v169.regret_decomposition",
         ],
     }
