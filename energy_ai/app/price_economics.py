@@ -43,7 +43,10 @@ def _f(value: Any, default: float = 0.0) -> float:
 
 
 def _legacy_or_default_import_fixed(base: dict[str, Any], opts: dict[str, Any]) -> float:
-    explicit = opts.get("import_fixed_including_energy_tax_ore_kwh")
+    explicit = opts.get(
+        "import_fixed_including_energy_tax_ore_kwh",
+        base.get("import_fixed_including_energy_tax_ore_kwh"),
+    )
     if explicit not in (None, ""):
         return _f(explicit, DEFAULT_IMPORT_FIXED_INCLUDING_ENERGY_TAX_ORE_KWH)
 
@@ -59,13 +62,20 @@ def current_economics_from_options(base_economics: dict[str, Any] | None = None)
     The default fixed import component is the 2026 Swedish energy tax,
     36.00 ore/kWh excluding VAT. For migration, a pre-existing non-zero legacy
     import_overhead_ore_kwh is preserved when the new explicit field is absent.
+    Values already loaded into base_economics are respected if options.json is
+    unavailable or does not yet contain a newer field.
     """
     base = dict(base_economics or {})
     opts = _options()
     import_fixed = _legacy_or_default_import_fixed(base, opts)
 
-    legacy_export_overhead = _f(opts.get("export_overhead_ore_kwh", base.get("export_overhead_ore_kwh", 0.0)))
-    explicit_export = opts.get("export_fixed_compensation_ore_kwh")
+    legacy_export_overhead = _f(
+        opts.get("export_overhead_ore_kwh", base.get("export_overhead_ore_kwh", 0.0))
+    )
+    explicit_export = opts.get(
+        "export_fixed_compensation_ore_kwh",
+        base.get("export_fixed_compensation_ore_kwh"),
+    )
     export_fixed = _f(
         explicit_export,
         -legacy_export_overhead if legacy_export_overhead else DEFAULT_EXPORT_FIXED_COMPENSATION_ORE_KWH,
@@ -75,14 +85,22 @@ def current_economics_from_options(base_economics: dict[str, Any] | None = None)
         **base,
         "pricing_model": PRICING_MODEL,
         "import_fixed_including_energy_tax_ore_kwh": import_fixed,
-        "import_spot_percentage": _f(opts.get("import_spot_percentage"), DEFAULT_IMPORT_SPOT_PERCENTAGE),
+        "import_spot_percentage": _f(
+            opts.get("import_spot_percentage", base.get("import_spot_percentage")),
+            DEFAULT_IMPORT_SPOT_PERCENTAGE,
+        ),
         "export_fixed_compensation_ore_kwh": export_fixed,
-        "export_spot_percentage": _f(opts.get("export_spot_percentage"), DEFAULT_EXPORT_SPOT_PERCENTAGE),
+        "export_spot_percentage": _f(
+            opts.get("export_spot_percentage", base.get("export_spot_percentage")),
+            DEFAULT_EXPORT_SPOT_PERCENTAGE,
+        ),
         "minimum_arbitrage_margin_ore_kwh": _f(
             opts.get("minimum_arbitrage_margin_ore_kwh", base.get("minimum_arbitrage_margin_ore_kwh", 20.0)),
             20.0,
         ),
-        "economics_valid_from": str(opts.get("economics_valid_from") or ""),
+        "economics_valid_from": str(
+            opts.get("economics_valid_from", base.get("economics_valid_from", "")) or ""
+        ),
         "replay_default": CURRENT_ECONOMICS,
         "import_fixed_tax_basis": "energy_tax_2026_excluding_vat",
         # Compatibility values for old/report-only code paths. New economic
