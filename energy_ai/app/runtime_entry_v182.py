@@ -10,6 +10,7 @@ from .engine_input_v2 import input_from_optimizer_plan_v2
 from .engine_registry import registry_status
 from .model_selector_policy import install_selector_policy_patch
 from .model_selector_robust import install_robust_selector_patch
+from .model_selector_robust_hardening import install_robust_selector_hardening
 from .model_selector_state import install_selector_state_patch
 from .neural_engine import neural_runtime_status
 from .optimizer_store import latest_plan
@@ -20,6 +21,7 @@ from .runtime_entry_v180 import app, core
 install_selector_state_patch()
 install_selector_policy_patch()
 install_robust_selector_patch()
+install_robust_selector_hardening()
 
 RUNTIME_BUILD = "1.0.82"
 core.RUNTIME_VERSION = RUNTIME_BUILD
