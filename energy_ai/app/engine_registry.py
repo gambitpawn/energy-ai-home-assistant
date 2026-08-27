@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from .adaptive_deterministic import AdaptiveDeterministicV1
+from .adaptive_learning import current_parameters
 from .engine_contract import EngineDescriptor, EngineDecision, EngineInput
 from .engine_input_v2 import input_from_optimizer_plan_v2
 from .optimizer import PLANNER_NAME
 from .optimizer_v35_replay import solve_v35_from_rows
 
 BASELINE_ENGINE_ID = "deterministic_v35"
+ADAPTIVE_ENGINE_ID = "adaptive_deterministic_v1"
 
 DESCRIPTORS: tuple[EngineDescriptor, ...] = (
     EngineDescriptor(
@@ -22,15 +25,15 @@ DESCRIPTORS: tuple[EngineDescriptor, ...] = (
         learning_enabled=False,
     ),
     EngineDescriptor(
-        engine_id="adaptive_deterministic_v1",
+        engine_id=ADAPTIVE_ENGINE_ID,
         engine_version="1",
         family="adaptive_deterministic",
         display_name="Adaptive deterministic",
-        description="Reserved challenger: deterministic optimization with bounded learned parameters.",
+        description="Challenger: deterministic DP with bounded learned policy/risk parameters.",
         baseline=False,
-        available=False,
+        available=True,
         trainable=True,
-        learning_enabled=False,
+        learning_enabled=True,
     ),
     EngineDescriptor(
         engine_id="neural_v1",
@@ -137,4 +140,10 @@ class DeterministicV35Adapter:
 def baseline_decision_from_plan(cfg: dict[str, Any], plan: dict[str, Any]) -> tuple[EngineInput, EngineDecision]:
     engine_input = input_from_optimizer_plan_v2(plan, cfg)
     decision = DeterministicV35Adapter(cfg).decide(engine_input)
+    return engine_input, decision
+
+
+def adaptive_decision_from_plan(cfg: dict[str, Any], plan: dict[str, Any]) -> tuple[EngineInput, EngineDecision]:
+    engine_input = input_from_optimizer_plan_v2(plan, cfg)
+    decision = AdaptiveDeterministicV1(cfg, current_parameters("candidate")).decide(engine_input)
     return engine_input, decision
