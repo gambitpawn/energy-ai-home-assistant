@@ -7,6 +7,9 @@ from datetime import date, timedelta
 import pytest
 
 from app import model_selector as ms
+from app.model_selector_state import install_selector_state_patch
+
+install_selector_state_patch()
 
 
 def _cfg() -> dict:
