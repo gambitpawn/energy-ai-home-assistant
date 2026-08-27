@@ -16,6 +16,21 @@ ENGINE_FAMILIES = {
     "hybrid",
 }
 
+# Only ex-ante information belongs in a shared horizon. Engine outputs such as
+# battery_action_kw, expected_soc_pct and objective_cost_ore are deliberately
+# excluded so challenger vintages cannot be contaminated by baseline decisions.
+HORIZON_INPUT_FIELDS = (
+    "start",
+    "load_kw",
+    "base_load_kw",
+    "component_forecast_kw",
+    "load_uncertainty_kw",
+    "pv_kw",
+    "pv_uncertainty_kw",
+    "price_known",
+    "price_ore_kwh",
+)
+
 
 def _utc_iso(value: str) -> str:
     d = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -30,6 +45,24 @@ def _canonical_json(value: Any) -> str:
 
 def _fingerprint(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def normalize_horizon_row(raw: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict) or not raw.get("start"):
+        raise ValueError("every horizon row requires start")
+    row: dict[str, Any] = {"start": _utc_iso(str(raw["start"]))}
+    for key in HORIZON_INPUT_FIELDS[1:]:
+        if key in raw:
+            row[key] = raw[key]
+    row["load_kw"] = float(row.get("load_kw") or 0.0)
+    row["base_load_kw"] = float(row.get("base_load_kw") or 0.0)
+    row["component_forecast_kw"] = dict(row.get("component_forecast_kw") or {})
+    row["load_uncertainty_kw"] = float(row.get("load_uncertainty_kw") or 0.0)
+    row["pv_kw"] = float(row.get("pv_kw") or 0.0)
+    row["pv_uncertainty_kw"] = float(row.get("pv_uncertainty_kw") or 0.0)
+    row["price_known"] = bool(row.get("price_known", row.get("price_ore_kwh") is not None))
+    row["price_ore_kwh"] = None if row.get("price_ore_kwh") is None else float(row["price_ore_kwh"])
+    return row
 
 
 @dataclass(frozen=True)
@@ -92,11 +125,9 @@ class EngineInput:
             raise ValueError("interval_minutes must be positive")
         if not (0.0 <= float(self.initial_soc_pct) <= 100.0):
             raise ValueError("initial_soc_pct must be between 0 and 100")
-        starts = []
-        for row in self.horizon_rows:
-            if not isinstance(row, dict) or not row.get("start"):
-                raise ValueError("every horizon row requires start")
-            starts.append(_utc_iso(str(row["start"])))
+        normalized = tuple(normalize_horizon_row(dict(row)) for row in self.horizon_rows)
+        object.__setattr__(self, "horizon_rows", normalized)
+        starts = [str(row["start"]) for row in normalized]
         if starts[0] != _utc_iso(self.decision_start):
             raise ValueError("decision_start must equal the first horizon interval")
         if any(b <= a for a, b in zip(starts, starts[1:])):
@@ -217,7 +248,7 @@ class DecisionEngine(Protocol):
 
 
 def input_from_optimizer_plan(plan: dict[str, Any]) -> EngineInput:
-    rows = tuple(dict(r) for r in (plan.get("rows") or []))
+    rows = tuple(normalize_horizon_row(dict(r)) for r in (plan.get("rows") or []))
     if not rows:
         raise ValueError("optimizer plan has no rows")
     return EngineInput(
