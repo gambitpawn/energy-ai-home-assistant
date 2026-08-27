@@ -6,6 +6,7 @@ from fastapi import HTTPException, Query
 
 from .engine_contract import ENGINE_DECISION_SCHEMA, ENGINE_INPUT_SCHEMA
 from .engine_registry import BASELINE_ENGINE_ID, baseline_decision_from_plan, registry_status
+from .engine_store import insert_engine_run, latest_engine_decisions
 from .optimizer_store import latest_plan
 from .runtime_entry_v169 import app, core
 
@@ -13,6 +14,36 @@ RUNTIME_BUILD = "1.0.70"
 core.RUNTIME_VERSION = RUNTIME_BUILD
 core.cfg["runtime_build"] = RUNTIME_BUILD
 app.version = RUNTIME_BUILD
+
+# Contract migration is deliberately dual-write only. The existing deterministic
+# optimizer remains authoritative for planning/storage. Each successful refresh is
+# additionally mirrored into the generic engine tables using the common contract.
+_legacy_refresh_optimizer_plan = core._refresh_optimizer_plan
+
+
+async def _refresh_optimizer_plan_with_engine_contract():
+    result = await _legacy_refresh_optimizer_plan()
+    try:
+        plan = latest_plan(500)
+        if plan.get("generated_at") is not None and plan.get("rows"):
+            engine_input, decision = await asyncio.to_thread(baseline_decision_from_plan, core.cfg, plan)
+            await asyncio.to_thread(insert_engine_run, engine_input, [decision])
+            result = {
+                **result,
+                "engine_contract": {
+                    "baseline_engine_id": BASELINE_ENGINE_ID,
+                    "information_vintage_id": engine_input.information_vintage_id,
+                    "decision_id": decision.decision_id,
+                    "mirrored": True,
+                },
+            }
+    except Exception as exc:
+        # Contract mirroring must never break the established v3.5 refresh path.
+        result = {**result, "engine_contract": {"mirrored": False, "error": repr(exc)}}
+    return result
+
+
+core._refresh_optimizer_plan = _refresh_optimizer_plan_with_engine_contract
 
 
 @app.get(
@@ -43,7 +74,8 @@ async def engines_contract():
         },
         "shared_information_vintage": {
             "required": True,
-            "identity": "sha256 of normalized generated_at, decision_start, initial SOC, complete horizon, constraints, objective and source metadata",
+            "identity": "sha256 of normalized ex-ante generated_at, decision_start, initial SOC, load/PV/uncertainty/price horizon, constraints, objective and source metadata",
+            "baseline_output_excluded": True,
             "fair_comparison_rule": "engines compared at one decision point must receive the same information_vintage_id",
         },
         "engine_output": {
@@ -52,6 +84,12 @@ async def engines_contract():
             "plan_rows": "optional common future-action trace for evaluation/UI",
             "diagnostics": "engine-specific non-authoritative metadata",
             "model": "version/training/model metadata",
+        },
+        "persistence": {
+            "shared_input_table": "engine_information_vintage",
+            "decision_table": "engine_decision",
+            "dual_write_baseline_from_release": RUNTIME_BUILD,
+            "retention_days": 180,
         },
         "safety_boundary": {
             "inside_engine": False,
@@ -106,6 +144,21 @@ async def engines_baseline_latest(
             "tolerance_kw": 0.00011,
             "pass": abs(difference) <= 0.00011,
         },
+        "physical_writes_enabled": False,
+    }
+
+
+@app.get(
+    "/engines/history",
+    tags=["engines"],
+    summary="Latest decisions persisted through the generic multi-engine contract",
+)
+async def engines_history(
+    limit_per_engine: int = Query(1, ge=1, le=100),
+):
+    return {
+        "baseline_engine_id": BASELINE_ENGINE_ID,
+        "decisions": await asyncio.to_thread(latest_engine_decisions, limit_per_engine),
         "physical_writes_enabled": False,
     }
 
