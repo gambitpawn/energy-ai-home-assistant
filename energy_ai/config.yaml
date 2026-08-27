@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.76"
+version: "1.0.77"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, deterministic shadow planning, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -154,7 +154,6 @@ schema:
   optimizer_battery_max_discharge_kw: "float(0,15)"
   optimizer_battery_charge_efficiency: "float(0.5,1)"
   optimizer_battery_discharge_efficiency: "float(0.5,1)"
-  optimizer_battery_degradation_ore_kwh: "float(0,100)"
   optimizer_physical_grid_import_limit_kw: "float(0,30)"
   optimizer_grid_export_limit_kw: "float(0,30)"
   optimizer_soc_grid_step_kwh: "float(0.1,2)"
