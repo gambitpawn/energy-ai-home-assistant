@@ -150,6 +150,7 @@ function renderParamEditor(d){
  grid.innerHTML=cards;grid.querySelectorAll('.param-input').forEach(el=>el.addEventListener('input',()=>markParamChanged(el)));grid.querySelectorAll('[data-reset-param]').forEach(el=>el.addEventListener('click',()=>resetParameter(el.dataset.resetParam)));
 }
 async function resetParameter(key){const status=$('paramSaveState');status.textContent='Resetting…';try{await api('ui/parameters-reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys:[key],restart:false})});status.textContent='Override removed · restart required';await loadParameterEditor()}catch(e){status.textContent=`Reset failed: ${e.message}`;status.classList.add('param-error')}}
+if($('parameterGrid'))loadParameterEditor();
 </script>
 '''
 
@@ -217,10 +218,7 @@ def install_ui_v180(app: FastAPI) -> None:
                     errors[str(key)] = "parameter is not editable"
                     continue
                 try:
-                    value = _coerce(meta, raw_value)
-                    if key in {"pv_tilt_deg", "pv_azimuth_deg"}:
-                        value = str(value)
-                    clean[key] = value
+                    clean[key] = _coerce(meta, raw_value)
                 except Exception as exc:
                     errors[str(key)] = str(exc)
             if errors:
