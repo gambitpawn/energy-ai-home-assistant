@@ -3,12 +3,15 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .price_economics import CURRENT_ECONOMICS, economics_payload
+from .price_economics import CURRENT_ECONOMICS, economics_payload, economics_signature
 
 
 def install_neural_teacher_economics(cfg: dict[str, Any]) -> dict[str, Any]:
     from . import neural_teacher_v2 as teacher
+    from . import neural_training_v2 as training_v2
     from . import tariff_scenarios as tariff
+    from .engine_contract import EngineInput
+    from .engine_input_v2 import enriched_common_objective
 
     original_cfg_from_input = teacher._cfg_from_input
 
@@ -32,11 +35,37 @@ def install_neural_teacher_economics(cfg: dict[str, Any]) -> dict[str, Any]:
 
     teacher._cfg_from_input = cfg_from_input
     teacher._solve_rows = tariff._solve_rows
+
+    original_v2_candidates = training_v2._candidate_inputs
+
+    def v2_candidates(local_cfg: dict[str, Any], limit: int = 1000):
+        candidates, diag = original_v2_candidates(local_cfg, limit)
+        repriced = []
+        for item in candidates:
+            objective = enriched_common_objective(local_cfg, item.decision_start, item.generated_at)
+            repriced.append(EngineInput(
+                generated_at=item.generated_at,
+                decision_start=item.decision_start,
+                initial_soc_pct=item.initial_soc_pct,
+                interval_minutes=item.interval_minutes,
+                horizon_rows=item.horizon_rows,
+                constraints=item.constraints,
+                objective=objective,
+                source={**item.source, "economics_repriced": CURRENT_ECONOMICS},
+            ))
+        return repriced, {
+            **diag,
+            "economics_repricing": CURRENT_ECONOMICS,
+            "economics_signature": economics_signature(local_cfg),
+        }
+
+    training_v2._candidate_inputs = v2_candidates
     return {
         "installed": True,
         "economics_mode": CURRENT_ECONOMICS,
         "patched_paths": [
             "neural_teacher_v2._cfg_from_input",
             "neural_teacher_v2._solve_rows",
+            "neural_training_v2._candidate_inputs",
         ],
     }
