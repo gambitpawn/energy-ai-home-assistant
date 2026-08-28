@@ -99,11 +99,20 @@ def test_registry_marks_hybrid_as_available_learning_challenger():
     assert item.baseline is False
 
 
-def test_neural_prior_can_break_zero_cost_v35_tie_without_leaving_constraints():
-    solved = solve_hybrid_from_rows(_cfg(), _rows(), 50.0, _prior(top=2.0, strength=20.0))
+def test_neural_prior_can_change_first_action_without_leaving_dp_constraints():
+    solved = solve_hybrid_from_rows(
+        _cfg(),
+        _rows(first_price=200.0, second_price=0.0),
+        50.0,
+        _prior(top=-2.0, strength=1000.0),
+        # This test isolates the neural-guidance mechanism. The separate test
+        # below verifies that the production regret guard rejects this change.
+        max_backbone_regret_ore=1000.0,
+    )
     assert solved["accepted_neural_guidance"] is True
     assert solved["neural_changed_first_action"] is True
-    assert solved["first_action_kw"] > 0.0
+    assert solved["first_action_kw"] == solved["guided_action_kw"]
+    assert solved["first_action_kw"] != solved["backbone_action_kw"]
     assert abs(solved["first_action_kw"]) <= 8.0
     assert solved["backbone_regret_ore"] <= solved["max_backbone_regret_ore"] + 1e-9
 
