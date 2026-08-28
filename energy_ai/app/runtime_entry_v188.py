@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 
+from . import runtime_entry_v187 as actuator_runtime
 from . import runtime_entry_v187_final as v187
 from .actuator_diagnostics_v188 import install_actuator_diagnostics_patch
 
@@ -33,7 +34,10 @@ app.router.routes[:] = [
 async def production_control_mode_v188(mode: str):
     normalized = str(mode).strip().lower()
     if normalized == "active":
-        preflight = await v187.ACTUATOR.preflight()
+        # runtime_entry_v187_final owns the hardened wrapper, while the actual
+        # DeterministicActuator instance lives in runtime_entry_v187. Referencing
+        # v187.ACTUATOR here raised AttributeError before any physical transition.
+        preflight = await actuator_runtime.ACTUATOR.preflight()
         if not preflight.get("ok"):
             raise HTTPException(
                 409,
