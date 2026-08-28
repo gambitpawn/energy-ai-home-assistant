@@ -4,6 +4,12 @@ from . import engine_operator_selection as engine_operator_selection_module
 from . import runtime as base
 from . import ui_parameters
 from .engine_operator_selection import install_operator_engine_routing
+from .gradient_qualification import (
+    install_qualification_candidate_runtime as install_gradient_qualification_runtime,
+    qualification_status as gradient_qualification_status,
+)
+from .gradient_runtime import gradient_runtime_status, install_gradient_runtime_patch
+from .gradient_selector_qualification import install_gradient_selector_qualification
 from .hybrid_runtime import hybrid_runtime_status, install_hybrid_runtime_patch
 from .neural_qualification import (
     install_qualification_candidate_runtime,
@@ -13,15 +19,18 @@ from .operator_mode_control import install_operator_mode_control
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 
-RELEASE_BUILD = "1.0.99"
+RELEASE_BUILD = "1.0.100"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
+engine_operator_selection_module.DISPLAY_NAMES["gradient_v1"] = "Gradient boost"
 
-# Continuous neural training and race qualification are separate. Freeze one
-# neural revision for neural_v1 + hybrid_v1 while new latest models may continue
-# to train in the background.
+# Continuous learned-model training and race qualification are separate. Neural
+# + hybrid share one frozen neural candidate; gradient_v1 has its own independently
+# frozen candidate and can retrain in the background without resetting robust10.
 QUALIFICATION_RUNTIME = install_qualification_candidate_runtime()
+GRADIENT_QUALIFICATION_RUNTIME = install_gradient_qualification_runtime()
+install_gradient_selector_qualification()
 _ORIGINAL_NEURAL_RUNTIME_STATUS = base.neural_runtime_status
 
 
@@ -41,11 +50,12 @@ base.neural_runtime_status = _qualification_aware_neural_runtime_status
 # information vintage before either Auto or a manual engine is routed.
 install_operator_engine_routing()
 
-# Learned hybrid and deterministic stochastic decisions both join the shared
-# quarter race before routing. The stochastic wrapper is installed last, so it
-# prepares first and then delegates through hybrid -> operator -> robust selector.
+# Challenger wrappers are stacked around the same selector gateway. Gradient is
+# installed last, so the call order is gradient -> stochastic -> hybrid ->
+# operator routing -> robust selector. All decisions still share one vintage.
 install_hybrid_runtime_patch(base.core.cfg)
 install_stochastic_runtime_patch(base.core.cfg)
+install_gradient_runtime_patch(base.core.cfg)
 
 # The temporary commissioning power cap has been retired. Remove its old
 # Parameters entry and any DB override so it cannot accidentally look like an
@@ -84,6 +94,16 @@ def _remove_route(path: str) -> None:
 @app.get("/engines/neural/qualification", tags=["engines"])
 async def neural_qualification_status():
     return {"runtime_build": RELEASE_BUILD, **qualification_status()}
+
+
+@app.get("/engines/gradient/qualification", tags=["engines"])
+async def gradient_qualification_status_route():
+    return {"runtime_build": RELEASE_BUILD, **gradient_qualification_status()}
+
+
+@app.get("/engines/gradient/status", tags=["engines"])
+async def gradient_status():
+    return {"runtime_build": RELEASE_BUILD, **gradient_runtime_status()}
 
 
 @app.get("/engines/hybrid/status", tags=["engines"])
