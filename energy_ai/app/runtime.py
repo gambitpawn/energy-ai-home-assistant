@@ -20,6 +20,7 @@ from .actuator_config import install_actuator_config
 from .actuator_diagnostics_v188 import install_actuator_diagnostics_patch
 from .actuator_physical_cap_v190 import install_physical_command_cap_patch
 from .actuator_release_state import TrackedSolintegCommandAdapter, mark_release_pending, release_status
+from .actuator_timing_v194 import install_decision_start_scheduler
 from .adaptive_deterministic import AdaptiveDeterministicV1
 from .adaptive_learning import current_parameters, mark_orphaned_running_runs
 from .db import DB_PATH
@@ -51,7 +52,7 @@ from .tariff_entry import app
 from .tariff_scenarios import LOCAL_TZ as TARIFF_LOCAL_TZ, _calendar_active
 from .user_override_forecast import build_override_aware_forecast
 
-RUNTIME_BUILD = "1.0.93"
+RUNTIME_BUILD = "1.0.94"
 OPTIONS_PATH = Path("/data/options.json")
 
 CURRENT_ECONOMICS_CONFIG = install_current_economics(core.cfg)
@@ -146,6 +147,7 @@ ADAPTER = TrackedSolintegCommandAdapter(core.cfg, core.collector.ha)
 ACTUATOR = DeterministicActuator(core.cfg, ADAPTER)
 install_actuator_diagnostics_patch()
 install_physical_command_cap_patch()
+ACTUATOR_TIMING = install_decision_start_scheduler(ACTUATOR)
 
 _BASE_OPTIMIZER_REFRESH = core._refresh_optimizer_plan
 _BASE_MAINTENANCE_LOOP = core._forecast_maintenance_loop
@@ -460,6 +462,7 @@ async def runtime_lifespan(application):
                 await live_task
             except asyncio.CancelledError:
                 pass
+            await ACTUATOR_TIMING.close()
             if production_status().get("physical_writes_enabled"):
                 try:
                     await ADAPTER.safe_release()
