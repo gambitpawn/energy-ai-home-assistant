@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from . import engine_operator_selection as engine_operator_selection_module
 from . import runtime as base
 from . import ui_parameters
 from .engine_operator_selection import install_operator_engine_routing
@@ -10,10 +11,12 @@ from .neural_qualification import (
 )
 from .operator_mode_control import install_operator_mode_control
 from .settings_store import delete_setting_overrides
+from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 
-RELEASE_BUILD = "1.0.98"
+RELEASE_BUILD = "1.0.99"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
+engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
 
 # Continuous neural training and race qualification are separate. Freeze one
 # neural revision for neural_v1 + hybrid_v1 while new latest models may continue
@@ -34,13 +37,15 @@ def _qualification_aware_neural_runtime_status():
 base.neural_runtime_status = _qualification_aware_neural_runtime_status
 
 # Operator engine selection is a routing override only. Install it before the
-# hybrid wrapper so hybrid_v1 is still prepared for the shared information
-# vintage before either Auto or a manual engine is routed.
+# challenger preparation wrappers so all challengers are written for the same
+# information vintage before either Auto or a manual engine is routed.
 install_operator_engine_routing()
 
-# hybrid_v1 must be prepared for the shared information vintage before the
-# existing selector gateway chooses which engine to route.
+# Learned hybrid and deterministic stochastic decisions both join the shared
+# quarter race before routing. The stochastic wrapper is installed last, so it
+# prepares first and then delegates through hybrid -> operator -> robust selector.
 install_hybrid_runtime_patch(base.core.cfg)
+install_stochastic_runtime_patch(base.core.cfg)
 
 # The temporary commissioning power cap has been retired. Remove its old
 # Parameters entry and any DB override so it cannot accidentally look like an
@@ -84,6 +89,11 @@ async def neural_qualification_status():
 @app.get("/engines/hybrid/status", tags=["engines"])
 async def hybrid_status():
     return {"runtime_build": RELEASE_BUILD, **hybrid_runtime_status()}
+
+
+@app.get("/engines/stochastic/status", tags=["engines"])
+async def stochastic_status():
+    return {"runtime_build": RELEASE_BUILD, **stochastic_runtime_status()}
 
 
 # Keep the historical diagnostics URL, but make its semantics explicit: there

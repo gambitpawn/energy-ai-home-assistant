@@ -11,6 +11,7 @@ from .optimizer_v35_replay import solve_v35_from_rows
 
 BASELINE_ENGINE_ID = "deterministic_v35"
 ADAPTIVE_ENGINE_ID = "adaptive_deterministic_v1"
+STOCHASTIC_ENGINE_ID = "stochastic_deterministic_v1"
 
 DESCRIPTORS: tuple[EngineDescriptor, ...] = (
     EngineDescriptor(
@@ -34,6 +35,17 @@ DESCRIPTORS: tuple[EngineDescriptor, ...] = (
         available=True,
         trainable=True,
         learning_enabled=True,
+    ),
+    EngineDescriptor(
+        engine_id=STOCHASTIC_ENGINE_ID,
+        engine_version="1",
+        family="deterministic",
+        display_name="Stochastic deterministic",
+        description="Two-stage scenario optimizer using load/PV forecast uncertainty, common first-action nonanticipativity and CVaR downside weighting.",
+        baseline=False,
+        available=True,
+        trainable=False,
+        learning_enabled=False,
     ),
     EngineDescriptor(
         engine_id="neural_v1",

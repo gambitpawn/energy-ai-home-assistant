@@ -14,6 +14,7 @@ from .ui_live import LIVE_EXTENSION, install_live_routes
 from .ui_model_control import MODELS_CONTROL_EXTENSION, install_model_control_routes
 from .ui_models import MODELS_EXTENSION, install_model_routes
 from .ui_parameters import PARAMETERS_EXTENSION, install_parameter_routes
+from .ui_stochastic import STOCHASTIC_UI_EXTENSION
 
 
 CURRENT_UI_EXTENSION = (
@@ -23,6 +24,7 @@ CURRENT_UI_EXTENSION = (
     + PARAMETERS_EXTENSION
     + MODELS_EXTENSION
     + MODELS_CONTROL_EXTENSION
+    + STOCHASTIC_UI_EXTENSION
     + CHARTS_EXTENSION
 )
 
