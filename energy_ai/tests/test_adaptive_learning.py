@@ -18,10 +18,18 @@ def _quadratic_score(params: AdaptiveParameters) -> float:
     )
 
 
-def test_coordinate_descent_finds_grid_optimum():
+def test_coordinate_descent_is_local_refinement():
+    """v1.0.77 intentionally made coordinate descent local around its seed.
+
+    The full learning cycle first performs global isolated sweeps; coordinate
+    descent then refines only neighboring grid points. Starting directly from
+    defaults therefore moves pv_forecast_risk two local steps (0 -> .25 -> .5)
+    in two passes rather than jumping to the global 1.0 optimum.
+    """
     start = AdaptiveParameters()
     optimum, observations = learning.coordinate_descent(start, _quadratic_score, passes=2)
-    assert optimum.pv_forecast_risk == pytest.approx(1.0)
+    assert _quadratic_score(optimum) < _quadratic_score(start)
+    assert optimum.pv_forecast_risk == pytest.approx(0.5)
     assert optimum.load_forecast_risk == pytest.approx(0.5)
     assert optimum.terminal_energy_value_ore_kwh == pytest.approx(175.0)
     assert optimum.discharge_hurdle_ore_kwh == pytest.approx(10.0)
