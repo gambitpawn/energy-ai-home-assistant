@@ -4,8 +4,8 @@ import json
 import sqlite3
 from typing import Any, Callable
 
+from . import model_selector as selector
 from .db import DB_PATH
-from .model_selector import ensure_selector_state
 
 WINDOW_SCORE_DAYS = {"1d": 1, "7d": 7, "30d": 30, "90d": 90}
 
@@ -16,7 +16,9 @@ def install_model_comparison_patch(ui_module, cfg: dict[str, Any]) -> None:
     def comparison(window: str) -> dict[str, Any]:
         result = base_fn(window)
         score_days = WINDOW_SCORE_DAYS.get(window, 7)
-        state = ensure_selector_state(cfg)
+        # Resolve through the module at call time so robust selector/state patches
+        # installed by the consolidated runtime are always honored.
+        state = selector.ensure_selector_state(cfg)
         context = state["context_signature"]
 
         with sqlite3.connect(DB_PATH, timeout=20) as c:
@@ -47,8 +49,6 @@ def install_model_comparison_patch(ui_module, cfg: dict[str, Any]) -> None:
                 payload = json.loads(raw or "{}")
             except Exception:
                 payload = {}
-            # Daily total regret is authoritative when stored. Fall back to mean
-            # x intervals for rows created by earlier selector versions.
             total_regret_ore = payload.get("total_regret_ore")
             if total_regret_ore is None:
                 total_regret_ore = float(mean_regret) * int(intervals)
