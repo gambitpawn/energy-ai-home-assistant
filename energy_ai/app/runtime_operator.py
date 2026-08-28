@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from . import runtime as base
 from . import ui_parameters
+from .engine_operator_selection import install_operator_engine_routing
 from .hybrid_runtime import hybrid_runtime_status, install_hybrid_runtime_patch
 from .neural_qualification import (
     install_qualification_candidate_runtime,
@@ -10,7 +11,7 @@ from .neural_qualification import (
 from .operator_mode_control import install_operator_mode_control
 from .settings_store import delete_setting_overrides
 
-RELEASE_BUILD = "1.0.97"
+RELEASE_BUILD = "1.0.98"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 
@@ -31,6 +32,11 @@ def _qualification_aware_neural_runtime_status():
 
 
 base.neural_runtime_status = _qualification_aware_neural_runtime_status
+
+# Operator engine selection is a routing override only. Install it before the
+# hybrid wrapper so hybrid_v1 is still prepared for the shared information
+# vintage before either Auto or a manual engine is routed.
+install_operator_engine_routing()
 
 # hybrid_v1 must be prepared for the shared information vintage before the
 # existing selector gateway chooses which engine to route.

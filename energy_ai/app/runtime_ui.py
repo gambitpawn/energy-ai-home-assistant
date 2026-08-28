@@ -11,6 +11,7 @@ from .overview_extension import OVERVIEW_EXTENSION, _history_rows
 from .ui_charts import CHARTS_EXTENSION
 from .ui_evaluation import EVALUATION_EXTENSION, install_evaluation_routes
 from .ui_live import LIVE_EXTENSION, install_live_routes
+from .ui_model_control import MODELS_CONTROL_EXTENSION, install_model_control_routes
 from .ui_models import MODELS_EXTENSION, install_model_routes
 from .ui_parameters import PARAMETERS_EXTENSION, install_parameter_routes
 
@@ -21,6 +22,7 @@ CURRENT_UI_EXTENSION = (
     + LIVE_EXTENSION
     + PARAMETERS_EXTENSION
     + MODELS_EXTENSION
+    + MODELS_CONTROL_EXTENSION
     + CHARTS_EXTENSION
 )
 
@@ -61,3 +63,4 @@ def install_runtime_ui(app: FastAPI, core, live_state_cache) -> None:
     install_live_routes(app, core.cfg, live_state_cache, core.collector.ha)
     install_parameter_routes(app)
     install_model_routes(app, core.cfg)
+    install_model_control_routes(app, core.cfg)
