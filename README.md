@@ -4,7 +4,7 @@ Energy AI is a Home Assistant app for forecasting, planning and controlling hous
 
 It is designed as a closed-loop energy controller rather than a collection of independent automations. Measurements from Home Assistant are combined with weather, price and learned consumption/production behaviour. The system forecasts future load and PV production, calculates battery plans, compares competing control engines and — in **Active** mode — sends the selected battery command to a Solinteg inverter through Home Assistant.
 
-The current runtime is version **1.0.97**.
+The current runtime is version **1.0.98**.
 
 ## System objective
 
@@ -43,7 +43,7 @@ control engines
   ├─ neural_v1
   └─ hybrid_v1               ← neural-guided constrained v3.5 optimization
         ↓
-model selector
+model selector / operator engine routing
         ↓
 selected quarter-hour decision
         ↓
@@ -187,7 +187,7 @@ A frozen candidate remains unchanged until one of these occurs:
 
 A neural or hybrid engine that is already the selected incumbent remains frozen; background training cannot silently replace the model controlling the race.
 
-## Model selector
+## Model selector and operator engine choice
 
 The selector evaluates challengers using realized performance over complete historical days. Promotion requires sustained improvement rather than a single good result.
 
@@ -205,7 +205,11 @@ If several challengers pass, the selector chooses the eligible engine with the l
 
 The comparison is against the current incumbent. `deterministic_v35` remains the permanent fallback. If a selected challenger becomes unhealthy or materially underperforms, the selector can roll back to the deterministic baseline.
 
-Physical actuation is downstream of selector logic, so promotion does not change the actuator safety contract.
+The **Models** tab exposes an operator engine selector. `Auto` is the default and follows the robust selector incumbent. An individual engine can also be chosen manually. Manual selection changes only the routing of control decisions: the Auto race, qualification, promotion and rollback evidence continue to be collected in the background. A manually selected engine is still subject to model-health checks and downstream deterministic actuator safety; unavailable, quarantined or unhealthy manual engines fall back to `deterministic_v35`.
+
+The Models tab also shows the current race ranking. This is a descriptive ranking based on current paired realized oracle-regret performance versus the Auto incumbent. A model can therefore lead the interim ranking while still being marked as evaluating; only the full robust qualification gates permit automatic promotion.
+
+Physical actuation is downstream of selector and operator-routing logic, so neither promotion nor manual engine choice changes the actuator safety contract.
 
 ## Operating modes
 
@@ -222,12 +226,12 @@ Selecting Active performs the required control transition automatically:
 1. preflight validation
 2. recovery of any pending safe release
 3. zero-power Solinteg handshake / arming when required
-4. resolution of the selector decision valid for the current interval
+4. resolution of the selected engine decision valid for the current interval
 5. transition to Active
 6. deterministic safety filtering
 7. Solinteg command and acknowledgement
 
-If no valid selector decision exists for the current quarter, Energy AI can take control at 0 kW and wait for the next valid decision. The operator does not need to wait for a quarter boundary before enabling Active.
+If no valid selected-engine decision exists for the current quarter, Energy AI can take control using the deterministic fallback or at 0 kW and wait for the next valid decision. The operator does not need to wait for a quarter boundary before enabling Active.
 
 After an app restart the system deliberately starts in Shadow and must be activated again.
 
@@ -296,13 +300,13 @@ Demand tariffs are modelled separately and can be enabled when the configured ta
 
 The app runs through Home Assistant Ingress. Main views include:
 
-- **Overview** — current energy state and plan
+- **Overview** — current energy state, active model and plan
 - **Live** — measurements and forecasts
 - **Parameters** — installation, economics, optimizer and actuator settings, plus Shadow/Active mode
-- **Models** — engine status, comparisons and selector state
+- **Models** — Auto/manual engine selection, current Auto race ranking, engine comparisons and selector state
 - **Evaluation** — historical performance and replay analysis
 
-Settings saved in Parameters are persisted in SQLite and override Home Assistant app defaults. Settings affecting startup-configured actuator semantics require a restart before physical control is allowed.
+Settings saved in Parameters are persisted in SQLite and override Home Assistant app defaults. The Models engine selection is also persisted in SQLite; new installations default to `Auto`. Settings affecting startup-configured actuator semantics require a restart before physical control is allowed.
 
 ## API
 
@@ -327,9 +331,13 @@ GET  /engines/selector/status
 GET  /engines/selector/control/latest
 GET  /optimizer/replanning/status
 GET  /economics/status
+
+GET  /ui/model-control
+POST /ui/model-control
+GET  /ui/model-ranking
 ```
 
-Low-level actuator endpoints remain available for diagnostics, but ordinary operation is intended to use the Shadow/Active control in Parameters.
+Low-level actuator endpoints remain available for diagnostics, but ordinary operation is intended to use the Shadow/Active control in Parameters and the engine selector in Models.
 
 ## Installation
 
@@ -372,10 +380,10 @@ The following invariants are intentional:
 - keep `deterministic_v35` frozen as reference and fallback
 - give competing engines the same ex-ante information vintage
 - separate continuous model training from frozen qualification revisions
-- keep model selection separate from physical safety
+- keep automatic model selection and manual engine routing separate from physical safety
 - validate physical actions against current measured state
 - never dispatch a future decision before `decision_start`
 - fail toward safe release rather than silently continuing after actuator faults
-- require measured replay/evaluation evidence before a learned engine replaces the incumbent
+- require measured replay/evaluation evidence before a learned engine replaces the Auto incumbent
 
 These constraints allow forecasting and control models to evolve without turning each model change into a new physical safety implementation.
