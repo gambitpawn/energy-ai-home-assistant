@@ -6,6 +6,8 @@ from . import deterministic_actuator as actuator_module
 
 _INSTALLED = False
 _ORIGINAL_SAFETY_FILTER: Callable[[dict[str, Any], dict[str, Any], dict[str, Any]], dict[str, Any]] | None = None
+_ORIGINAL_PROCESS_CANDIDATE = None
+_ORIGINAL_STATUS = None
 
 
 def apply_physical_command_cap(safety: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
@@ -73,11 +75,31 @@ def apply_physical_command_cap(safety: dict[str, Any], cfg: dict[str, Any]) -> d
     return out
 
 
+def _promote_cap_diagnostics(result: dict[str, Any]) -> dict[str, Any]:
+    safety = result.get("safety")
+    if not isinstance(safety, dict):
+        return result
+    out = dict(result)
+    if safety.get("pre_cap_safe_action_kw") is not None:
+        out["pre_cap_safe_action_kw"] = safety.get("pre_cap_safe_action_kw")
+    # For held_existing, result.safe_action_kw is the command actually retained;
+    # otherwise it is the target that was/would be dispatched.
+    if out.get("safe_action_kw") is not None:
+        out["physical_target_kw"] = float(out["safe_action_kw"])
+    elif safety.get("physical_target_kw") is not None:
+        out["physical_target_kw"] = safety.get("physical_target_kw")
+    out["physical_command_cap_kw"] = safety.get("physical_command_cap_kw")
+    out["cap_applied"] = bool(safety.get("cap_applied"))
+    return out
+
+
 def install_physical_command_cap_patch() -> None:
-    global _INSTALLED, _ORIGINAL_SAFETY_FILTER
+    global _INSTALLED, _ORIGINAL_SAFETY_FILTER, _ORIGINAL_PROCESS_CANDIDATE, _ORIGINAL_STATUS
     if _INSTALLED:
         return
     _ORIGINAL_SAFETY_FILTER = actuator_module.safety_filter
+    _ORIGINAL_PROCESS_CANDIDATE = actuator_module.DeterministicActuator.process_candidate
+    _ORIGINAL_STATUS = actuator_module.DeterministicActuator.status
 
     def capped_safety_filter(candidate: dict[str, Any], cfg: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:
         if _ORIGINAL_SAFETY_FILTER is None:
@@ -85,5 +107,25 @@ def install_physical_command_cap_patch() -> None:
         base = _ORIGINAL_SAFETY_FILTER(candidate, cfg, actual)
         return apply_physical_command_cap(base, cfg)
 
+    async def capped_process_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        if _ORIGINAL_PROCESS_CANDIDATE is None:
+            raise RuntimeError("physical command cap process patch is not initialized")
+        result = await _ORIGINAL_PROCESS_CANDIDATE(self, candidate)
+        return _promote_cap_diagnostics(result)
+
+    async def capped_status(self) -> dict[str, Any]:
+        if _ORIGINAL_STATUS is None:
+            raise RuntimeError("physical command cap status patch is not initialized")
+        result = await _ORIGINAL_STATUS(self)
+        semantics = dict(result.get("safety_semantics") or {})
+        semantics["downstream_physical_command_cap"] = True
+        result["safety_semantics"] = semantics
+        configuration = dict(result.get("configuration_safety") or {})
+        configuration["physical_command_cap_change_requires_restart"] = True
+        result["configuration_safety"] = configuration
+        return result
+
     actuator_module.safety_filter = capped_safety_filter
+    actuator_module.DeterministicActuator.process_candidate = capped_process_candidate
+    actuator_module.DeterministicActuator.status = capped_status
     _INSTALLED = True
