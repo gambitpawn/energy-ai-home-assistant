@@ -14,6 +14,11 @@ def apply_physical_command_cap(safety: dict[str, Any], cfg: dict[str, Any]) -> d
     This is deliberately downstream of optimizer/model selection and downstream
     of the deterministic SOC/grid safety envelope. It therefore changes only the
     physical target sent to Solinteg, never the model request or comparison data.
+
+    `safe_interval_kw` is narrowed to the final physical interval as well. This is
+    intentional: established min-change and watchdog logic already trust that
+    field, so they must not retain an older command outside the commissioning cap.
+    The uncapped deterministic interval is preserved separately for diagnostics.
     """
     out = dict(safety)
     actuator = cfg.get("actuator") or {}
@@ -33,15 +38,18 @@ def apply_physical_command_cap(safety: dict[str, Any], cfg: dict[str, Any]) -> d
     except Exception:
         predicted_grid = out.get("predicted_grid_kw")
 
-    safe_interval = out.get("safe_interval_kw") or {}
+    source_interval = out.get("safe_interval_kw") or {}
+    deterministic_interval: dict[str, float] | None = None
     try:
-        safe_lo = float(safe_interval.get("min"))
-        safe_hi = float(safe_interval.get("max"))
+        safe_lo = float(source_interval.get("min"))
+        safe_hi = float(source_interval.get("max"))
+        deterministic_interval = {"min": round(safe_lo, 4), "max": round(safe_hi, 4)}
         command_lo = max(safe_lo, -cap)
         command_hi = min(safe_hi, cap)
     except Exception:
         command_lo, command_hi = -cap, cap
 
+    physical_interval = {"min": round(command_lo, 4), "max": round(command_hi, 4)}
     out.update(
         {
             "pre_cap_safe_action_kw": round(pre_cap, 4),
@@ -55,10 +63,11 @@ def apply_physical_command_cap(safety: dict[str, Any], cfg: dict[str, Any]) -> d
             "cap_applied": cap_applied,
             "reasons": reasons,
             "predicted_grid_kw": None if predicted_grid is None else round(float(predicted_grid), 4),
-            "physical_command_interval_kw": {
-                "min": round(command_lo, 4),
-                "max": round(command_hi, 4),
-            },
+            "deterministic_safe_interval_kw": deterministic_interval,
+            "physical_command_interval_kw": physical_interval,
+            # Existing actuator hold/watchdog logic reads this key. Narrowing it
+            # is what makes the cap a real downstream safety boundary.
+            "safe_interval_kw": physical_interval,
         }
     )
     return out
