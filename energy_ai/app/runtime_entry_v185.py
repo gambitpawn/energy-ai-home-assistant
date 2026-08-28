@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 
+from . import ui_v183
+from .model_compare_v185 import install_model_comparison_patch
 from .model_selector import LOCAL_TZ, evaluate_selector_day, automatic_selector_maintenance_once
 from .runtime_entry_v184 import app, core
 
 RUNTIME_BUILD = "1.0.85"
+
+# Economic model windows are defined by mature selector-score days. Behaviour
+# remains trailing wall-clock time in ui_v183.
+install_model_comparison_patch(ui_v183, core.cfg)
 
 _previous_maintenance_loop = core._forecast_maintenance_loop
 
@@ -21,7 +27,7 @@ async def _model_score_backfill_loop() -> None:
     # This is required for the Models UI: older stored competition vintages remain
     # valid comparison evidence even if a config/economics change reset promotion
     # eligibility more recently.
-    today = __import__('datetime').datetime.now(LOCAL_TZ).date()
+    today = datetime.now(LOCAL_TZ).date()
     for age_days in range(2, 9):
         day = today - timedelta(days=age_days)
         try:
