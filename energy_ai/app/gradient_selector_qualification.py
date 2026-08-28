@@ -97,14 +97,13 @@ def install_gradient_selector_qualification() -> None:
         result = _ORIGINAL_RUN_SELECTION_POLICY(cfg)
         if not isinstance(result, dict):
             return result
-        # If another challenger was promoted, no failed-candidate rotation is
-        # needed in this cycle. Otherwise independently rotate gradient_v1 after
-        # its own completed failed robust10 window without coupling it to the
-        # neural/hybrid qualification generation.
-        if str(result.get("action")) != "promote":
-            rotation = _maybe_rotate_failed_gradient_candidate(cfg, result)
-            if rotation is not None:
-                result = {**result, "gradient_qualification_candidate_rotation": rotation}
+        # Gradient has an independent learned-candidate generation. If its own
+        # robust10 window completed without eligibility, rotate it even when a
+        # different challenger won this same selector cycle. If gradient itself
+        # was promoted, the selected-incumbent check above keeps it frozen.
+        rotation = _maybe_rotate_failed_gradient_candidate(cfg, result)
+        if rotation is not None:
+            result = {**result, "gradient_qualification_candidate_rotation": rotation}
         return result
 
     robust._disqualify_model = disqualify_with_gradient_rotation
