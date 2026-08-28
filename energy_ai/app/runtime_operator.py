@@ -3,12 +3,34 @@ from __future__ import annotations
 from . import runtime as base
 from . import ui_parameters
 from .hybrid_runtime import hybrid_runtime_status, install_hybrid_runtime_patch
+from .neural_qualification import (
+    install_qualification_candidate_runtime,
+    qualification_status,
+)
 from .operator_mode_control import install_operator_mode_control
 from .settings_store import delete_setting_overrides
 
-RELEASE_BUILD = "1.0.96"
+RELEASE_BUILD = "1.0.97"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
+
+# Continuous neural training and race qualification are separate. Freeze one
+# neural revision for neural_v1 + hybrid_v1 while new latest models may continue
+# to train in the background.
+QUALIFICATION_RUNTIME = install_qualification_candidate_runtime()
+_ORIGINAL_NEURAL_RUNTIME_STATUS = base.neural_runtime_status
+
+
+def _qualification_aware_neural_runtime_status():
+    status = _ORIGINAL_NEURAL_RUNTIME_STATUS()
+    candidate = qualification_status()
+    status["latest_model_shadow_ready"] = bool(status.get("shadow_ready"))
+    status["qualification_candidate"] = candidate
+    status["shadow_ready"] = bool(candidate.get("candidate_ready"))
+    return status
+
+
+base.neural_runtime_status = _qualification_aware_neural_runtime_status
 
 # hybrid_v1 must be prepared for the shared information vintage before the
 # existing selector gateway chooses which engine to route.
@@ -46,6 +68,11 @@ def _remove_route(path: str) -> None:
         route for route in app.router.routes
         if getattr(route, "path", None) != path
     ]
+
+
+@app.get("/engines/neural/qualification", tags=["engines"])
+async def neural_qualification_status():
+    return {"runtime_build": RELEASE_BUILD, **qualification_status()}
 
 
 @app.get("/engines/hybrid/status", tags=["engines"])
