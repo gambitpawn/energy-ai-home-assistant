@@ -66,7 +66,7 @@ def status() -> dict[str, Any]:
         "physical_writes_enabled": bool(row[1]),
         "actuator_ready": bool(row[2]),
         "updated_at": row[3],
-        "startup_policy": "restore_previous_mode_after_validation",
+        "startup_policy": "always_disarmed_requires_new_zero_handshake",
         "payload": payload,
     }
 
