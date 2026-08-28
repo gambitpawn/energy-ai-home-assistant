@@ -25,8 +25,9 @@ _previous_lifespan = app.router.lifespan_context
 async def _lifespan_v187_final(application):
     if v187._NEEDS_STARTUP_RELEASE:
         try:
-            await v187.ADAPTER.safe_release()
-            v187._NEEDS_STARTUP_RELEASE = False
+            release = await v187.ADAPTER.safe_release()
+            if release.get("released"):
+                v187._NEEDS_STARTUP_RELEASE = False
         except Exception:
             pass
     async with _previous_lifespan(application):
@@ -67,7 +68,7 @@ async def production_control_mode_v187(mode: str):
         if candidate is None:
             raise HTTPException(409, "ACTIVE requires a current selector/live control candidate")
         try:
-            prod = await asyncio.to_thread(set_mode, "active", reason="api_actuator_transition")
+            await asyncio.to_thread(set_mode, "active", reason="api_actuator_transition")
             actuation = await v187.ACTUATOR.process_candidate(candidate)
         except Exception as exc:
             try:
@@ -76,6 +77,10 @@ async def production_control_mode_v187(mode: str):
                 pass
             raise HTTPException(500, f"ACTIVE transition failed: {exc!r}")
         if actuation.get("status") not in {"acknowledged", "held_existing"}:
+            try:
+                await v187.ACTUATOR.fail_safe("active_transition_unacknowledged", {"actuation": actuation})
+            except Exception:
+                pass
             raise HTTPException(409, f"ACTIVE transition did not produce an acknowledged command: {actuation}")
         return {**production_status(), "actuator_transition": actuation, "requested_mode": "active"}
 
@@ -83,8 +88,10 @@ async def production_control_mode_v187(mode: str):
     if current.get("operating_mode") == "active" or current.get("physical_writes_enabled"):
         try:
             release = await v187.ADAPTER.safe_release()
+            if not release.get("released"):
+                raise RuntimeError(f"safe release incomplete: {release}")
         except Exception as exc:
-            release = {"released": False, "error": repr(exc)}
+            release = {"released": False, "error": repr(exc), "detail": release}
             # Do not claim a clean transition if the inverter cannot be returned
             # to zero/General. Disable writes locally and surface the failure.
             mark_actuator_ready(False, detail="mode_exit_safe_release_failed")
