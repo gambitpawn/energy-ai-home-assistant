@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from . import runtime as base
 from . import ui_parameters
+from .hybrid_runtime import hybrid_runtime_status, install_hybrid_runtime_patch
 from .operator_mode_control import install_operator_mode_control
 from .settings_store import delete_setting_overrides
 
-RELEASE_BUILD = "1.0.95"
+RELEASE_BUILD = "1.0.96"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
+
+# hybrid_v1 must be prepared for the shared information vintage before the
+# existing selector gateway chooses which engine to route.
+install_hybrid_runtime_patch(base.core.cfg)
 
 # The temporary commissioning power cap has been retired. Remove its old
 # Parameters entry and any DB override so it cannot accidentally look like an
@@ -41,6 +46,11 @@ def _remove_route(path: str) -> None:
         route for route in app.router.routes
         if getattr(route, "path", None) != path
     ]
+
+
+@app.get("/engines/hybrid/status", tags=["engines"])
+async def hybrid_status():
+    return {"runtime_build": RELEASE_BUILD, **hybrid_runtime_status()}
 
 
 # Keep the historical diagnostics URL, but make its semantics explicit: there
