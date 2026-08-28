@@ -1,7 +1,7 @@
 name: "Energy AI"
-version: "1.0.86"
+version: "1.0.87"
 slug: "energy_ai"
-description: "Read-only energy AI, forecasts, deterministic shadow planning, history and LLM analysis for Home Assistant."
+description: "Energy AI forecasts, optimization, model selection and explicitly armed deterministic Solinteg actuation for Home Assistant."
 stage: experimental
 init: false
 
@@ -35,6 +35,8 @@ options:
   entity_battery_power: "sensor.solinteg_inverter_battery_power"
   entity_battery_soc: "sensor.solinteg_inverter_battery_soc"
   entity_spot_price: "sensor.nord_pool_se4_aktuellt_pris"
+  entity_solinteg_working_mode: ""
+  entity_solinteg_battery_power_target: ""
 
   entity_ev_power: "sensor.zap361270_laddeffekt"
   entity_ev_connected: "sensor.zap361270_laddstatus"
@@ -98,6 +100,17 @@ options:
   optimizer_soc_replan_min_interval_seconds: 60
   optimizer_soc_observation_max_age_seconds: 180
 
+  actuator_control_working_mode: "EMS BattCtrl"
+  actuator_safe_working_mode: "General"
+  actuator_ack_timeout_seconds: 8.0
+  actuator_ack_tolerance_kw: 0.10
+  actuator_state_max_age_seconds: 180
+  actuator_candidate_grace_seconds: 120
+  actuator_soc_guard_margin_pct: 1.0
+  actuator_zero_deadband_kw: 0.05
+  actuator_min_action_change_kw: 0.10
+  actuator_watchdog_poll_seconds: 30
+
   tariff_enabled: false
   tariff_consumption_enabled: false
   tariff_consumption_rate_sek_per_kw: 105.0
@@ -129,6 +142,8 @@ schema:
   entity_battery_power: str
   entity_battery_soc: str
   entity_spot_price: str
+  entity_solinteg_working_mode: str
+  entity_solinteg_battery_power_target: str
 
   entity_ev_power: str
   entity_ev_connected: str
@@ -190,6 +205,17 @@ schema:
   optimizer_soc_replan_emergency_threshold_pct: "float(0.1,30)"
   optimizer_soc_replan_min_interval_seconds: "int(0,900)"
   optimizer_soc_observation_max_age_seconds: "int(15,1800)"
+
+  actuator_control_working_mode: str
+  actuator_safe_working_mode: str
+  actuator_ack_timeout_seconds: "float(1,30)"
+  actuator_ack_tolerance_kw: "float(0.01,2)"
+  actuator_state_max_age_seconds: "int(15,1800)"
+  actuator_candidate_grace_seconds: "int(0,900)"
+  actuator_soc_guard_margin_pct: "float(0,10)"
+  actuator_zero_deadband_kw: "float(0,1)"
+  actuator_min_action_change_kw: "float(0,2)"
+  actuator_watchdog_poll_seconds: "int(10,300)"
 
   tariff_enabled: bool
   tariff_consumption_enabled: bool
