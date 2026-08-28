@@ -14,8 +14,8 @@ def test_consolidated_runtime_imports_without_versioned_entry_chain(tmp_path):
 
     runtime = importlib.import_module("app.runtime")
 
-    assert runtime.RUNTIME_BUILD == "1.0.92"
-    assert runtime.app.version == "1.0.92"
+    assert runtime.RUNTIME_BUILD == "1.0.93"
+    assert runtime.app.version == "1.0.93"
 
     loaded_legacy = sorted(
         name for name in sys.modules
