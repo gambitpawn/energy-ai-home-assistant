@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.83"
+version: "1.0.84"
 slug: "energy_ai"
 description: "Read-only energy AI, forecasts, deterministic shadow planning, history and LLM analysis for Home Assistant."
 stage: experimental
@@ -64,17 +64,12 @@ options:
   normal_reserve_soc_pct: 20
   high_uncertainty_reserve_soc_pct: 28
 
-  # Authoritative grid-energy economics from 1.0.79.
-  # Fixed import component defaults to the Swedish energy tax from 2026-01-01:
-  # 36.00 ore/kWh excluding VAT. Override this value if the installation has
-  # additional fixed per-kWh import components that should be included.
   import_fixed_including_energy_tax_ore_kwh: 36.0
   import_spot_percentage: 6.86
   export_fixed_compensation_ore_kwh: 2.84
   export_spot_percentage: 6.05
   economics_valid_from: ""
 
-  # Legacy compatibility fields retained for migration of existing installs.
   import_overhead_ore_kwh: 0
   export_overhead_ore_kwh: 0
   minimum_arbitrage_margin_ore_kwh: 20
@@ -199,7 +194,7 @@ schema:
   tariff_production_rate_sek_per_kw: "float(0,10000)"
   tariff_production_start_hour: "int(0,23)"
   tariff_production_end_hour: "int(1,24)"
-  tariff_production_active_months: "str"
+  tariff_production_active_months: str
   tariff_production_day_rule: str
 
   llm_enabled: bool
