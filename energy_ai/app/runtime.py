@@ -16,7 +16,6 @@ from . import neural_auto
 from . import neural_features as neural_features_module
 from . import neural_training as neural_training_module
 from . import neural_training_v2
-from . import ui_v183
 from .actuator_config import install_actuator_config
 from .actuator_diagnostics_v188 import install_actuator_diagnostics_patch
 from .actuator_physical_cap_v190 import install_physical_command_cap_patch
@@ -29,7 +28,6 @@ from .engine_input_v2 import input_from_optimizer_plan_v2
 from .engine_registry import baseline_decision_from_plan
 from .engine_store import insert_engine_run
 from .live_state import LiveStateCache
-from .model_compare_v185 import install_model_comparison_patch
 from .model_selector_policy import install_selector_policy_patch
 from .model_selector_robust import install_robust_selector_patch
 from .model_selector_robust_hardening import install_robust_selector_hardening
@@ -48,19 +46,14 @@ from .production_state import mark_actuator_ready, set_mode, status as productio
 from .replanning_config import install_replanning_config
 from .runtime_maintenance import combined_maintenance_loop
 from .runtime_ui import install_runtime_ui
-from .settings_store import load_setting_overrides
 from .soc_replanning import replanning_snapshot
 from .tariff_entry import app
 from .tariff_scenarios import LOCAL_TZ as TARIFF_LOCAL_TZ, _calendar_active
 from .user_override_forecast import build_override_aware_forecast
 
-RUNTIME_BUILD = "1.0.92"
+RUNTIME_BUILD = "1.0.93"
 OPTIONS_PATH = Path("/data/options.json")
 
-# ---------------------------------------------------------------------------
-# One-time compatibility/configuration installation. These preserve all active
-# v1.0.91 semantics without importing any historical runtime_entry_vXX module.
-# ---------------------------------------------------------------------------
 CURRENT_ECONOMICS_CONFIG = install_current_economics(core.cfg)
 ECONOMICS_VERSION = register_current_economics(core.cfg)
 ECONOMICS_PATCH_STATUS = install_economics_patches(core.cfg)
@@ -76,7 +69,6 @@ install_robust_selector_patch()
 install_robust_selector_hardening()
 OPTIMIZER_INTERVAL_CONTRACT = install_optimizer_interval_contract_patch()
 
-# Neural v2 schema/teacher compatibility formerly spread across v1.72-v1.75.
 neural_training_v2.install_into_v1_module()
 neural_training_module._perfect_information_teacher = perfect_information_teacher_v2
 neural_training_module.LABEL_SOURCE = LABEL_SOURCE_V2
@@ -134,19 +126,10 @@ def _tariff_active_fraction_local(chunk, tariff, enabled):
 
 
 neural_features_module._tariff_active_fraction = _tariff_active_fraction_local
-
-# Flexible-load overrides become part of load-forecast composition once, not via
-# a historical runtime patch chain.
 load_forecast_module.flexible_load_forecast = build_override_aware_forecast(
     flexible_loads_module.flexible_load_forecast
 )
 
-# Models economic windows use mature selector-score days.
-install_model_comparison_patch(ui_v183, core.cfg)
-
-# ---------------------------------------------------------------------------
-# Actuator and persistent production state.
-# ---------------------------------------------------------------------------
 _PREVIOUS_PRODUCTION = production_status()
 _NEEDS_STARTUP_RELEASE = bool(
     _PREVIOUS_PRODUCTION.get("operating_mode") == "active"
@@ -164,9 +147,6 @@ ACTUATOR = DeterministicActuator(core.cfg, ADAPTER)
 install_actuator_diagnostics_patch()
 install_physical_command_cap_patch()
 
-# ---------------------------------------------------------------------------
-# Shared plan -> engine -> selector -> actuator pipeline.
-# ---------------------------------------------------------------------------
 _BASE_OPTIMIZER_REFRESH = core._refresh_optimizer_plan
 _BASE_MAINTENANCE_LOOP = core._forecast_maintenance_loop
 _OPTIMIZER_REFRESH_LOCK = asyncio.Lock()
@@ -313,9 +293,6 @@ async def refresh_optimizer_plan() -> dict[str, Any]:
 
 core._refresh_optimizer_plan = refresh_optimizer_plan
 
-# ---------------------------------------------------------------------------
-# Intra-quarter SOC replanning.
-# ---------------------------------------------------------------------------
 _REPLAN_STATE: dict[str, Any] = {
     "status": "starting",
     "last_checked_at": None,
@@ -457,9 +434,6 @@ async def _combined_maintenance() -> None:
 
 core._forecast_maintenance_loop = _combined_maintenance
 
-# ---------------------------------------------------------------------------
-# Live-state cache and one consolidated lifespan.
-# ---------------------------------------------------------------------------
 live_state_cache = LiveStateCache(core.cfg, core.collector.ha)
 _BASE_LIFESPAN = app.router.lifespan_context
 
@@ -498,12 +472,8 @@ async def runtime_lifespan(application):
 
 
 app.router.lifespan_context = runtime_lifespan
-
-# UI is installed once from a single composition point.
 install_runtime_ui(app, core, live_state_cache)
 
-# Routes live in one semantic module and receive the actual runtime objects;
-# this directly incorporates the v1.0.91 ACTIVE-preflight routing fix.
 from .runtime_routes import install_runtime_routes  # noqa: E402
 
 install_runtime_routes(
