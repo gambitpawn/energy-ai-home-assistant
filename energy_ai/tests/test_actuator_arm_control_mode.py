@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import asyncio
+
+from app import actuator_arm_control_mode as arm_fix
+
+
+class FakeAdapter:
+    def __init__(self, entered):
+        self.entered = dict(entered)
+        self.safe_release_calls = 0
+
+    async def enter_control_mode_zero(self):
+        return dict(self.entered)
+
+    async def safe_release(self):
+        self.safe_release_calls += 1
+        return {"released": True, "working_mode": "ToU", "battery_power_target_kw": 0.0}
+
+
+class FakeActuator:
+    def __init__(self, entered):
+        self.cfg = {
+            "actuator": {
+                "control_working_mode": "EMS BattCtrl",
+                "ack_tolerance_kw": 0.10,
+            }
+        }
+        self.adapter = FakeAdapter(entered)
+
+    async def preflight(self):
+        return {"ok": True}
+
+
+def test_successful_arm_holds_ems_control_mode_and_does_not_safe_release(monkeypatch):
+    readiness = []
+    events = []
+    monkeypatch.setattr(arm_fix.da, "mark_actuator_ready", lambda ready, detail="": readiness.append((ready, detail)))
+    monkeypatch.setattr(arm_fix.da, "_event", lambda event_type, reason, payload=None: events.append((event_type, reason, payload)))
+    monkeypatch.setattr(
+        arm_fix.da,
+        "production_status",
+        lambda: {"operating_mode": "shadow", "physical_writes_enabled": False, "actuator_ready": True},
+    )
+    actuator = FakeActuator(
+        {
+            "acknowledged": True,
+            "working_mode": "EMS BattCtrl",
+            "battery_power_target_kw": 0.0,
+        }
+    )
+
+    result = asyncio.run(arm_fix.zero_handshake_and_arm_control_mode_held(actuator))
+
+    assert result["ok"] is True
+    assert result["control_mode_held"] is True
+    assert result["control_mode_test"]["working_mode"] == "EMS BattCtrl"
+    assert actuator.adapter.safe_release_calls == 0
+    assert readiness[-1][0] is True
+    assert events[-1][0] == "actuator_armed"
+    assert events[-1][2]["control_mode_held"] is True
+
+
+def test_failed_arm_safe_releases_and_never_marks_ready(monkeypatch):
+    readiness = []
+    events = []
+    monkeypatch.setattr(arm_fix.da, "mark_actuator_ready", lambda ready, detail="": readiness.append((ready, detail)))
+    monkeypatch.setattr(arm_fix.da, "_event", lambda event_type, reason, payload=None: events.append((event_type, reason, payload)))
+    actuator = FakeActuator(
+        {
+            "acknowledged": True,
+            "working_mode": "ToU",
+            "battery_power_target_kw": 0.0,
+        }
+    )
+
+    result = asyncio.run(arm_fix.zero_handshake_and_arm_control_mode_held(actuator))
+
+    assert result["ok"] is False
+    assert result["stage"] == "zero_handshake"
+    assert actuator.adapter.safe_release_calls == 1
+    assert readiness[-1][0] is False
+    assert events[-1][0] == "actuator_arm_failed"
+
+
+def test_runtime_installs_arm_patch_before_operator_activation():
+    source = (__import__("pathlib").Path(__file__).resolve().parents[1] / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    assert "install_arm_control_mode_patch()" in source
+    assert source.index("install_arm_control_mode_patch()") < source.index("install_operator_mode_control(")
