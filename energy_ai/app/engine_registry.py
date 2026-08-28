@@ -12,6 +12,7 @@ from .optimizer_v35_replay import solve_v35_from_rows
 BASELINE_ENGINE_ID = "deterministic_v35"
 ADAPTIVE_ENGINE_ID = "adaptive_deterministic_v1"
 STOCHASTIC_ENGINE_ID = "stochastic_deterministic_v1"
+GRADIENT_ENGINE_ID = "gradient_v1"
 
 DESCRIPTORS: tuple[EngineDescriptor, ...] = (
     EngineDescriptor(
@@ -46,6 +47,17 @@ DESCRIPTORS: tuple[EngineDescriptor, ...] = (
         available=True,
         trainable=False,
         learning_enabled=False,
+    ),
+    EngineDescriptor(
+        engine_id=GRADIENT_ENGINE_ID,
+        engine_version="1",
+        family="neural",
+        display_name="Gradient boost",
+        description="Tabular histogram gradient-boosting policy trained on the same perfect-information teacher samples as neural_v1.",
+        baseline=False,
+        available=True,
+        trainable=True,
+        learning_enabled=True,
     ),
     EngineDescriptor(
         engine_id="neural_v1",
