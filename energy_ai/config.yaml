@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.89"
+version: "1.0.90"
 slug: "energy_ai"
 description: "Energy AI forecasts, optimization, model selection and explicitly armed deterministic Solinteg actuation for Home Assistant."
 stage: experimental
@@ -110,6 +110,7 @@ options:
   actuator_zero_deadband_kw: 0.05
   actuator_min_action_change_kw: 0.10
   actuator_watchdog_poll_seconds: 30
+  actuator_max_physical_command_kw: 2.0
 
   tariff_enabled: false
   tariff_consumption_enabled: false
@@ -216,6 +217,7 @@ schema:
   actuator_zero_deadband_kw: "float(0,1)"
   actuator_min_action_change_kw: "float(0,2)"
   actuator_watchdog_poll_seconds: "int(10,300)"
+  actuator_max_physical_command_kw: "float(0,8)"
 
   tariff_enabled: bool
   tariff_consumption_enabled: bool
