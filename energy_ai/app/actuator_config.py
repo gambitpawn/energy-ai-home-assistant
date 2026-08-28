@@ -22,6 +22,7 @@ ACTUATOR_DEFAULTS: dict[str, Any] = {
     "actuator_zero_deadband_kw": 0.05,
     "actuator_min_action_change_kw": 0.10,
     "actuator_watchdog_poll_seconds": 30.0,
+    "actuator_max_physical_command_kw": 2.0,
 }
 
 OPTION_TO_RUNTIME = {
@@ -37,6 +38,7 @@ OPTION_TO_RUNTIME = {
     "actuator_zero_deadband_kw": ("actuator", "zero_deadband_kw"),
     "actuator_min_action_change_kw": ("actuator", "min_action_change_kw"),
     "actuator_watchdog_poll_seconds": ("actuator", "watchdog_poll_seconds"),
+    "actuator_max_physical_command_kw": ("actuator", "max_physical_command_kw"),
 }
 
 
@@ -149,6 +151,7 @@ def effective_actuator_config_report(cfg: dict[str, Any]) -> dict[str, Any]:
 
     optimizer = cfg.get("optimizer") or {}
     battery = (cfg.get("policy") or {}).get("battery") or {}
+    actuator = cfg.get("actuator") or {}
     hard_limits = {
         "battery_max_charge_kw": float(optimizer.get("battery_max_charge_kw", 8.0)),
         "battery_max_discharge_kw": float(optimizer.get("battery_max_discharge_kw", 8.0)),
@@ -156,8 +159,8 @@ def effective_actuator_config_report(cfg: dict[str, Any]) -> dict[str, Any]:
         "grid_export_limit_kw": float(optimizer.get("grid_export_limit_kw", 10.0)),
         "hard_min_soc_pct": float(battery.get("hard_min_soc_pct", 5.0)),
         "hard_max_soc_pct": float(battery.get("hard_max_soc_pct", 100.0)),
+        "physical_command_cap_kw": float(actuator.get("max_physical_command_kw", 2.0)),
     }
-    actuator = cfg.get("actuator") or {}
     return {
         "config_loaded_at": actuator.get("config_loaded_at"),
         "runtime": runtime,
@@ -231,6 +234,7 @@ def install_actuator_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "zero_deadband_kw": _float(options, "actuator_zero_deadband_kw", 0.05),
         "min_action_change_kw": _float(options, "actuator_min_action_change_kw", 0.10),
         "watchdog_poll_seconds": _float(options, "actuator_watchdog_poll_seconds", 30.0),
+        "max_physical_command_kw": max(0.0, _float(options, "actuator_max_physical_command_kw", 2.0)),
         "startup_policy": "always_disarmed_requires_zero_handshake",
         "process_crash_inverter_timeout_guaranteed": False,
         "config_loaded_at": datetime.now(timezone.utc).isoformat(),
