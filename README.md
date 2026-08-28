@@ -4,7 +4,7 @@ Energy AI is a Home Assistant app for forecasting, planning and controlling hous
 
 The system is designed as a closed-loop energy controller rather than a collection of independent automations. It continuously combines measurements from Home Assistant with weather, price and learned consumption/production behaviour, calculates an economically preferred battery trajectory, compares alternative control models and — when operating in **Active** mode — sends the selected battery command to a Solinteg inverter through Home Assistant.
 
-The current runtime is version **1.0.94**.
+The current runtime is version **1.0.96**.
 
 ## What the system is trying to optimize
 
@@ -41,7 +41,8 @@ shared information vintage
 control engines
   ├─ deterministic_v35       ← frozen reference and fallback
   ├─ adaptive_deterministic_v1
-  └─ neural_v1
+  ├─ neural_v1
+  └─ hybrid_v1               ← neural-guided constrained v3.5 optimization
         ↓
 model selector
         ↓
@@ -141,9 +142,27 @@ A deterministic challenger whose parameters can be learned from historical perfo
 
 A learned control challenger trained from historical information vintages and teacher/evaluation data. It remains subject to the same downstream physical safety constraints as every other model.
 
+### hybrid_v1
+
+`hybrid_v1` combines the frozen v3.5 constrained dynamic program with the probability distribution produced by `neural_v1`.
+
+The neural model does **not** directly choose an unconstrained battery target. Instead, its probability distribution is converted into a confidence-weighted prior on the **first feasible DP transition**. The rest of the trajectory, all SOC transitions, reserve logic, grid limits and terminal handling remain deterministic v3.5 logic.
+
+The learned prior is intentionally bounded:
+
+- maximum neural-prior strength: **6 öre per decision**
+- maximum accepted deterministic-backbone deterioration: **5 öre per decision**
+- if the neural-guided path exceeds that regret guard, the hybrid engine returns the ordinary v3.5-backbone action instead
+
+This makes the hybrid engine most influential when several deterministic alternatives are economically close. It can use patterns learned by the neural teacher to break those near-ties without giving the neural network authority to violate the deterministic optimization envelope.
+
+The hybrid model revision is derived from the active `neural_v1` model identity. A neural retrain therefore creates a new hybrid model revision and forces fresh selector qualification before that revision can become the active control engine.
+
 ### Selector
 
 The selector evaluates challengers against the baseline over complete historical days. Promotion requires sustained improvement rather than a single good result. The policy considers mean and median performance, daily wins, tail behaviour, coverage and safety/clamp behaviour.
+
+The current robust policy requires a challenger/model revision to qualify over ten complete days, including at least seven daily wins, without material tail or safety regression. `hybrid_v1` enters this same competition automatically once the neural model is shadow-ready; it has no special promotion path.
 
 If a selected challenger becomes unhealthy, the selector falls back to `deterministic_v35`. Physical actuation is downstream of this selection process, so changing the selected model does not change the actuator safety contract.
 
@@ -270,6 +289,7 @@ POST /actuator/disarm
 POST /actuator/run
 
 GET  /engines
+GET  /engines/hybrid/status
 GET  /engines/selector/status
 GET  /engines/selector/control/latest
 GET  /optimizer/replanning/status
