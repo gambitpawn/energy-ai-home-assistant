@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.95"
+version: "1.0.96"
 slug: "energy_ai"
 description: "Energy AI forecasts, optimization, model selection and explicitly armed deterministic Solinteg actuation for Home Assistant."
 stage: experimental
