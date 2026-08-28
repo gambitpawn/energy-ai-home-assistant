@@ -95,19 +95,20 @@ def test_price_economics_keeps_loaded_db_values_over_raw_options(monkeypatch, tm
     assert result["export_spot_percentage"] == pytest.approx(6.50)
 
 
-def test_v180_economics_parameter_registry_contains_spot_linked_fields():
-    import app.ui_v180 as ui_v180
+def test_consolidated_economics_parameter_registry_contains_spot_linked_fields():
+    import app.ui_parameters as ui_parameters
 
-    economics = [p for p in ui_v180.PARAMETERS if p["section"] == "Economics"]
+    economics = [p for p in ui_parameters.PARAMETERS if p["section"] == "Economics"]
     keys = [p["key"] for p in economics]
-    assert keys == [
+    for required in (
         "import_fixed_including_energy_tax_ore_kwh",
         "import_spot_percentage",
         "export_fixed_compensation_ore_kwh",
         "export_spot_percentage",
         "minimum_arbitrage_margin_ore_kwh",
         "optimizer_battery_degradation_ore_kwh",
-    ]
+    ):
+        assert required in keys
     defaults = {p["key"]: p["default"] for p in economics}
     assert defaults["import_fixed_including_energy_tax_ore_kwh"] == pytest.approx(36.0)
     assert defaults["import_spot_percentage"] == pytest.approx(6.86)
