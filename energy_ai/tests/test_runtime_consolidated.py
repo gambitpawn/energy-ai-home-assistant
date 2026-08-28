@@ -14,8 +14,8 @@ def test_consolidated_runtime_imports_without_versioned_entry_chain(tmp_path):
 
     runtime = importlib.import_module("app.runtime")
 
-    assert runtime.RUNTIME_BUILD == "1.0.93"
-    assert runtime.app.version == "1.0.93"
+    assert runtime.RUNTIME_BUILD == "1.0.94"
+    assert runtime.app.version == "1.0.94"
 
     loaded_legacy = sorted(
         name for name in sys.modules
@@ -32,6 +32,7 @@ def test_consolidated_runtime_imports_without_versioned_entry_chain(tmp_path):
         "/actuator/preflight",
         "/actuator/arm",
         "/actuator/physical-cap/status",
+        "/actuator/timing/status",
         "/engines",
         "/engines/selector/status",
         "/engines/neural/status",
