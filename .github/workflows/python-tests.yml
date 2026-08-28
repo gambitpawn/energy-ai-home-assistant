@@ -11,6 +11,7 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONPATH: ${{ github.workspace }}/energy_ai
+      ENERGY_AI_DB: /tmp/energy_ai_test.db
     defaults:
       run:
         working-directory: energy_ai
@@ -30,5 +31,7 @@ jobs:
         run: python -m compileall -q app
       - name: Run actuator regression tests
         run: python -m pytest -q tests/test_deterministic_actuator.py
+      - name: Reset test database
+        run: rm -f /tmp/energy_ai_test.db
       - name: Run full test suite
         run: python -m pytest -q tests
