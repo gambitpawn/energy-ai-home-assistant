@@ -33,10 +33,11 @@ def test_actuator_configuration_no_longer_contains_commissioning_cap():
     assert "actuator_max_physical_command_kw" not in actuator_config.OPTION_TO_RUNTIME
 
 
-def test_home_assistant_addon_schema_no_longer_exposes_commissioning_cap():
+def test_home_assistant_schema_keeps_only_ignored_upgrade_compatibility_key():
     config = (ROOT / "config.yaml").read_text(encoding="utf-8")
     assert 'version: "1.0.94"' in config
-    assert "actuator_max_physical_command_kw" not in config
+    assert "Legacy compatibility only; ignored by the runtime" in config
+    assert "actuator_max_physical_command_kw: 8.0" in config
 
 
 def test_production_operator_wrapper_retires_old_parameter_and_status_semantics():
