@@ -4,7 +4,7 @@ Energy AI is a Home Assistant app for forecasting, planning and controlling hous
 
 It is designed as a closed-loop energy controller rather than a collection of independent automations. Measurements from Home Assistant are combined with weather, price and learned consumption/production behaviour. The system forecasts future load and PV production, calculates battery plans, compares competing control engines and — in **Active** mode — sends the selected battery command to a Solinteg inverter through Home Assistant.
 
-The current runtime is version **1.0.98**.
+The current runtime is version **1.0.99**.
 
 ## System objective
 
@@ -38,10 +38,11 @@ forecasting
 shared information vintage
         ↓
 control engines
-  ├─ deterministic_v35       ← frozen reference and fallback
+  ├─ deterministic_v35              ← frozen reference and fallback
   ├─ adaptive_deterministic_v1
+  ├─ stochastic_deterministic_v1    ← scenario-based uncertainty optimization
   ├─ neural_v1
-  └─ hybrid_v1               ← neural-guided constrained v3.5 optimization
+  └─ hybrid_v1                      ← neural-guided constrained v3.5 optimization
         ↓
 model selector / operator engine routing
         ↓
@@ -56,7 +57,7 @@ Solinteg EMS BattCtrl
 physical battery
 ```
 
-Forecasting, model selection and physical actuation are deliberately separated. A learned model can propose an action, but it cannot bypass deterministic actuator safety.
+Forecasting, model selection and physical actuation are deliberately separated. A challenger can propose an action, but it cannot bypass deterministic actuator safety.
 
 ## Data sources
 
@@ -135,6 +136,34 @@ Frozen deterministic dynamic programming policy. It is the permanent baseline, f
 
 A deterministic challenger with bounded learned policy/risk parameters. It preserves the constrained optimizer structure while allowing selected policy parameters to adapt from historical performance.
 
+### stochastic_deterministic_v1
+
+The stochastic challenger explicitly uses the forecast uncertainty already present in each shared horizon interval. It creates five deterministic scenarios from the same load/PV forecast:
+
+- nominal: 40%
+- high load / low PV: 15%
+- low load / high PV: 15%
+- high load / high PV: 15%
+- low load / low PV: 15%
+
+The four uncertainty scenarios use ±1 forecast-uncertainty unit. They are symmetric, so their weighted perturbation does not change the expected load or PV forecast.
+
+The engine is a **two-stage stochastic optimizer**. Every scenario must accept the same first battery action for the current quarter. After that first action, each scenario is allowed its own optimal deterministic recourse trajectory. This prevents the optimizer from using future information before it would actually be observable.
+
+Candidate first actions are ranked by expected scenario cost plus a downside-risk term:
+
+```text
+risk-adjusted score
+  = expected scenario cost
+  + 0.25 × (CVaR80 cost − expected scenario cost)
+```
+
+`CVaR80` represents the average cost in the worst 20% of the scenario distribution. The engine therefore still values expected economics but gives additional weight to outcomes such as unexpectedly high load combined with weak PV production.
+
+The scenario solver preserves v3.5 battery physics, reserve penalties, grid constraints, terminal-SOC treatment and unknown-price continuation semantics. If both load and PV forecast uncertainty are zero, the stochastic engine collapses exactly to the frozen v3.5 result.
+
+Version 1 models load/PV uncertainty explicitly. Unknown future electricity prices continue to use v3.5's existing continuation/risk treatment rather than a separate stochastic price tree.
+
 ### neural_v1
 
 A learned battery-policy challenger trained from historical information vintages and perfect-information teacher labels. It predicts an action class from system state, forecast context, tariff context and future horizon features.
@@ -186,6 +215,8 @@ A frozen candidate remains unchanged until one of these occurs:
 - its feature schema becomes incompatible with the current runtime, requiring a compatible candidate snapshot
 
 A neural or hybrid engine that is already the selected incumbent remains frozen; background training cannot silently replace the model controlling the race.
+
+The stochastic engine does not train. Its model revision is determined by its scenario/risk-policy definition and is therefore stable until that policy is deliberately changed.
 
 ## Model selector and operator engine choice
 
@@ -327,6 +358,7 @@ POST /actuator/run
 GET  /engines
 GET  /engines/neural/qualification
 GET  /engines/hybrid/status
+GET  /engines/stochastic/status
 GET  /engines/selector/status
 GET  /engines/selector/control/latest
 GET  /optimizer/replanning/status
@@ -384,6 +416,6 @@ The following invariants are intentional:
 - validate physical actions against current measured state
 - never dispatch a future decision before `decision_start`
 - fail toward safe release rather than silently continuing after actuator faults
-- require measured replay/evaluation evidence before a learned engine replaces the Auto incumbent
+- require measured replay/evaluation evidence before a challenger replaces the Auto incumbent
 
 These constraints allow forecasting and control models to evolve without turning each model change into a new physical safety implementation.
