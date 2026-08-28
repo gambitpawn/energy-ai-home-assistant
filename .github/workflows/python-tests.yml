@@ -9,6 +9,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      PYTHONPATH: ${{ github.workspace }}/energy_ai
     defaults:
       run:
         working-directory: energy_ai
@@ -27,6 +29,6 @@ jobs:
       - name: Compile application
         run: python -m compileall -q app
       - name: Run actuator regression tests
-        run: pytest -q tests/test_deterministic_actuator.py
+        run: python -m pytest -q tests/test_deterministic_actuator.py
       - name: Run full test suite
-        run: pytest -q tests
+        run: python -m pytest -q tests
