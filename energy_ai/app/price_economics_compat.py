@@ -306,7 +306,6 @@ def install_compatibility_patches(cfg: dict[str, Any]) -> dict[str, Any]:
     from . import historical_closed_loop_v2 as h2
     from . import optimizer_evaluation as oe
     from . import regret_decomposition as rd
-    from . import runtime_entry_v169 as rt169
 
     # Importing v2 writes its legacy actual-economics hook into v1; override it
     # after import with the same Solinteg sign correction plus current economics.
@@ -327,8 +326,6 @@ def install_compatibility_patches(cfg: dict[str, Any]) -> dict[str, Any]:
     rd.compare_closed_loop = h2.compare_closed_loop
     original_regret = rd.regret_decomposition
     rd.regret_decomposition = _wrap_regret_decomposition(original_regret, cfg)
-    # runtime_entry_v169 also imported regret_decomposition by value for the API.
-    rt169.regret_decomposition = rd.regret_decomposition
 
     tariff_live_paths = _install_tariff_live_economics(cfg)
 
@@ -343,7 +340,6 @@ def install_compatibility_patches(cfg: dict[str, Any]) -> dict[str, Any]:
             "regret_decomposition._hindsight",
             "regret_decomposition.compare_closed_loop",
             "regret_decomposition.regret_decomposition",
-            "runtime_entry_v169.regret_decomposition",
             *tariff_live_paths,
         ],
     }
