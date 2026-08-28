@@ -110,7 +110,9 @@ options:
   actuator_zero_deadband_kw: 0.05
   actuator_min_action_change_kw: 0.10
   actuator_watchdog_poll_seconds: 30
-  actuator_max_physical_command_kw: 2.0
+  # Legacy compatibility only; ignored by the runtime. Physical power is bounded
+  # by the configured battery and deterministic SOC/grid safety limits instead.
+  actuator_max_physical_command_kw: 8.0
 
   tariff_enabled: false
   tariff_consumption_enabled: false
