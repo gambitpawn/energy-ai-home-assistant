@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,20 @@ def _version_model_path(model_id: str) -> Path:
     return neural_training.MODEL_VERSIONS_DIR / f"{model_id}.joblib"
 
 
+def _ensure_version_artifact(model_id: str) -> bool:
+    target = _version_model_path(model_id)
+    if target.exists():
+        return True
+    active = neural_training.MODEL_PATH
+    if not active.exists():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    shutil.copy2(active, tmp)
+    os.replace(tmp, target)
+    return target.exists()
+
+
 def _candidate_source_valid(candidate: dict[str, Any]) -> bool:
     model_id = candidate.get("model_id")
     if not model_id:
@@ -65,7 +80,7 @@ def _snapshot_latest(*, reason: str, previous: dict[str, Any] | None = None, det
     if latest.get("feature_schema") != FEATURE_SCHEMA:
         return {"ok": False, "status": "latest_model_feature_schema_mismatch", "reason": reason}
     model_id = str(latest.get("model_id") or "")
-    if not model_id or not _version_model_path(model_id).exists():
+    if not model_id or not _ensure_version_artifact(model_id):
         return {"ok": False, "status": "latest_version_artifact_missing", "reason": reason, "model_id": model_id or None}
 
     prior = previous or _read_json(CANDIDATE_STATE_PATH)
