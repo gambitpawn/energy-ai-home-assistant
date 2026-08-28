@@ -5,6 +5,8 @@ from . import ui_parameters
 from .operator_mode_control import install_operator_mode_control
 from .settings_store import delete_setting_overrides
 
+RELEASE_BUILD = "1.0.95"
+base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 
 # The temporary commissioning power cap has been retired. Remove its old
@@ -51,7 +53,7 @@ async def retired_physical_cap_status():
     optimizer = base.core.cfg.get("optimizer") or {}
     battery = (base.core.cfg.get("policy") or {}).get("battery") or {}
     return {
-        "runtime_build": base.RUNTIME_BUILD,
+        "runtime_build": RELEASE_BUILD,
         "enabled": False,
         "retired": True,
         "reason": "temporary_commissioning_cap_removed",
@@ -67,6 +69,5 @@ async def retired_physical_cap_status():
     }
 
 
-# Keep the current 1.0.94 release identity as requested.
-app.version = base.RUNTIME_BUILD
+app.version = RELEASE_BUILD
 app.openapi_schema = None
