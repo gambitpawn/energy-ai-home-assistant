@@ -74,3 +74,28 @@ def test_consolidated_active_route_performs_hardened_transition_itself():
     # set_mode is intentionally passed to asyncio.to_thread rather than called
     # directly on the event loop.
     assert "set_mode" in referenced_names
+
+
+def test_active_route_blocks_future_candidate_before_set_mode_and_uses_scheduler_for_started_candidate():
+    tree = _tree()
+    function = _control_mode_function(tree)
+    chains = {
+        chain
+        for node in ast.walk(function)
+        if isinstance(node, ast.Attribute)
+        for chain in [_attribute_chain(node)]
+        if chain is not None
+    }
+    names = {node.id for node in ast.walk(function) if isinstance(node, ast.Name)}
+    string_literals = {
+        node.value for node in ast.walk(function)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    # v1.0.94 invariant: a next-quarter candidate may be queued, but ACTIVE is
+    # not entered before decision_start. At/after the boundary, activation and
+    # first dispatch use the scheduler's serialized transition.
+    assert "candidate_start_status" in names
+    assert "scheduler.activate_with" in chains
+    assert "active_candidate_not_started" in string_literals
+    assert "decision_start_in_future" not in string_literals or "active_candidate_not_started" in string_literals

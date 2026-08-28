@@ -9,6 +9,7 @@ from typing import Any, Callable
 from fastapi import HTTPException, Query, Request
 
 from . import model_selector as selector
+from .actuator_timing_v194 import candidate_start_status
 from .adaptive_auto import automatic_maintenance_once as adaptive_maintenance_once, automatic_status as adaptive_auto_status
 from .adaptive_learning import active_run, current_parameters, latest_learning_status
 from .adaptive_replay import build_daily_evaluator
@@ -308,8 +309,6 @@ def install_runtime_routes(
         except KeyError: raise HTTPException(404, "override not found")
         return {"ok": True, "override": item, "refresh": await _refresh_after_override()}
 
-    # This is the consolidated v1.0.91 routing fix: preflight uses the actual
-    # actuator instance passed into this installer, never a historical module alias.
     @app.post("/control/mode/{mode}", tags=["control"])
     async def control_mode(mode: str):
         normalized = str(mode).strip().lower()
@@ -323,9 +322,29 @@ def install_runtime_routes(
             plan = await asyncio.to_thread(latest_plan, 500)
             candidate = candidate_from_live_plan(plan) if str(plan.get("planner") or "") == "deterministic_battery_dp_v3_6_live" else candidate_from_selection(await asyncio.to_thread(selector.latest_control_selection))
             if candidate is None: raise HTTPException(409, "ACTIVE requires a current selector/live control candidate")
+
+            timing = candidate_start_status(candidate)
+            if timing.get("state") == "future":
+                pending = await actuator.process_candidate(candidate)
+                raise HTTPException(409, {
+                    "error": "active_candidate_not_started",
+                    "message": "ACTIVE remains disabled until the candidate decision_start is reached",
+                    "timing": timing,
+                    "pending": pending,
+                    "production": production_status(),
+                })
+            if timing.get("state") != "started":
+                raise HTTPException(409, {"error": timing.get("reason") or "candidate_timing_invalid", "timing": timing})
+
             try:
-                await asyncio.to_thread(set_mode, "active", reason="api_actuator_transition")
-                actuation = await actuator.process_candidate(candidate)
+                scheduler = getattr(actuator, "_decision_start_scheduler_v194", None)
+                if scheduler is not None:
+                    async def _activate():
+                        return await asyncio.to_thread(set_mode, "active", reason="api_actuator_transition")
+                    actuation = await scheduler.activate_with(candidate, _activate)
+                else:
+                    await asyncio.to_thread(set_mode, "active", reason="api_actuator_transition")
+                    actuation = await actuator.process_candidate(candidate)
             except Exception as exc:
                 try: await actuator.fail_safe("active_transition_failed", {"error": repr(exc)})
                 except Exception: pass
@@ -352,6 +371,13 @@ def install_runtime_routes(
     @app.get("/actuator/status", tags=["actuator"])
     async def actuator_status():
         data = await actuator.status(); data["safe_release"] = await asyncio.to_thread(release_status); return data
+
+    @app.get("/actuator/timing/status", tags=["actuator"])
+    async def actuator_timing_status():
+        scheduler = getattr(actuator, "_decision_start_scheduler_v194", None)
+        if scheduler is None:
+            return {"runtime_build": runtime_build, "policy": "unavailable", "no_early_dispatch": False}
+        return {"runtime_build": runtime_build, **scheduler.status()}
 
     @app.get("/actuator/discover", tags=["actuator"])
     async def actuator_discover():
