@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app import actuator_release_state as release_state
 from app.deterministic_actuator import _candidate_valid, safety_filter
 from app.solinteg_command import _rank
 
@@ -105,3 +106,22 @@ def test_solinteg_entity_ranking_prefers_expected_control_entities():
     }
     assert _rank(working, "working_mode") >= 20
     assert _rank(target, "battery_power_target") >= 20
+
+
+def test_safe_release_obligation_persists_until_success(tmp_path, monkeypatch):
+    db = tmp_path / "release.db"
+    monkeypatch.setattr(release_state, "DB_PATH", db)
+
+    pending = release_state.mark_release_pending("test_fault")
+    assert pending["release_pending"] is True
+    assert pending["reason"] == "test_fault"
+
+    attempt = release_state.mark_release_attempt()
+    assert attempt["release_pending"] is True
+    assert attempt["attempt_count"] == 1
+    assert attempt["last_attempt_at"] is not None
+
+    success = release_state.mark_release_succeeded()
+    assert success["release_pending"] is False
+    assert success["attempt_count"] == 0
+    assert success["last_success_at"] is not None
