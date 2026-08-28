@@ -10,7 +10,7 @@ from .db import DB_PATH
 from .engine_contract import EngineInput
 from .engine_store import insert_engine_run
 from .hybrid_engine import ENGINE_ID, HybridV1Engine
-from .neural_engine import neural_runtime_status
+from .neural_qualification import qualification_status
 
 _INSTALLED = False
 _ORIGINAL_ROUTE = None
@@ -51,14 +51,13 @@ def _engine_input_for_vintage(information_vintage_id: str) -> EngineInput | None
 
 
 def _prepare_hybrid_decision(cfg: dict[str, Any], information_vintage_id: str) -> dict[str, Any]:
-    neural = neural_runtime_status()
-    if not neural.get("shadow_ready"):
+    qualification = qualification_status()
+    if not qualification.get("candidate_ready"):
         return {
             "engine_id": ENGINE_ID,
-            "status": "model_not_ready",
+            "status": "qualification_candidate_not_ready",
             "shadow_decision": False,
-            "samples": neural.get("samples"),
-            "neural_model_id": neural.get("model_id"),
+            "qualification": qualification,
         }
 
     engine_input = _engine_input_for_vintage(information_vintage_id)
@@ -84,6 +83,8 @@ def _prepare_hybrid_decision(cfg: dict[str, Any], information_vintage_id: str) -
             "model_id": decision.model.get("model_id"),
             "model_revision": decision.model.get("model_revision"),
             "neural_model_id": decision.model.get("neural_model_id"),
+            "qualification_generation": qualification.get("qualification_generation"),
+            "qualification_started_at": qualification.get("qualification_started_at"),
             "classification_confidence": decision.diagnostics.get("classification_confidence"),
             "backbone_action_kw": decision.diagnostics.get("backbone_action_kw"),
             "backbone_regret_ore": decision.diagnostics.get("backbone_regret_ore"),
@@ -97,13 +98,14 @@ def _prepare_hybrid_decision(cfg: dict[str, Any], information_vintage_id: str) -
             "status": "failed",
             "shadow_decision": False,
             "information_vintage_id": engine_input.information_vintage_id,
+            "qualification": qualification,
             "error": repr(exc),
         }
 
 
 def hybrid_runtime_status() -> dict[str, Any]:
     with _LOCK:
-        return dict(_LAST_STATUS)
+        return {**_LAST_STATUS, "qualification": qualification_status()}
 
 
 def install_hybrid_runtime_patch(cfg: dict[str, Any]) -> None:
