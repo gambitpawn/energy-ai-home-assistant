@@ -18,10 +18,11 @@ from .neural_qualification import (
 )
 from .operator_mode_control import install_operator_mode_control
 from .pool import install_pool_routes
+from .pool_installation_profile import install_pool_installation_profile
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 
-RELEASE_BUILD = "1.0.102"
+RELEASE_BUILD = "1.0.103"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
@@ -65,10 +66,11 @@ install_hybrid_runtime_patch(base.core.cfg)
 install_stochastic_runtime_patch(base.core.cfg)
 install_gradient_runtime_patch(base.core.cfg)
 
-# Pool integration starts read-only: normalize AquaTemp/Poolstyrning diagnostics
-# and expose a stable Energy AI contract before any scheduling or temperature
-# writes are allowed. The HACS AquaTemp integration remains an external HA
-# integration; this repository owns only the energy-aware supervisor layer.
+# Pool integration starts read-only. Apply mappings verified on the installed
+# AquaTemp entity surface before installing routes: O08 is actual compressor
+# current, while the binary Power entity is status only and must not be treated
+# as W/kW telemetry.
+POOL_INSTALLATION_PROFILE = install_pool_installation_profile()
 install_pool_routes(app, base.core.cfg, base.core.collector.ha)
 
 # The temporary commissioning power cap has been retired. Remove its old
