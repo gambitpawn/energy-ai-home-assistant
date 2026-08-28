@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from . import engine_operator_selection as engine_operator_selection_module
 from . import runtime as base
 from . import ui_parameters
 from .engine_operator_selection import install_operator_engine_routing
@@ -15,6 +16,7 @@ from .stochastic_runtime import stochastic_runtime_status, install_stochastic_ru
 RELEASE_BUILD = "1.0.99"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
+engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
 
 # Continuous neural training and race qualification are separate. Freeze one
 # neural revision for neural_v1 + hybrid_v1 while new latest models may continue
