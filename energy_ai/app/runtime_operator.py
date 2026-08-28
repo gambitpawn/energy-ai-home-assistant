@@ -3,6 +3,7 @@ from __future__ import annotations
 from . import engine_operator_selection as engine_operator_selection_module
 from . import runtime as base
 from . import ui_parameters
+from .actuator_arm_control_mode import install_arm_control_mode_patch
 from .engine_operator_selection import install_operator_engine_routing
 from .gradient_qualification import (
     install_qualification_candidate_runtime as install_gradient_qualification_runtime,
@@ -19,11 +20,17 @@ from .operator_mode_control import install_operator_mode_control
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 
-RELEASE_BUILD = "1.0.100"
+RELEASE_BUILD = "1.0.101"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
 engine_operator_selection_module.DISPLAY_NAMES["gradient_v1"] = "Gradient boost"
+
+# Successful arming must leave the inverter in EMS control mode at zero power.
+# Safe release belongs only to Shadow/fault transitions. The base actuator is
+# already instantiated by runtime.py, but patching the class method here affects
+# that instance before any operator activation can call it.
+install_arm_control_mode_patch()
 
 # Continuous learned-model training and race qualification are separate. Neural
 # + hybrid share one frozen neural candidate; gradient_v1 has its own independently
