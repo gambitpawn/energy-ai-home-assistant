@@ -62,13 +62,15 @@ def test_consolidated_active_route_performs_hardened_transition_itself():
         for chain in [_attribute_chain(node)]
         if chain is not None
     }
-    called_names = {
-        node.func.id
+    referenced_names = {
+        node.id
         for node in ast.walk(function)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        if isinstance(node, ast.Name)
     }
 
     assert "actuator.process_candidate" in chains
     assert "actuator.fail_safe" in chains
     assert "adapter.safe_release" in chains
-    assert "set_mode" in called_names
+    # set_mode is intentionally passed to asyncio.to_thread rather than called
+    # directly on the event loop.
+    assert "set_mode" in referenced_names
