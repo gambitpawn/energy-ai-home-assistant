@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 
 from .battery_health_cost import (
     BATTERY_HEALTH_COST_VERSION,
@@ -162,10 +163,12 @@ def install_battery_health_routes(app: FastAPI, cfg: dict[str, Any]) -> None:
 
         The perfect-information DP uses actual load, PV and price, fixes terminal
         SOC to the observed terminal SOC, and never writes planner/selector or
-        actuator state.
+        actuator state. The CPU-heavy solve runs in a worker thread so it cannot
+        block the runtime event loop while the system is active.
         """
         try:
-            return compare_profiles_for_day(
+            return await run_in_threadpool(
+                compare_profiles_for_day,
                 cfg,
                 local_date,
                 grid_step_kwh=grid_step_kwh,
