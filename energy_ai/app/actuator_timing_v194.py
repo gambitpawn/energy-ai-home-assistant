@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from .production_state import status as production_status
+
+# A future decision may have been calculated shortly before a quarter boundary.
+# At the boundary the optimizer pipeline immediately creates a fresher shared
+# information vintage. Do not briefly dispatch the pre-boundary candidate while
+# that refresh is in flight. A post-boundary submission for the same interval
+# replaces it and is dispatched immediately; the old candidate is only used as
+# a fail-soft fallback if no refreshed decision arrives within this grace.
+POST_BOUNDARY_REFRESH_GRACE_SECONDS = 10.0
 
 
 def _utc(value: str) -> datetime:
@@ -46,15 +54,26 @@ def candidate_start_status(candidate: dict[str, Any], *, now: datetime | None = 
 class DecisionStartScheduler:
     """Queues future control candidates and dispatches them at decision_start.
 
-    The scheduler captures the fully patched actuator method (including
-    diagnostics and the downstream physical cap) and calls that captured method
-    only when the candidate interval has started. The previous inverter target is
-    therefore left untouched while a future candidate is pending.
+    A candidate calculated before the boundary is intentionally held for a short
+    post-boundary refresh grace. The optimizer normally submits a fresher routed
+    decision within that grace; that fresh decision replaces the queued one and
+    is dispatched once. This prevents a stale candidate from being written for a
+    few seconds and then immediately overwritten by the newly selected engine.
+
+    The previous inverter target remains active while a future/stale candidate is
+    pending. Physical dispatch still never occurs before decision_start.
     """
 
-    def __init__(self, actuator, *, now_fn: Callable[[], datetime] | None = None):
+    def __init__(
+        self,
+        actuator,
+        *,
+        now_fn: Callable[[], datetime] | None = None,
+        post_boundary_refresh_grace_seconds: float = POST_BOUNDARY_REFRESH_GRACE_SECONDS,
+    ):
         self.actuator = actuator
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self.post_boundary_refresh_grace_seconds = max(0.0, float(post_boundary_refresh_grace_seconds))
         self._original_process_candidate = actuator.process_candidate
         self._original_watchdog_tick = actuator.watchdog_tick
         self._original_disarm = actuator.disarm
@@ -72,15 +91,39 @@ class DecisionStartScheduler:
     def _now(self) -> datetime:
         return self._now_fn().astimezone(timezone.utc)
 
+    def _submitted_at(self, candidate: dict[str, Any]) -> datetime | None:
+        raw = candidate.get("_scheduler_submitted_at")
+        if not raw:
+            return None
+        try:
+            return _utc(str(raw))
+        except Exception:
+            return None
+
+    def _fallback_at(self, decision_start: str) -> datetime:
+        return _utc(decision_start) + timedelta(seconds=self.post_boundary_refresh_grace_seconds)
+
+    def _is_pre_boundary_candidate(self, candidate: dict[str, Any], decision_start: str) -> bool:
+        submitted = self._submitted_at(candidate)
+        return submitted is None or submitted < _utc(decision_start)
+
     def status(self) -> dict[str, Any]:
         now = self._now()
         pending = []
         for key in sorted(self._pending, key=_utc):
             item = self._pending[key]
             timing = candidate_start_status(item, now=now)
+            pre_boundary = self._is_pre_boundary_candidate(item, key)
+            fallback_at = self._fallback_at(key) if pre_boundary else _utc(key)
+            seconds_until_dispatch = max(0.0, (fallback_at - now).total_seconds())
             pending.append({
                 "decision_start": key,
                 "seconds_until_start": timing.get("seconds_until_start"),
+                "seconds_until_dispatch": round(seconds_until_dispatch, 3),
+                "waiting_for_post_boundary_refresh": bool(
+                    pre_boundary and _utc(key) <= now < fallback_at
+                ),
+                "fallback_dispatch_at": fallback_at.isoformat() if pre_boundary else None,
                 "valid_until": item.get("valid_until"),
                 "source": item.get("source"),
                 "source_id": item.get("source_id"),
@@ -88,10 +131,12 @@ class DecisionStartScheduler:
                 "requested_action_kw": item.get("requested_action_kw"),
             })
         return {
-            "policy": "strict_decision_start_v1",
+            "policy": "strict_decision_start_v2_post_boundary_coalescing",
             "no_early_dispatch": True,
             "previous_command_held_until_next_decision_start": True,
             "fresh_safety_recheck_at_dispatch": True,
+            "post_boundary_refresh_grace_seconds": self.post_boundary_refresh_grace_seconds,
+            "pre_boundary_candidate_waits_for_fresh_selection": True,
             "pending_count": len(pending),
             "pending": pending,
             "next_decision_start": pending[0]["decision_start"] if pending else None,
@@ -110,9 +155,10 @@ class DecisionStartScheduler:
             )
 
     async def submit(self, candidate: dict[str, Any]) -> dict[str, Any]:
-        timing = candidate_start_status(candidate, now=self._now())
+        now = self._now()
+        timing = candidate_start_status(candidate, now=now)
         self._last_submission = {
-            "at": self._now().isoformat(),
+            "at": now.isoformat(),
             "decision_start": timing.get("decision_start"),
             "state": timing.get("state"),
             "source": candidate.get("source"),
@@ -126,10 +172,13 @@ class DecisionStartScheduler:
                 "physical_write_performed": False,
                 "timing": timing,
             }
+
+        key = str(timing["decision_start"])
         if timing["state"] == "future":
-            key = str(timing["decision_start"])
+            queued = dict(candidate)
+            queued["_scheduler_submitted_at"] = now.isoformat()
             replaced = key in self._pending
-            self._pending[key] = dict(candidate)
+            self._pending[key] = queued
             self._wake.set()
             self._ensure_runner()
             return {
@@ -142,8 +191,19 @@ class DecisionStartScheduler:
                 "physical_write_performed": False,
                 "pending_replaced": replaced,
                 "previous_physical_target_unchanged": True,
+                "post_boundary_refresh_grace_seconds": self.post_boundary_refresh_grace_seconds,
             }
-        return await self._dispatch_started(candidate)
+
+        # A candidate submitted after its decision_start is the fresh result of
+        # the current-quarter optimizer pipeline. Remove any pre-boundary version
+        # for the same start before dispatching so exactly one control candidate
+        # reaches the physical actuator for the refreshed selection.
+        replaced_pre_boundary = self._pending.pop(key, None) is not None
+        self._wake.set()
+        result = await self._dispatch_started(candidate)
+        if isinstance(result, dict):
+            result = {**result, "replaced_pre_boundary_candidate": replaced_pre_boundary}
+        return result
 
     async def _dispatch_started(self, candidate: dict[str, Any]) -> dict[str, Any]:
         async with self._control_lock:
@@ -162,15 +222,34 @@ class DecisionStartScheduler:
 
     async def run_due(self, *, now: datetime | None = None) -> dict[str, Any]:
         now_utc = (now or self._now()).astimezone(timezone.utc)
-        due_keys = [key for key in self._pending if _utc(key) <= now_utc]
-        if not due_keys:
+        started_keys = [key for key in self._pending if _utc(key) <= now_utc]
+        if not started_keys:
             return {"status": "nothing_due", "dispatched": False}
+
+        dispatchable: list[str] = []
+        waiting: list[str] = []
+        for key in started_keys:
+            candidate = self._pending[key]
+            if self._is_pre_boundary_candidate(candidate, key) and now_utc < self._fallback_at(key):
+                waiting.append(key)
+            else:
+                dispatchable.append(key)
+
+        if not dispatchable:
+            next_fallback = min((self._fallback_at(k) for k in waiting), default=None)
+            return {
+                "status": "waiting_for_post_boundary_refresh",
+                "dispatched": False,
+                "decision_starts": sorted(waiting, key=_utc),
+                "fallback_dispatch_at": None if next_fallback is None else next_fallback.isoformat(),
+            }
 
         # If the event loop was delayed across more than one boundary, do not
         # briefly dispatch obsolete intervals. Keep only the latest due start.
-        selected_key = max(due_keys, key=_utc)
+        selected_key = max(dispatchable, key=_utc)
         candidate = self._pending[selected_key]
-        for key in due_keys:
+        obsolete = [key for key in started_keys if _utc(key) <= _utc(selected_key)]
+        for key in obsolete:
             self._pending.pop(key, None)
         try:
             result = await self._dispatch_started(candidate)
@@ -179,7 +258,8 @@ class DecisionStartScheduler:
                 "dispatched": True,
                 "decision_start": selected_key,
                 "result": result,
-                "discarded_older_due_candidates": max(0, len(due_keys) - 1),
+                "fallback_pre_boundary_candidate": self._is_pre_boundary_candidate(candidate, selected_key),
+                "discarded_older_due_candidates": max(0, len(obsolete) - 1),
             }
         except Exception as exc:
             self._last_error = repr(exc)
@@ -207,10 +287,16 @@ class DecisionStartScheduler:
                 if not self._pending:
                     return
                 self._wake.clear()
-                next_start = min((_utc(key) for key in self._pending), default=None)
-                if next_start is None:
+                targets = []
+                for key, candidate in self._pending.items():
+                    target = _utc(key)
+                    if self._is_pre_boundary_candidate(candidate, key):
+                        target = self._fallback_at(key)
+                    targets.append(target)
+                next_target = min(targets, default=None)
+                if next_target is None:
                     return
-                delay = max(0.0, (next_start - self._now()).total_seconds())
+                delay = max(0.0, (next_target - self._now()).total_seconds())
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=delay)
                 except asyncio.TimeoutError:
@@ -285,12 +371,21 @@ class DecisionStartScheduler:
         self._runner_task = None
 
 
-def install_decision_start_scheduler(actuator, *, now_fn: Callable[[], datetime] | None = None) -> DecisionStartScheduler:
+def install_decision_start_scheduler(
+    actuator,
+    *,
+    now_fn: Callable[[], datetime] | None = None,
+    post_boundary_refresh_grace_seconds: float = POST_BOUNDARY_REFRESH_GRACE_SECONDS,
+) -> DecisionStartScheduler:
     existing = getattr(actuator, "_decision_start_scheduler_v194", None)
     if isinstance(existing, DecisionStartScheduler):
         return existing
 
-    scheduler = DecisionStartScheduler(actuator, now_fn=now_fn)
+    scheduler = DecisionStartScheduler(
+        actuator,
+        now_fn=now_fn,
+        post_boundary_refresh_grace_seconds=post_boundary_refresh_grace_seconds,
+    )
     actuator.process_candidate = scheduler.submit
     actuator.watchdog_tick = scheduler.watchdog_tick
     actuator.disarm = scheduler.disarm
