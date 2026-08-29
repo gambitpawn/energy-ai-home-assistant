@@ -4,12 +4,14 @@ from typing import Any
 
 from .adaptive_deterministic import AdaptiveDeterministicV1
 from .adaptive_learning import current_parameters
+from .deterministic_refined import DeterministicRefinedV1
 from .engine_contract import EngineDescriptor, EngineDecision, EngineInput
 from .engine_input_v2 import input_from_optimizer_plan_v2
 from .optimizer import PLANNER_NAME
 from .optimizer_v35_replay import solve_v35_from_rows
 
 BASELINE_ENGINE_ID = "deterministic_v35"
+REFINED_ENGINE_ID = "deterministic_refined_v1"
 ADAPTIVE_ENGINE_ID = "adaptive_deterministic_v1"
 STOCHASTIC_ENGINE_ID = "stochastic_deterministic_v1"
 GRADIENT_ENGINE_ID = "gradient_v1"
@@ -22,6 +24,17 @@ DESCRIPTORS: tuple[EngineDescriptor, ...] = (
         display_name="Deterministic",
         description="Frozen deterministic DP planner v3.5; permanent performance baseline.",
         baseline=True,
+        available=True,
+        trainable=False,
+        learning_enabled=False,
+    ),
+    EngineDescriptor(
+        engine_id=REFINED_ENGINE_ID,
+        engine_version="1",
+        family="deterministic",
+        display_name="Refined deterministic",
+        description="Deterministic challenger with a 0.1 kWh default SOC grid and exact PV-following charge candidates.",
+        baseline=False,
         available=True,
         trainable=False,
         learning_enabled=False,
@@ -164,6 +177,12 @@ class DeterministicV35Adapter:
 def baseline_decision_from_plan(cfg: dict[str, Any], plan: dict[str, Any]) -> tuple[EngineInput, EngineDecision]:
     engine_input = input_from_optimizer_plan_v2(plan, cfg)
     decision = DeterministicV35Adapter(cfg).decide(engine_input)
+    return engine_input, decision
+
+
+def refined_decision_from_plan(cfg: dict[str, Any], plan: dict[str, Any]) -> tuple[EngineInput, EngineDecision]:
+    engine_input = input_from_optimizer_plan_v2(plan, cfg)
+    decision = DeterministicRefinedV1(cfg).decide(engine_input)
     return engine_input, decision
 
 
