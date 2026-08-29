@@ -5,6 +5,7 @@ from . import runtime as base
 from . import ui_models as ui_models_module
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
+from .battery_health_routes import install_battery_health_routes
 from .deterministic_refined_runtime import refined_runtime_status, install_refined_runtime_patch
 from .engine_operator_selection import install_operator_engine_routing
 from .gradient_qualification import (
@@ -25,7 +26,7 @@ from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_control_truth import decision_summary as control_truth_decision_summary
 
-RELEASE_BUILD = "1.0.105"
+RELEASE_BUILD = "1.0.106"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
@@ -85,6 +86,11 @@ install_gradient_runtime_patch(base.core.cfg)
 # as W/kW telemetry.
 POOL_INSTALLATION_PROFILE = install_pool_installation_profile()
 install_pool_routes(app, base.core.cfg, base.core.collector.ha)
+
+# Standalone battery-health economics diagnostics. These routes evaluate only
+# the canonical cost helper; they do not alter planner, selector or actuator
+# state and perform no physical writes.
+install_battery_health_routes(app, base.core.cfg)
 
 # The temporary commissioning power cap has been retired. Remove its old
 # Parameters entry and any DB override so it cannot accidentally look like an
