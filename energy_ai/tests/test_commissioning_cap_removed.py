@@ -35,7 +35,7 @@ def test_actuator_configuration_no_longer_contains_commissioning_cap():
 
 def test_home_assistant_schema_keeps_only_ignored_upgrade_compatibility_key():
     config = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    assert 'version: "1.0.106"' in config
+    assert 'version: "1.0.107"' in config
     assert "Legacy compatibility only; ignored by the runtime" in config
     assert "actuator_max_physical_command_kw: 8.0" in config
 
@@ -46,4 +46,4 @@ def test_production_operator_wrapper_retires_old_parameter_and_status_semantics(
     assert "_RETIRED_PARAMETER_KEYS" in source
     assert '"enabled": False' in source
     assert '"temporary_commissioning_cap_removed"' in source
-    assert 'RELEASE_BUILD = "1.0.106"' in source
+    assert 'RELEASE_BUILD = "1.0.107"' in source
