@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 
 from .battery_health_cost import (
     BATTERY_HEALTH_COST_VERSION,
@@ -10,6 +10,7 @@ from .battery_health_cost import (
     BatteryHealthParameters,
     battery_health_cost,
 )
+from .battery_health_hindsight import compare_profiles_for_day
 
 
 def battery_health_test_payload(
@@ -132,18 +133,43 @@ def install_battery_health_routes(app: FastAPI, cfg: dict[str, Any]) -> None:
         zone_3_ore_per_kwh_hour: float | None = Query(None, ge=0.0, le=10000.0),
         high_soc_enabled: bool = Query(True),
     ):
-        return battery_health_test_payload(
-            cfg,
-            soc_start_pct=soc_start_pct,
-            soc_end_pct=soc_end_pct,
-            interval_hours=interval_hours,
-            capacity_kwh=capacity_kwh,
-            cycle_wear_ore_per_kwh=cycle_wear_ore_per_kwh,
-            threshold_1_pct=threshold_1_pct,
-            threshold_2_pct=threshold_2_pct,
-            threshold_3_pct=threshold_3_pct,
-            zone_1_ore_per_kwh_hour=zone_1_ore_per_kwh_hour,
-            zone_2_ore_per_kwh_hour=zone_2_ore_per_kwh_hour,
-            zone_3_ore_per_kwh_hour=zone_3_ore_per_kwh_hour,
-            high_soc_enabled=high_soc_enabled,
-        )
+        try:
+            return battery_health_test_payload(
+                cfg,
+                soc_start_pct=soc_start_pct,
+                soc_end_pct=soc_end_pct,
+                interval_hours=interval_hours,
+                capacity_kwh=capacity_kwh,
+                cycle_wear_ore_per_kwh=cycle_wear_ore_per_kwh,
+                threshold_1_pct=threshold_1_pct,
+                threshold_2_pct=threshold_2_pct,
+                threshold_3_pct=threshold_3_pct,
+                zone_1_ore_per_kwh_hour=zone_1_ore_per_kwh_hour,
+                zone_2_ore_per_kwh_hour=zone_2_ore_per_kwh_hour,
+                zone_3_ore_per_kwh_hour=zone_3_ore_per_kwh_hour,
+                high_soc_enabled=high_soc_enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/diagnostics/battery-health/hindsight", tags=["diagnostics"])
+    async def battery_health_hindsight(
+        local_date: str = Query(..., description="Historical local date in YYYY-MM-DD format"),
+        grid_step_kwh: float = Query(0.1, gt=0.0, le=1.0),
+        include_actions: bool = Query(False),
+    ):
+        """Compare mild/default/strong health profiles on one realized day.
+
+        The perfect-information DP uses actual load, PV and price, fixes terminal
+        SOC to the observed terminal SOC, and never writes planner/selector or
+        actuator state.
+        """
+        try:
+            return compare_profiles_for_day(
+                cfg,
+                local_date,
+                grid_step_kwh=grid_step_kwh,
+                include_actions=include_actions,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
