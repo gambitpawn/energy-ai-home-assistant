@@ -26,7 +26,7 @@ from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_control_truth import decision_summary as control_truth_decision_summary
 
-RELEASE_BUILD = "1.0.106"
+RELEASE_BUILD = "1.0.107"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
@@ -87,9 +87,9 @@ install_gradient_runtime_patch(base.core.cfg)
 POOL_INSTALLATION_PROFILE = install_pool_installation_profile()
 install_pool_routes(app, base.core.cfg, base.core.collector.ha)
 
-# Standalone battery-health economics diagnostics. These routes evaluate only
-# the canonical cost helper; they do not alter planner, selector or actuator
-# state and perform no physical writes.
+# Standalone battery-health economics diagnostics. These routes evaluate the
+# canonical cost helper and a parallel perfect-information hindsight comparison;
+# they do not alter planner, selector or actuator state and perform no writes.
 install_battery_health_routes(app, base.core.cfg)
 
 # The temporary commissioning power cap has been retired. Remove its old
