@@ -31,7 +31,7 @@ class DeterministicRefinedTests(unittest.TestCase):
                 "battery_charge_efficiency": 0.95,
                 "battery_discharge_efficiency": 0.95,
                 "battery_degradation_ore_kwh": 0.0,
-                "physical_grid_import_limit_kw": 13.8,
+                "physical_grid_import_limit_kw": 0.0,
                 "grid_export_limit_kw": 10.0,
                 "soc_grid_step_kwh": 0.5,
                 "refined_soc_grid_step_kwh": 0.1,
@@ -67,7 +67,7 @@ class DeterministicRefinedTests(unittest.TestCase):
             },
             {
                 "start": "2026-08-29T08:15:00+00:00",
-                "load_kw": 1.0,
+                "load_kw": 0.45125,
                 "pv_kw": 0.0,
                 "load_uncertainty_kw": 0.0,
                 "pv_uncertainty_kw": 0.0,
