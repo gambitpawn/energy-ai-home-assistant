@@ -11,7 +11,7 @@ from .battery_health_cost import (
     BatteryHealthParameters,
     battery_health_cost,
 )
-from .battery_health_hindsight import compare_profiles_for_day
+from .battery_health_scan import compare_profiles_with_off_for_day, scan_high_soc_days
 
 
 def battery_health_test_payload(
@@ -159,7 +159,7 @@ def install_battery_health_routes(app: FastAPI, cfg: dict[str, Any]) -> None:
         grid_step_kwh: float = Query(0.1, gt=0.0, le=1.0),
         include_actions: bool = Query(False),
     ):
-        """Compare mild/default/strong health profiles on one realized day.
+        """Compare off/mild/default/strong health profiles on one realized day.
 
         The perfect-information DP uses actual load, PV and price, fixes terminal
         SOC to the observed terminal SOC, and never writes planner/selector or
@@ -168,11 +168,36 @@ def install_battery_health_routes(app: FastAPI, cfg: dict[str, Any]) -> None:
         """
         try:
             return await run_in_threadpool(
-                compare_profiles_for_day,
+                compare_profiles_with_off_for_day,
                 cfg,
                 local_date,
                 grid_step_kwh=grid_step_kwh,
                 include_actions=include_actions,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/diagnostics/battery-health/scan", tags=["diagnostics"])
+    async def battery_health_history_scan(
+        days_back: int = Query(30, ge=1, le=180),
+        end_date: str | None = Query(None, description="Last local date to scan; defaults to yesterday"),
+        limit: int = Query(10, ge=1, le=25),
+        grid_step_kwh: float = Query(0.2, ge=0.05, le=1.0),
+    ):
+        """Find historical days where an OFF-profile oracle wants SOC above 90%.
+
+        For candidate days whose observed boundary SOC is <=90%, the scanner also
+        runs a second OFF-profile oracle capped at 90% and reports the objective
+        value of allowing capacity above 90%. Heavy work runs in a worker thread.
+        """
+        try:
+            return await run_in_threadpool(
+                scan_high_soc_days,
+                cfg,
+                days_back=days_back,
+                end_date=end_date,
+                limit=limit,
+                grid_step_kwh=grid_step_kwh,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
