@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from . import engine_operator_selection as engine_operator_selection_module
 from . import runtime as base
+from . import ui_models as ui_models_module
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
 from .deterministic_refined_runtime import refined_runtime_status, install_refined_runtime_patch
@@ -22,13 +23,21 @@ from .pool import install_pool_routes
 from .pool_installation_profile import install_pool_installation_profile
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
+from .ui_control_truth import decision_summary as control_truth_decision_summary
 
-RELEASE_BUILD = "1.0.104"
+RELEASE_BUILD = "1.0.105"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
 engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
 engine_operator_selection_module.DISPLAY_NAMES["gradient_v1"] = "Gradient boost"
+
+# The production overview must describe the routed/actuated control path rather
+# than the frozen base optimizer plan. install_model_routes() has already created
+# its endpoint during base-runtime import, but the endpoint resolves this module
+# global at request time, so replacing it here changes the data source without
+# duplicating the route.
+ui_models_module.decision_summary = control_truth_decision_summary
 
 # Successful arming must leave the inverter in EMS control mode at zero power.
 # Safe release belongs only to Shadow/fault transitions. The base actuator is
