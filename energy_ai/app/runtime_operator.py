@@ -4,6 +4,7 @@ from . import engine_operator_selection as engine_operator_selection_module
 from . import runtime as base
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
+from .deterministic_refined_runtime import refined_runtime_status, install_refined_runtime_patch
 from .engine_operator_selection import install_operator_engine_routing
 from .gradient_qualification import (
     install_qualification_candidate_runtime as install_gradient_qualification_runtime,
@@ -22,9 +23,10 @@ from .pool_installation_profile import install_pool_installation_profile
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 
-RELEASE_BUILD = "1.0.103"
+RELEASE_BUILD = "1.0.104"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
+engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
 engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
 engine_operator_selection_module.DISPLAY_NAMES["gradient_v1"] = "Gradient boost"
 
@@ -60,10 +62,12 @@ base.neural_runtime_status = _qualification_aware_neural_runtime_status
 install_operator_engine_routing()
 
 # Challenger wrappers are stacked around the same selector gateway. Gradient is
-# installed last, so the call order is gradient -> stochastic -> hybrid ->
-# operator routing -> robust selector. All decisions still share one vintage.
+# installed last, so the call order is gradient -> refined deterministic ->
+# stochastic -> hybrid -> operator routing -> robust selector. All decisions
+# still share one information vintage.
 install_hybrid_runtime_patch(base.core.cfg)
 install_stochastic_runtime_patch(base.core.cfg)
+install_refined_runtime_patch(base.core.cfg)
 install_gradient_runtime_patch(base.core.cfg)
 
 # Pool integration starts read-only. Apply mappings verified on the installed
@@ -120,6 +124,11 @@ async def gradient_qualification_status_route():
 @app.get("/engines/gradient/status", tags=["engines"])
 async def gradient_status():
     return {"runtime_build": RELEASE_BUILD, **gradient_runtime_status()}
+
+
+@app.get("/engines/refined-deterministic/status", tags=["engines"])
+async def refined_deterministic_status():
+    return {"runtime_build": RELEASE_BUILD, **refined_runtime_status()}
 
 
 @app.get("/engines/hybrid/status", tags=["engines"])
