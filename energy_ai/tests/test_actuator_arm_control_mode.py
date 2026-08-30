@@ -32,11 +32,17 @@ class FakeActuator:
         return {"ok": True}
 
 
-def test_successful_arm_holds_ems_control_mode_and_does_not_safe_release(monkeypatch):
+def test_successful_arm_holds_ems_control_mode_and_records_zero_as_effective_command(monkeypatch):
     readiness = []
     events = []
+    commands = []
     monkeypatch.setattr(arm_fix.da, "mark_actuator_ready", lambda ready, detail="": readiness.append((ready, detail)))
     monkeypatch.setattr(arm_fix.da, "_event", lambda event_type, reason, payload=None: events.append((event_type, reason, payload)))
+    monkeypatch.setattr(
+        arm_fix.da,
+        "_insert_command",
+        lambda candidate, **kwargs: commands.append((candidate, kwargs)) or 501,
+    )
     monkeypatch.setattr(
         arm_fix.da,
         "production_status",
@@ -55,17 +61,32 @@ def test_successful_arm_holds_ems_control_mode_and_does_not_safe_release(monkeyp
     assert result["ok"] is True
     assert result["control_mode_held"] is True
     assert result["control_mode_test"]["working_mode"] == "EMS BattCtrl"
+    assert result["handshake_command_id"] == 501
     assert actuator.adapter.safe_release_calls == 0
     assert readiness[-1][0] is True
+    assert len(commands) == 1
+    candidate, kwargs = commands[0]
+    assert candidate["source"] == "actuator_arm_zero_handshake"
+    assert candidate["requested_action_kw"] == 0.0
+    assert kwargs["safe_action_kw"] == 0.0
+    assert kwargs["physical_write"] is True
+    assert kwargs["status"] == "acknowledged"
     assert events[-1][0] == "actuator_armed"
     assert events[-1][2]["control_mode_held"] is True
+    assert events[-1][2]["handshake_command_id"] == 501
 
 
 def test_failed_arm_safe_releases_and_never_marks_ready(monkeypatch):
     readiness = []
     events = []
+    commands = []
     monkeypatch.setattr(arm_fix.da, "mark_actuator_ready", lambda ready, detail="": readiness.append((ready, detail)))
     monkeypatch.setattr(arm_fix.da, "_event", lambda event_type, reason, payload=None: events.append((event_type, reason, payload)))
+    monkeypatch.setattr(
+        arm_fix.da,
+        "_insert_command",
+        lambda candidate, **kwargs: commands.append((candidate, kwargs)) or 502,
+    )
     actuator = FakeActuator(
         {
             "acknowledged": True,
@@ -80,6 +101,7 @@ def test_failed_arm_safe_releases_and_never_marks_ready(monkeypatch):
     assert result["stage"] == "zero_handshake"
     assert actuator.adapter.safe_release_calls == 1
     assert readiness[-1][0] is False
+    assert commands == []
     assert events[-1][0] == "actuator_arm_failed"
 
 
