@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import asyncio
 
 import pytest
 
@@ -61,8 +61,7 @@ def _install_common(monkeypatch):
     })
 
 
-@pytest.mark.asyncio
-async def test_watchdog_clamps_shrinking_soc_envelope_without_pausing(monkeypatch):
+def test_watchdog_clamps_shrinking_soc_envelope_without_pausing(monkeypatch):
     _install_common(monkeypatch)
     monkeypatch.setattr(wd.da, "safety_filter", lambda candidate, cfg, actual: {
         "requested_action_kw": 7.5225,
@@ -78,7 +77,7 @@ async def test_watchdog_clamps_shrinking_soc_envelope_without_pausing(monkeypatc
     monkeypatch.setattr(wd.da, "_event", lambda *args: events.append(args))
 
     actuator = FakeActuator(FakeAdapter())
-    result = await wd.watchdog_tick_with_dynamic_safety_correction(actuator)
+    result = asyncio.run(wd.watchdog_tick_with_dynamic_safety_correction(actuator))
 
     assert result["status"] == "healthy_corrected"
     assert result["old_target_kw"] == pytest.approx(7.5225)
@@ -89,8 +88,7 @@ async def test_watchdog_clamps_shrinking_soc_envelope_without_pausing(monkeypatc
     assert events[0][0] == "actuator_watchdog_safety_correction"
 
 
-@pytest.mark.asyncio
-async def test_watchdog_can_correct_charge_all_the_way_toward_zero(monkeypatch):
+def test_watchdog_can_correct_charge_all_the_way_toward_zero(monkeypatch):
     _install_common(monkeypatch)
     monkeypatch.setattr(wd.da, "_last_effective_command", lambda: {**_last_command(), "safe_action_kw": -0.4126})
     monkeypatch.setattr(wd.da, "safety_filter", lambda candidate, cfg, actual: {
@@ -105,27 +103,25 @@ async def test_watchdog_can_correct_charge_all_the_way_toward_zero(monkeypatch):
     monkeypatch.setattr(wd.da, "_event", lambda *args, **kwargs: None)
 
     actuator = FakeActuator(FakeAdapter(target=-0.4126))
-    result = await wd.watchdog_tick_with_dynamic_safety_correction(actuator)
+    result = asyncio.run(wd.watchdog_tick_with_dynamic_safety_correction(actuator))
 
     assert result["status"] == "healthy_corrected"
     assert actuator.adapter.dispatched == [pytest.approx(-0.3301)]
     assert actuator.failures == []
 
 
-@pytest.mark.asyncio
-async def test_watchdog_keeps_fail_safe_for_mode_drift(monkeypatch):
+def test_watchdog_keeps_fail_safe_for_mode_drift(monkeypatch):
     _install_common(monkeypatch)
     actuator = FakeActuator(FakeAdapter(mode="ToU"))
 
-    result = await wd.watchdog_tick_with_dynamic_safety_correction(actuator)
+    result = asyncio.run(wd.watchdog_tick_with_dynamic_safety_correction(actuator))
 
     assert result["status"] == "fail_safe"
     assert actuator.failures[0][0] == "watchdog_working_mode_drift"
     assert actuator.adapter.dispatched == []
 
 
-@pytest.mark.asyncio
-async def test_watchdog_fail_safes_if_safety_correction_cannot_be_dispatched(monkeypatch):
+def test_watchdog_fail_safes_if_safety_correction_cannot_be_dispatched(monkeypatch):
     _install_common(monkeypatch)
     monkeypatch.setattr(wd.da, "safety_filter", lambda candidate, cfg, actual: {
         "requested_action_kw": 7.5225,
@@ -137,7 +133,7 @@ async def test_watchdog_fail_safes_if_safety_correction_cannot_be_dispatched(mon
     })
     actuator = FakeActuator(FakeAdapter(dispatch_error=RuntimeError("ack failed")))
 
-    result = await wd.watchdog_tick_with_dynamic_safety_correction(actuator)
+    result = asyncio.run(wd.watchdog_tick_with_dynamic_safety_correction(actuator))
 
     assert result["status"] == "fail_safe"
     assert actuator.failures[0][0] == "watchdog_safety_correction_dispatch_failed"
