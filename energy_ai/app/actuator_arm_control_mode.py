@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import deterministic_actuator as da
@@ -14,6 +15,13 @@ async def zero_handshake_and_arm_control_mode_held(self) -> dict[str, Any]:
     Safe release is deliberately an exit/fault operation. Returning to the safe
     working mode during a successful arm would make the actuator look ready while
     the inverter is no longer in EMS BattCtrl, which the watchdog must reject.
+
+    The acknowledged zero handshake is also stored as the newest effective
+    command. This is important because command history survives pause/re-arm. If
+    the previous effective command were allowed to remain current, the
+    min-action-change optimisation could incorrectly hold that stale target even
+    though the handshake has physically reset the inverter target to zero. The
+    watchdog would then see a target drift and pause the controller immediately.
     """
     preflight = await self.preflight()
     if not preflight.get("ok"):
@@ -36,11 +44,42 @@ async def zero_handshake_and_arm_control_mode_held(self) -> dict[str, Any]:
                 f"control-mode zero handshake target {target!r} outside zero tolerance {tolerance:.3f} kW"
             )
 
+        now = datetime.now(timezone.utc)
+        handshake_candidate = {
+            "source": "actuator_arm_zero_handshake",
+            "source_id": now.isoformat(),
+            "engine_id": "actuator_safety",
+            "decision_start": now.isoformat(),
+            "valid_until": (now + timedelta(minutes=15)).isoformat(),
+            "requested_action_kw": 0.0,
+        }
+        handshake_payload = {
+            "status": "acknowledged",
+            "reason": "zero_handshake_acknowledged_control_mode_held",
+            "requested_action_kw": 0.0,
+            "safe_action_kw": 0.0,
+            "readback": entered,
+            "physical_write_performed": True,
+            "control_mode_held": True,
+        }
+        handshake_command_id = da._insert_command(
+            handshake_candidate,
+            safe_action_kw=0.0,
+            physical_write=True,
+            status="acknowledged",
+            reason="zero_handshake_acknowledged_control_mode_held",
+            payload=handshake_payload,
+        )
+
         da.mark_actuator_ready(True, detail="solinteg_zero_handshake_acknowledged_control_mode_held")
         da._event(
             "actuator_armed",
             "zero_handshake_acknowledged_control_mode_held",
-            {"entered": entered, "control_mode_held": True},
+            {
+                "entered": entered,
+                "control_mode_held": True,
+                "handshake_command_id": handshake_command_id,
+            },
         )
         return {
             "ok": True,
@@ -49,6 +88,7 @@ async def zero_handshake_and_arm_control_mode_held(self) -> dict[str, Any]:
             "zero_power_only": True,
             "control_mode_held": True,
             "control_mode_test": entered,
+            "handshake_command_id": handshake_command_id,
             "production": da.production_status(),
         }
     except Exception as exc:
