@@ -28,7 +28,12 @@ class FakeAdapter:
 class FakeActuator:
     def __init__(self, adapter):
         self.adapter = adapter
-        self.cfg = {"actuator": {"control_working_mode": "EMS BattCtrl", "ack_tolerance_kw": 0.1}}
+        self.cfg = {"actuator": {
+            "control_working_mode": "EMS BattCtrl",
+            "ack_tolerance_kw": 0.1,
+            "zero_deadband_kw": 0.05,
+            "state_max_age_seconds": 180.0,
+        }}
         self.failures = []
 
     async def fail_safe(self, reason, payload=None):
@@ -59,6 +64,7 @@ def _install_common(monkeypatch):
         "age_seconds": 8.4, "soc_pct": 15.7, "load_kw": 2.617, "pv_kw": 0.0,
         "grid_kw": 4.742, "battery_kw": 7.463,
     })
+    monkeypatch.setattr(wd.da, "_event", lambda *args, **kwargs: None)
 
 
 def test_watchdog_clamps_shrinking_soc_envelope_without_pausing(monkeypatch):
@@ -100,7 +106,6 @@ def test_watchdog_can_correct_charge_all_the_way_toward_zero(monkeypatch):
         "actual": actual,
     })
     monkeypatch.setattr(wd.da, "_insert_command", lambda *args, **kwargs: 160)
-    monkeypatch.setattr(wd.da, "_event", lambda *args, **kwargs: None)
 
     actuator = FakeActuator(FakeAdapter(target=-0.4126))
     result = asyncio.run(wd.watchdog_tick_with_dynamic_safety_correction(actuator))
@@ -137,3 +142,37 @@ def test_watchdog_fail_safes_if_safety_correction_cannot_be_dispatched(monkeypat
 
     assert result["status"] == "fail_safe"
     assert actuator.failures[0][0] == "watchdog_safety_correction_dispatch_failed"
+
+
+def test_watchdog_keeps_active_when_telemetry_is_stale_and_target_is_zero(monkeypatch):
+    _install_common(monkeypatch)
+    monkeypatch.setattr(wd.da, "_last_effective_command", lambda: {**_last_command(), "safe_action_kw": 0.0})
+    monkeypatch.setattr(wd.da, "_latest_actual", lambda: {
+        "age_seconds": 304.8, "soc_pct": 42.7, "load_kw": 0.489, "pv_kw": 0.0,
+        "grid_kw": -0.489, "battery_kw": 0.0,
+    })
+    events = []
+    monkeypatch.setattr(wd.da, "_event", lambda *args, **kwargs: events.append((args, kwargs)))
+
+    actuator = FakeActuator(FakeAdapter(target=0.0))
+    result = asyncio.run(wd.watchdog_tick_with_dynamic_safety_correction(actuator))
+
+    assert result["status"] == "healthy_waiting_for_telemetry"
+    assert result["reason"] == "stale_actual_state_zero_target_held"
+    assert actuator.failures == []
+    assert actuator.adapter.dispatched == []
+    assert events[0][0][0] == "actuator_watchdog_telemetry_wait"
+
+
+def test_watchdog_still_fail_safes_on_stale_telemetry_with_nonzero_target(monkeypatch):
+    _install_common(monkeypatch)
+    monkeypatch.setattr(wd.da, "_latest_actual", lambda: {
+        "age_seconds": 304.8, "soc_pct": 42.7, "load_kw": 0.489, "pv_kw": 0.0,
+        "grid_kw": -0.489, "battery_kw": 7.5,
+    })
+
+    actuator = FakeActuator(FakeAdapter(target=7.5225))
+    result = asyncio.run(wd.watchdog_tick_with_dynamic_safety_correction(actuator))
+
+    assert result["status"] == "fail_safe"
+    assert actuator.failures[0][0] == "watchdog_actual_state_stale_nonzero_target"
