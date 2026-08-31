@@ -9,12 +9,18 @@ _INSTALLED = False
 
 
 async def watchdog_tick_with_dynamic_safety_correction(self) -> dict[str, Any]:
-    """Keep ACTIVE through normal SOC/grid envelope shrinkage.
+    """Keep ACTIVE through normal closed-loop corrections without weakening hard faults.
 
-    A command that was safe when dispatched can naturally become too large as SOC,
-    load or PV changes. That is a normal closed-loop condition, not an actuator
-    fault. Re-dispatch the nearest currently-safe target and keep ACTIVE. Genuine
-    telemetry, mode, target, configuration or dispatch failures still fail safe.
+    Two conditions are handled without pausing production:
+    1. A previously safe command moves just outside the current SOC/grid envelope;
+       it is clamped and re-dispatched.
+    2. Telemetry becomes stale while the inverter is already confirmed in control
+       mode at an effectively zero target; the watchdog keeps the zero target and
+       waits for fresh telemetry instead of turning a harmless observation gap into
+       an operator-required pause.
+
+    Stale telemetry with a non-zero target remains a fail-safe condition, as do
+    mode drift, target drift, configuration drift and dispatch/readback failures.
     """
     prod = da.production_status()
     if not prod.get("physical_writes_enabled") or prod.get("operating_mode") != "active":
@@ -48,8 +54,10 @@ async def watchdog_tick_with_dynamic_safety_correction(self) -> dict[str, Any]:
     except Exception as exc:
         return await self.fail_safe("watchdog_readback_failed", {"error": repr(exc)})
 
-    control_mode = str((self.cfg.get("actuator") or {}).get("control_working_mode") or "EMS BattCtrl")
-    tolerance = float((self.cfg.get("actuator") or {}).get("ack_tolerance_kw", 0.10))
+    actuator_cfg = self.cfg.get("actuator") or {}
+    control_mode = str(actuator_cfg.get("control_working_mode") or "EMS BattCtrl")
+    tolerance = float(actuator_cfg.get("ack_tolerance_kw", 0.10))
+    zero_deadband = max(0.0, float(actuator_cfg.get("zero_deadband_kw", 0.05)))
     actual_target = readback.get("battery_power_target_kw")
     expected = float(last.get("safe_action_kw") or 0.0)
 
@@ -66,7 +74,55 @@ async def watchdog_tick_with_dynamic_safety_correction(self) -> dict[str, Any]:
 
     actual = da._latest_actual()
     if actual is None:
+        if abs(expected) <= zero_deadband and abs(float(actual_target)) <= max(zero_deadband, tolerance):
+            da._event(
+                "actuator_watchdog_telemetry_wait",
+                "no_actual_state_zero_target_held",
+                {"last_command": last, "readback": readback},
+            )
+            return {
+                "status": "healthy_waiting_for_telemetry",
+                "reason": "no_actual_state_zero_target_held",
+                "last_command": last,
+                "readback": readback,
+                "production": prod,
+            }
         return await self.fail_safe("watchdog_no_actual_state")
+
+    max_age = float(actuator_cfg.get("state_max_age_seconds", 180.0))
+    age = float(actual.get("age_seconds") or 1e9)
+    if age > max_age:
+        if abs(expected) <= zero_deadband and abs(float(actual_target)) <= max(zero_deadband, tolerance):
+            da._event(
+                "actuator_watchdog_telemetry_wait",
+                "stale_actual_state_zero_target_held",
+                {
+                    "age_seconds": age,
+                    "state_max_age_seconds": max_age,
+                    "last_command": last,
+                    "readback": readback,
+                },
+            )
+            return {
+                "status": "healthy_waiting_for_telemetry",
+                "reason": "stale_actual_state_zero_target_held",
+                "age_seconds": age,
+                "state_max_age_seconds": max_age,
+                "last_command": last,
+                "readback": readback,
+                "actual": actual,
+                "production": prod,
+            }
+        return await self.fail_safe(
+            "watchdog_actual_state_stale_nonzero_target",
+            {
+                "age_seconds": age,
+                "state_max_age_seconds": max_age,
+                "last_command": last,
+                "readback": readback,
+            },
+        )
+
     try:
         safety = da.safety_filter(candidate, self.cfg, actual)
     except Exception as exc:
