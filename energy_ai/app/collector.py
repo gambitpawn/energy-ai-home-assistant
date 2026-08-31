@@ -3,8 +3,6 @@ from datetime import datetime, timedelta, timezone
 
 from .db import insert_raw, rebuild_15m_bucket
 from .ha import HomeAssistantClient
-from .load_evaluation import evaluate_matured_load_forecasts, insert_load_forecast
-from .load_forecast import LoadForecaster
 
 
 def quarter_bucket(ts):
@@ -14,29 +12,24 @@ def quarter_bucket(ts):
 
 
 class Collector:
+    """Poll and persist Home Assistant state only.
+
+    The collector is the safety-critical source for ``raw_state`` freshness used
+    by the actuator watchdog. Forecast generation/evaluation must therefore not
+    run inline in this coroutine: those jobs can take minutes on constrained
+    hardware and would otherwise stop state polling for their entire runtime.
+
+    Forecast maintenance is already owned by the separate maintenance loop in
+    ``main._forecast_maintenance_loop`` / ``runtime_maintenance``.
+    """
+
     def __init__(self,cfg):
         self.cfg=cfg
         self.ha=HomeAssistantClient(cfg)
-        self.load_forecaster=LoadForecaster(cfg)
         self.poll_seconds=int(cfg.get("collector",{}).get("poll_seconds",60))
         self.latest=None
         self.last_error=None
         self.running=False
-        self.last_load_forecast_bucket=None
-        self.last_load_forecast_error=None
-
-    async def _load_forecast_maintenance(self,bucket_start):
-        if self.last_load_forecast_bucket == bucket_start:
-            return
-        self.last_load_forecast_bucket = bucket_start
-        try:
-            forecast = await asyncio.to_thread(self.load_forecaster.refresh)
-            await asyncio.to_thread(insert_load_forecast, forecast)
-            await asyncio.to_thread(evaluate_matured_load_forecasts, 7)
-            self.last_load_forecast_error=None
-        except Exception as exc:
-            # Missing/untrained load model must never break HA state collection.
-            self.last_load_forecast_error=repr(exc)
 
     async def run_once(self):
         state=await self.ha.snapshot()
@@ -54,7 +47,6 @@ class Collector:
 
         self.latest=state
         self.last_error=None
-        await self._load_forecast_maintenance(bucket_start)
         return state
 
     async def loop(self):
