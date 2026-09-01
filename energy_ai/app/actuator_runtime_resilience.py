@@ -28,15 +28,11 @@ def _candidate_safety_horizon_hours(
 ) -> tuple[float, float]:
     """Return the remaining time for which the current command can remain active.
 
-    The old actuator safety filter always projected the *current* command across a
-    fresh 15-minute interval. During an already-running interval this repeatedly
-    moved the SOC envelope inward, even though the command had only a few minutes
-    left to run. Near a SOC guard this made the watchdog chase the boundary with a
-    new write every minute.
-
-    Candidate validity already defines the real control horizon. Include the same
-    grace period used by _candidate_valid because the previous command can legally
-    remain active while the next decision is being dispatched.
+    Safety is projected through the same expiry+grace horizon for which the
+    command is legally allowed to remain effective. This is deliberately more
+    conservative than projecting only to the nominal 15-minute boundary, but it
+    avoids the old error of projecting a fresh 15 minutes from every watchdog
+    tick, which caused a shrinking SOC envelope and repeated corrective writes.
     """
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     valid_until = candidate.get("valid_until")
@@ -51,6 +47,16 @@ def _candidate_safety_horizon_hours(
     return remaining_seconds / 3600.0, remaining_seconds
 
 
+def _finite(name: str, value: Any) -> float:
+    try:
+        number = float(value)
+    except Exception as exc:
+        raise RuntimeError(f"non_numeric_{name}:{value!r}") from exc
+    if not math.isfinite(number):
+        raise RuntimeError(f"non_finite_{name}:{value!r}")
+    return number
+
+
 def safety_filter_time_aware(
     candidate: dict[str, Any],
     cfg: dict[str, Any],
@@ -58,30 +64,29 @@ def safety_filter_time_aware(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Apply hard actuator limits over the command's *remaining* validity horizon."""
-    requested = float(candidate["requested_action_kw"])
+    """Apply battery, SOC and grid limits over the command's remaining horizon."""
+    requested = _finite("requested_action_kw", candidate["requested_action_kw"])
     actuator = cfg.get("actuator") or {}
     optimizer = cfg.get("optimizer") or {}
     battery = (cfg.get("policy") or {}).get("battery") or {}
 
-    stale = float(actuator.get("state_max_age_seconds", 180.0))
+    stale = max(0.0, float(actuator.get("state_max_age_seconds", 180.0)))
     age_value = actual.get("age_seconds")
-    age = 1e9 if age_value is None else float(age_value)
+    age = 1e9 if age_value is None else _finite("actual_state_age_seconds", age_value)
     if age > stale:
         raise RuntimeError(f"actual_state_stale:{age}s>{stale}s")
 
-    soc = actual.get("soc_pct")
-    load = actual.get("load_kw")
-    pv = actual.get("pv_kw")
-    if soc is None or load is None or pv is None:
+    if actual.get("soc_pct") is None or actual.get("load_kw") is None or actual.get("pv_kw") is None:
         raise RuntimeError("actual_state_missing_soc_load_or_pv")
+    soc = _finite("soc_pct", actual.get("soc_pct"))
+    load = max(0.0, _finite("load_kw", actual.get("load_kw")))
+    pv = max(0.0, _finite("pv_kw", actual.get("pv_kw")))
 
-    soc = float(soc)
-    load = max(0.0, float(load))
-    pv = max(0.0, float(pv))
-    cap = float(battery.get("capacity_kwh", 19.6))
+    cap = max(0.001, float(battery.get("capacity_kwh", 19.6)))
     hmin = float(battery.get("hard_min_soc_pct", 5.0))
     hmax = float(battery.get("hard_max_soc_pct", 100.0))
+    if hmax <= hmin:
+        raise RuntimeError(f"invalid_hard_soc_range:{hmin}>={hmax}")
     guard = max(0.0, float(actuator.get("soc_guard_margin_pct", 1.0)))
     cmax = max(0.0, float(optimizer.get("battery_max_charge_kw", 8.0)))
     dmax = max(0.0, float(optimizer.get("battery_max_discharge_kw", 8.0)))
@@ -98,25 +103,34 @@ def safety_filter_time_aware(
     charge_by_soc = max(0.0, max_energy - energy) / ec / dt_hours
 
     net = load - pv
-    # grid = net - battery_action. Positive grid means import.
+    # battery_action > 0 discharges; < 0 charges. grid = net - battery_action.
     lower = max(-cmax, net - import_limit, -charge_by_soc)
     upper = min(dmax, net + export_limit, discharge_by_soc)
     if lower > upper + 1e-9:
         raise RuntimeError(f"no_safe_action_interval:lower={lower:.3f},upper={upper:.3f}")
 
     safe = min(upper, max(lower, requested))
-    if soc <= hmin + guard + 1e-9 and safe > 0.0:
+    # Hard SOC guards dominate an economic request. Because the safe interval also
+    # contains grid constraints, zero is only substituted when it remains feasible.
+    if soc <= hmin + guard + 1e-9 and safe > 0.0 and lower <= 0.0 <= upper:
         safe = 0.0
-    if soc >= hmax - guard - 1e-9 and safe < 0.0:
+    if soc >= hmax - guard - 1e-9 and safe < 0.0 and lower <= 0.0 <= upper:
         safe = 0.0
 
     zero_deadband = max(0.0, float(actuator.get("zero_deadband_kw", 0.05)))
-    if abs(safe) < zero_deadband:
+    zero_deadband_applied = False
+    # Never let deadband rounding move a command *outside* the safe interval. The
+    # previous implementation could turn a required small grid-protection action
+    # into zero even when zero itself was not safe.
+    if abs(safe) < zero_deadband and lower - 1e-9 <= 0.0 <= upper + 1e-9:
         safe = 0.0
+        zero_deadband_applied = True
 
     predicted_grid = net - safe
     clamped = abs(safe - requested) > 1e-6
     reasons: list[str] = ["safety_clamped"] if clamped else []
+    if zero_deadband_applied:
+        reasons.append("zero_deadband")
     return {
         "requested_action_kw": requested,
         "safe_action_kw": round(safe, 4),
@@ -128,17 +142,12 @@ def safety_filter_time_aware(
         "soc_guard": {"hard_min_pct": hmin, "hard_max_pct": hmax, "margin_pct": guard},
         "safety_horizon_seconds": round(horizon_seconds, 3),
         "safety_horizon_source": "candidate_valid_until_plus_grace",
+        "zero_deadband_applied": zero_deadband_applied,
     }
 
 
 async def _resolve_entities_cached(self: SolintegCommandAdapter):
-    """Cache the resolved Solinteg entity pair for the lifetime of the add-on.
-
-    With blank explicit entity options, the original implementation called
-    Home Assistant all_states() on every watchdog readback and every dispatch.
-    Runtime configuration changes already require restart, so repeating discovery
-    every 30 seconds adds load and failure surface without providing freshness.
-    """
+    """Cache the resolved Solinteg entity pair for the lifetime of the add-on."""
     cached = getattr(self, "_energy_ai_resolved_entities", None)
     if cached is not None:
         return cached
@@ -148,13 +157,12 @@ async def _resolve_entities_cached(self: SolintegCommandAdapter):
 
 
 async def _dispatch_with_reconciliation(self: SolintegCommandAdapter, target_kw: float) -> dict[str, Any]:
-    """Reconcile an ambiguous HTTP timeout before declaring command failure.
+    """Reconcile an ambiguous command error against actual inverter readback.
 
-    A Home Assistant service POST can time out after the write has already been
-    accepted. In that case an immediate fail-safe is a false negative. The write
-    is idempotent, but we do not blindly retry it here: first verify the actual
-    inverter mode/target. If they already match, treat the command as acknowledged;
-    otherwise preserve the original exception so the actuator can fail safe.
+    Home Assistant may time out after accepting a service call. Before declaring
+    failure, verify whether the requested target and control mode are already in
+    effect. If they are, the operation is safe and idempotently considered
+    acknowledged. Otherwise preserve the original exception for fail-safe logic.
     """
     try:
         return await _ORIGINAL_DISPATCH(self, target_kw)
@@ -162,7 +170,7 @@ async def _dispatch_with_reconciliation(self: SolintegCommandAdapter, target_kw:
         control_mode = str((self.cfg.get("actuator") or {}).get("control_working_mode") or "EMS BattCtrl")
         last_error: Exception | None = None
         last_readback: dict[str, Any] | None = None
-        for _ in range(3):
+        for attempt in range(3):
             try:
                 entities = await self.resolve_entities()
                 last_readback = await self.readback(entities)
@@ -178,15 +186,16 @@ async def _dispatch_with_reconciliation(self: SolintegCommandAdapter, target_kw:
                     }
             except Exception as exc:
                 last_error = exc
-            await asyncio.sleep(0.25)
+            if attempt < 2:
+                await asyncio.sleep(0.25)
         if last_error is not None:
             try:
-                original_exc.add_note(f"post-timeout readback also failed: {last_error!r}")
+                original_exc.add_note(f"post-error readback also failed: {last_error!r}")
             except Exception:
                 pass
         elif last_readback is not None:
             try:
-                original_exc.add_note(f"post-timeout readback did not match target: {last_readback!r}")
+                original_exc.add_note(f"post-error readback did not match target: {last_readback!r}")
             except Exception:
                 pass
         raise original_exc
