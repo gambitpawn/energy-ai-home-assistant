@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,7 +10,7 @@ from .actuator_config import effective_actuator_config_report
 
 _INSTALLED = False
 _ORIGINAL_STATUS = None
-_POLICY = "watchdog_v3_consolidated"
+_POLICY = "watchdog_v4_redundant_telemetry"
 
 
 def _now_iso() -> str:
@@ -18,7 +19,7 @@ def _now_iso() -> str:
 
 def _runtime_state(self) -> dict[str, Any]:
     state = getattr(self, "_energy_ai_watchdog_runtime", None)
-    if state is None:
+    if state is None or state.get("policy") != _POLICY:
         state = {
             "policy": _POLICY,
             "last_checked_at": None,
@@ -42,7 +43,10 @@ def _record(self, status: str, reason: str | None = None, detail: dict[str, Any]
     state["last_detail"] = detail
     if status == "healthy_corrected":
         state["correction_count"] = int(state.get("correction_count") or 0) + 1
-    elif status.startswith("healthy_waiting") or status == "healthy_within_safety_tolerance":
+    elif status.startswith("healthy_waiting") or status in {
+        "healthy_within_safety_tolerance",
+        "healthy_redundant_telemetry",
+    }:
         state["degraded_count"] = int(state.get("degraded_count") or 0) + 1
     elif status == "fail_safe":
         state["fail_safe_count"] = int(state.get("fail_safe_count") or 0) + 1
@@ -74,21 +78,19 @@ def _emit_throttled(
     da._event(event_type, reason, payload)
 
 
-def _target_zero(value: Any, tolerance: float) -> bool:
+def _finite(value: Any) -> bool:
     try:
-        return value is not None and abs(float(value)) <= tolerance
-    except Exception:
+        return value is not None and math.isfinite(float(value))
+    except (TypeError, ValueError):
         return False
 
 
-def _envelope_tolerance_kw(actuator_cfg: dict[str, Any]) -> float:
-    """Small tolerance for envelope noise, never a replacement for hard limits.
+def _target_zero(value: Any, tolerance: float) -> bool:
+    return _finite(value) and abs(float(value)) <= tolerance
 
-    The inverter target itself is acknowledged only within ack_tolerance_kw. A
-    watchdog that rewrites for smaller deltas can chatter indefinitely on sensor
-    noise/rounding. Cap the accepted envelope deviation at 0.10 kW even if the
-    configured acknowledgement tolerance is larger.
-    """
+
+def _envelope_tolerance_kw(actuator_cfg: dict[str, Any]) -> float:
+    """Suppress rewrites below practical inverter/HA target resolution."""
     ack = max(0.01, float(actuator_cfg.get("ack_tolerance_kw", 0.10)))
     return min(0.10, ack)
 
@@ -101,7 +103,7 @@ async def _readback_confirmed(
     tolerance_kw: float,
     attempts: int = 2,
 ) -> tuple[dict[str, Any] | None, bool, bool, list[str]]:
-    """Confirm mode/target across transient HA read failures or state lag."""
+    """Confirm mode/target twice before declaring persistent control drift."""
     last: dict[str, Any] | None = None
     errors: list[str] = []
     mode_ok = False
@@ -111,7 +113,7 @@ async def _readback_confirmed(
             last = await self.adapter.readback()
             mode_ok = str(last.get("working_mode")) == control_mode
             target = last.get("battery_power_target_kw")
-            target_ok = target is not None and abs(float(target) - expected_kw) <= tolerance_kw
+            target_ok = _finite(target) and abs(float(target) - expected_kw) <= tolerance_kw
             if mode_ok and target_ok:
                 return last, True, True, errors
         except Exception as exc:
@@ -135,11 +137,7 @@ async def _wait_safe_zero(
     actual: dict[str, Any] | None = None,
     detail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = {
-        "last_command": last_command,
-        "readback": readback,
-        **(detail or {}),
-    }
+    payload = {"last_command": last_command, "readback": readback, **(detail or {})}
     _emit_throttled(self, "actuator_watchdog_safe_wait", reason, payload)
     result = {
         "status": "healthy_waiting_safe_zero",
@@ -154,6 +152,66 @@ async def _wait_safe_zero(
         result.update(detail)
     _record(self, result["status"], reason, detail)
     return result
+
+
+def _prepare_safety_actual(
+    actual: dict[str, Any],
+    *,
+    verified_target_kw: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return telemetry usable for safety and diagnostics about redundancy.
+
+    SOC is non-redundant and always required. Grid-envelope power has two safe
+    representations:
+      1. load - PV when both component sensors are present;
+      2. measured grid + the independently verified inverter target.
+
+    The second identity follows the actuator sign convention
+    ``grid = net_load - battery_action``. It is particularly useful for a single
+    transient PV/load sensor dropout: the watchdog still has direct grid power and
+    a separately read-back physical target, so pausing is not safer than using the
+    redundant measurement path.
+    """
+    prepared = dict(actual)
+    missing = [
+        name for name in ("soc_pct", "load_kw", "pv_kw", "grid_kw")
+        if not _finite(actual.get(name))
+    ]
+
+    if not _finite(actual.get("soc_pct")):
+        return prepared, {
+            "usable": False,
+            "reason": "actual_state_missing_soc",
+            "missing_fields": missing,
+            "net_source": None,
+        }
+
+    if _finite(actual.get("load_kw")) and _finite(actual.get("pv_kw")):
+        prepared["net_kw"] = float(actual["load_kw"]) - float(actual["pv_kw"])
+        return prepared, {
+            "usable": True,
+            "reason": "primary_load_pv",
+            "missing_fields": missing,
+            "net_source": "load_minus_pv",
+            "redundant_fallback": False,
+        }
+
+    if _finite(actual.get("grid_kw")) and _finite(verified_target_kw):
+        prepared["net_kw"] = float(actual["grid_kw"]) + float(verified_target_kw)
+        return prepared, {
+            "usable": True,
+            "reason": "redundant_grid_plus_verified_target",
+            "missing_fields": missing,
+            "net_source": "grid_plus_verified_target",
+            "redundant_fallback": True,
+        }
+
+    return prepared, {
+        "usable": False,
+        "reason": "actual_state_missing_net_inputs",
+        "missing_fields": missing,
+        "net_source": None,
+    }
 
 
 async def _watchdog_tick_impl(self) -> dict[str, Any]:
@@ -211,7 +269,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
             {"readback": readback, "read_errors": read_errors, "last_command": last},
         )
 
-    actual_target = readback.get("battery_power_target_kw")
+    actual_target = float(readback["battery_power_target_kw"])
     zero_held = _target_zero(expected, zero_tolerance) and _target_zero(actual_target, zero_tolerance)
 
     candidate = {
@@ -224,9 +282,6 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
     }
     valid, valid_reason = da._candidate_valid(candidate, self.cfg)
     if not valid:
-        # Expiry of an already-confirmed zero command is a control-pipeline
-        # degradation, not a physical safety fault. Staying in EMS at zero lets a
-        # later fresh candidate recover automatically without operator re-arming.
         if valid_reason == "candidate_expired" and zero_held:
             return await _wait_safe_zero(
                 self,
@@ -254,49 +309,66 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
 
     max_age = float(actuator_cfg.get("state_max_age_seconds", 180.0))
     age_value = actual.get("age_seconds")
-    age = 1e9 if age_value is None else float(age_value)
-    missing_fields = [name for name in ("soc_pct", "load_kw", "pv_kw") if actual.get(name) is None]
-    telemetry_problem = None
+    age = 1e9 if not _finite(age_value) else float(age_value)
     if age > max_age:
-        telemetry_problem = "stale_actual_state"
-    elif missing_fields:
-        telemetry_problem = "actual_state_missing_soc_load_or_pv"
-
-    if telemetry_problem:
         if zero_held:
             return await _wait_safe_zero(
                 self,
-                reason=f"{telemetry_problem}_zero_target_held",
+                reason="stale_actual_state_zero_target_held",
                 last_command=last,
                 readback=readback,
                 actual=actual,
-                detail={
-                    "age_seconds": age,
-                    "state_max_age_seconds": max_age,
-                    "missing_fields": missing_fields,
-                },
+                detail={"age_seconds": age, "state_max_age_seconds": max_age},
             )
         return await _fail_safe(
             self,
-            f"watchdog_{telemetry_problem}_nonzero_target",
+            "watchdog_stale_actual_state_nonzero_target",
             {
                 "age_seconds": age,
                 "state_max_age_seconds": max_age,
-                "missing_fields": missing_fields,
                 "last_command": last,
                 "readback": readback,
             },
         )
 
+    safety_actual, telemetry = _prepare_safety_actual(actual, verified_target_kw=actual_target)
+    if not telemetry["usable"]:
+        if zero_held:
+            return await _wait_safe_zero(
+                self,
+                reason=f"{telemetry['reason']}_zero_target_held",
+                last_command=last,
+                readback=readback,
+                actual=actual,
+                detail={"telemetry": telemetry},
+            )
+        return await _fail_safe(
+            self,
+            f"watchdog_{telemetry['reason']}_nonzero_target",
+            {"telemetry": telemetry, "last_command": last, "readback": readback, "actual": actual},
+        )
+
+    if telemetry.get("redundant_fallback"):
+        _emit_throttled(
+            self,
+            "actuator_watchdog_redundant_telemetry",
+            "grid_plus_verified_target",
+            {"telemetry": telemetry, "actual": actual, "readback": readback},
+        )
+
     try:
-        safety = da.safety_filter(candidate, self.cfg, actual)
+        safety = da.safety_filter(candidate, self.cfg, safety_actual)
     except Exception as exc:
-        # Unexpected safety calculation failures are faults. Telemetry freshness
-        # and required-field problems were classified explicitly above.
         return await _fail_safe(
             self,
             "watchdog_safety_filter_failed",
-            {"error": repr(exc), "last_command": last, "readback": readback, "actual": actual},
+            {
+                "error": repr(exc),
+                "telemetry": telemetry,
+                "last_command": last,
+                "readback": readback,
+                "actual": actual,
+            },
         )
 
     lo = float(safety["safe_interval_kw"]["min"])
@@ -305,14 +377,18 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
     envelope_tolerance = _envelope_tolerance_kw(actuator_cfg)
 
     if violation <= 1e-9:
+        status = "healthy_redundant_telemetry" if telemetry.get("redundant_fallback") else "healthy"
+        reason = telemetry["reason"] if telemetry.get("redundant_fallback") else "within_current_safety_envelope"
         result = {
-            "status": "healthy",
+            "status": status,
+            "reason": reason,
             "last_command": last,
             "readback": readback,
             "actual": actual,
+            "telemetry": telemetry,
             "safety": safety,
         }
-        _record(self, "healthy", "within_current_safety_envelope")
+        _record(self, status, reason, telemetry if telemetry.get("redundant_fallback") else None)
         return result
 
     if violation <= envelope_tolerance + 1e-9:
@@ -320,12 +396,14 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
             "envelope_violation_kw": round(violation, 4),
             "envelope_tolerance_kw": envelope_tolerance,
             "safe_interval_kw": {"min": lo, "max": hi},
+            "telemetry": telemetry,
         }
-        _emit_throttled(self, "actuator_watchdog_safety_tolerance", "minor_envelope_deviation", {
-            **detail,
-            "last_command": last,
-            "actual": actual,
-        })
+        _emit_throttled(
+            self,
+            "actuator_watchdog_safety_tolerance",
+            "minor_envelope_deviation",
+            {**detail, "last_command": last, "actual": actual},
+        )
         result = {
             "status": "healthy_within_safety_tolerance",
             "reason": "minor_envelope_deviation",
@@ -350,6 +428,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
                 "old_target_kw": expected,
                 "new_target_kw": corrected,
                 "envelope_violation_kw": violation,
+                "telemetry": telemetry,
                 "safety": safety,
                 "last_command": last,
             },
@@ -363,6 +442,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
         "old_target_kw": expected,
         "new_target_kw": corrected,
         "envelope_violation_kw": violation,
+        "telemetry": telemetry,
         "safety": safety,
         "readback": ack,
         "physical_write_performed": True,
@@ -384,6 +464,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
             "new_target_kw": corrected,
             "envelope_violation_kw": round(violation, 4),
             "safe_interval_kw": {"min": lo, "max": hi},
+            "telemetry": telemetry,
             "actual": actual,
             "source": last.get("source"),
             "engine_id": last.get("engine_id"),
@@ -399,30 +480,21 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
         "last_command": last,
         "readback": ack,
         "actual": actual,
+        "telemetry": telemetry,
         "safety": safety,
         "production": da.production_status(),
     }
-    _record(self, result["status"], result["reason"], {
-        "old_target_kw": expected,
-        "new_target_kw": corrected,
-        "envelope_violation_kw": violation,
-    })
+    _record(
+        self,
+        result["status"],
+        result["reason"],
+        {"old_target_kw": expected, "new_target_kw": corrected, "envelope_violation_kw": violation},
+    )
     return result
 
 
 async def watchdog_tick(self) -> dict[str, Any]:
-    """Canonical watchdog entry point.
-
-    The watchdog distinguishes three classes of conditions:
-    - hard control-integrity/safety faults -> fail-safe and pause;
-    - safe degraded conditions while the verified physical target is zero -> keep
-      ACTIVE so a fresh candidate/telemetry can recover automatically;
-    - normal closed-loop envelope movement -> correct only when the deviation is
-      larger than the target-resolution tolerance.
-
-    It also contains a final exception barrier. An unexpected watchdog bug must
-    never be silently swallowed while physical control remains active.
-    """
+    """Canonical watchdog entry point with a final fail-safe exception barrier."""
     try:
         return await _watchdog_tick_impl(self)
     except asyncio.CancelledError:
@@ -432,9 +504,6 @@ async def watchdog_tick(self) -> dict[str, Any]:
         try:
             return await _fail_safe(self, "watchdog_unhandled_exception", payload)
         except Exception as fail_exc:
-            # Last-resort local state transition if even safe_release/fail_safe
-            # raises. This cannot guarantee inverter release, but it prevents the
-            # process from continuing to advertise writable ACTIVE control.
             try:
                 da.mark_actuator_ready(False, detail="fault:watchdog_unhandled_exception")
             except Exception:
@@ -451,10 +520,12 @@ async def watchdog_tick(self) -> dict[str, Any]:
                 )
             except Exception:
                 pass
-            _record(self, "fail_safe", "watchdog_unhandled_exception", {
-                **payload,
-                "fail_safe_error": repr(fail_exc),
-            })
+            _record(
+                self,
+                "fail_safe",
+                "watchdog_unhandled_exception",
+                {**payload, "fail_safe_error": repr(fail_exc)},
+            )
             return {
                 "ok": False,
                 "status": "fail_safe",
@@ -472,7 +543,10 @@ async def _status_with_watchdog(self) -> dict[str, Any]:
     data["watchdog_runtime"] = state
     data["watchdog_runtime"]["semantics"] = {
         "hard_mode_or_target_drift_pauses": True,
-        "nonzero_stale_or_missing_telemetry_pauses": True,
+        "nonzero_stale_telemetry_pauses": True,
+        "nonzero_missing_soc_pauses": True,
+        "redundant_grid_plus_verified_target_fallback": True,
+        "single_load_or_pv_dropout_can_continue_if_grid_is_valid": True,
         "zero_target_safe_wait_recovers_automatically": True,
         "expired_zero_target_waits_for_fresh_candidate": True,
         "dynamic_envelope_correction_without_pause": True,
@@ -487,9 +561,6 @@ def install_actuator_watchdog_patch() -> None:
     global _INSTALLED, _ORIGINAL_STATUS
     if _INSTALLED:
         return
-    # Called after diagnostics patch installation and before the decision-start
-    # scheduler captures actuator methods. Capture that fully composed status
-    # implementation, then install exactly one canonical watchdog implementation.
     _ORIGINAL_STATUS = da.DeterministicActuator.status
     da.DeterministicActuator.watchdog_tick = watchdog_tick
     da.DeterministicActuator.status = _status_with_watchdog
