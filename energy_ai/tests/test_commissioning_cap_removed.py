@@ -46,4 +46,4 @@ def test_production_operator_wrapper_retires_old_parameter_and_status_semantics(
     assert "_RETIRED_PARAMETER_KEYS" in source
     assert '"enabled": False' in source
     assert '"temporary_commissioning_cap_removed"' in source
-    assert 'RELEASE_BUILD = "1.0.113"' in source
+    assert 'RELEASE_BUILD = "1.0.114"' in source
