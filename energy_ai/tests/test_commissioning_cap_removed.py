@@ -35,7 +35,7 @@ def test_actuator_configuration_no_longer_contains_commissioning_cap():
 
 def test_home_assistant_schema_keeps_only_ignored_upgrade_compatibility_key():
     config = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    assert 'version: "1.0.113"' in config
+    assert 'version: "1.0.114"' in config
     assert "Legacy compatibility only; ignored by the runtime" in config
     assert "actuator_max_physical_command_kw: 8.0" in config
 
