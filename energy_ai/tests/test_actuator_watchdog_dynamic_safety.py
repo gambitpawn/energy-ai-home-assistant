@@ -143,6 +143,38 @@ def test_watchdog_confirms_readback_before_declaring_target_drift(monkeypatch):
     assert actuator.failures == []
 
 
+def test_single_pv_dropout_uses_grid_plus_verified_target_without_pause(monkeypatch):
+    action = -1.6766
+    _install_common(monkeypatch, action=action)
+    monkeypatch.setattr(wd.da, "_latest_actual", lambda: {
+        "age_seconds": 18.5,
+        "soc_pct": 42.9,
+        "load_kw": 0.997,
+        "pv_kw": None,
+        "grid_kw": -0.757,
+        "battery_kw": -1.661,
+    })
+    captured = {}
+
+    def safety(candidate, cfg, actual):
+        captured.update(actual)
+        return {
+            "safe_action_kw": action,
+            "safe_interval_kw": {"min": -8.0, "max": 8.0},
+        }
+
+    monkeypatch.setattr(wd.da, "safety_filter", safety)
+    actuator = FakeActuator(FakeAdapter(target=-1.68))
+
+    result = asyncio.run(wd.watchdog_tick(actuator))
+
+    assert result["status"] == "healthy_redundant_telemetry"
+    assert result["telemetry"]["net_source"] == "grid_plus_verified_target"
+    assert captured["net_kw"] == pytest.approx(-0.757 - 1.68)
+    assert actuator.failures == []
+    assert actuator.adapter.dispatched == []
+
+
 def test_watchdog_keeps_fail_safe_for_persistent_mode_drift(monkeypatch):
     _install_common(monkeypatch)
     actuator = FakeActuator(FakeAdapter(mode="ToU"))
@@ -174,6 +206,24 @@ def test_watchdog_fail_safes_on_stale_telemetry_with_nonzero_target(monkeypatch)
 
     assert result["status"] == "fail_safe"
     assert actuator.failures[0][0] == "watchdog_stale_actual_state_nonzero_target"
+
+
+def test_missing_soc_with_nonzero_target_still_fails_safe(monkeypatch):
+    _install_common(monkeypatch)
+    monkeypatch.setattr(wd.da, "_latest_actual", lambda: {
+        "age_seconds": 5.0,
+        "soc_pct": None,
+        "load_kw": 1.0,
+        "pv_kw": 0.0,
+        "grid_kw": -6.5,
+        "battery_kw": 7.5,
+    })
+    actuator = FakeActuator(FakeAdapter(target=7.5225))
+
+    result = asyncio.run(wd.watchdog_tick(actuator))
+
+    assert result["status"] == "fail_safe"
+    assert actuator.failures[0][0] == "watchdog_actual_state_missing_soc_nonzero_target"
 
 
 def test_expired_verified_zero_command_waits_for_fresh_candidate(monkeypatch):
