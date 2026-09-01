@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .actuator_runtime_resilience import install_actuator_runtime_resilience_patch
 from .actuator_watchdog_dynamic_safety import install_dynamic_safety_watchdog_patch
 
 
@@ -15,10 +16,8 @@ and grid import/export limits.
 
 This module is intentionally kept so older imports and the consolidated runtime
 remain compatible without re-introducing the cap. Its install hook is also the
-runtime integration point for the dynamic-safety watchdog: runtime.py calls this
-hook after the diagnostics patch has been installed, so the dynamic watchdog is
-the final watchdog implementation and normal safety-envelope shrinkage is
-corrected in-place rather than pausing production.
+runtime integration point for actuator hardening because runtime.py calls it
+after the diagnostics patch and before the production loops start.
 """
 
 
@@ -28,10 +27,12 @@ def apply_physical_command_cap(safety: dict[str, Any], cfg: dict[str, Any]) -> d
 
 
 def install_physical_command_cap_patch() -> None:
-    """Install the production watchdog correction; keep the old cap retired.
+    """Install actuator hardening while keeping the old commissioning cap retired.
 
-    runtime.py deliberately calls this after install_actuator_diagnostics_patch().
-    The dynamic watchdog therefore replaces the legacy watchdog wrapper while
-    retaining its runtime-config gate internally.
+    Order matters: first replace the shared safety filter / Solinteg command
+    behavior, then install the watchdog implementation that consumes that shared
+    filter. Both process_candidate() and watchdog_tick() consequently use the same
+    remaining-horizon safety semantics.
     """
+    install_actuator_runtime_resilience_patch()
     install_dynamic_safety_watchdog_patch()
