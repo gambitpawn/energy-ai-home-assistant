@@ -37,10 +37,6 @@ def _cfg():
 
 
 def test_remaining_horizon_does_not_create_minute_by_minute_soc_clamp():
-    # Reproduce the production failure from 2026-08-31 13:39 UTC. The legacy
-    # fixed-15-minute safety horizon reduced the charge target from -0.9078 to
-    # -0.8253 and caused another physical write. With only ~7 minutes of legal
-    # command lifetime left (including grace), -0.9078 is still SOC-safe.
     candidate = {
         "requested_action_kw": -0.9078,
         "valid_until": "2026-08-31T13:45:00+00:00",
@@ -82,6 +78,32 @@ def test_zero_age_is_not_accidentally_treated_as_stale():
 
     result = resilience.safety_filter_time_aware(candidate, _cfg(), actual, now=now)
     assert result["safe_action_kw"] == 0.0
+
+
+def test_non_finite_telemetry_is_rejected():
+    candidate = {"requested_action_kw": 0.0, "valid_until": "2026-08-31T13:45:00+00:00"}
+    actual = {"age_seconds": 1.0, "soc_pct": float("nan"), "load_kw": 1.0, "pv_kw": 0.0}
+    now = datetime(2026, 8, 31, 13, 30, 0, tzinfo=timezone.utc)
+
+    with pytest.raises(RuntimeError, match="non_finite_soc_pct"):
+        resilience.safety_filter_time_aware(candidate, _cfg(), actual, now=now)
+
+
+def test_zero_deadband_never_moves_target_outside_safe_interval():
+    cfg = _cfg()
+    cfg["actuator"]["zero_deadband_kw"] = 0.05
+    cfg["optimizer"]["physical_grid_import_limit_kw"] = 1.0
+    # net load is 1.03 kW, so at least +0.03 kW discharge is required to respect
+    # the 1.0 kW grid-import limit. Deadband must not round that action to zero.
+    candidate = {"requested_action_kw": 0.03, "valid_until": "2026-08-31T13:45:00+00:00"}
+    actual = {"age_seconds": 1.0, "soc_pct": 50.0, "load_kw": 1.03, "pv_kw": 0.0}
+    now = datetime(2026, 8, 31, 13, 30, 0, tzinfo=timezone.utc)
+
+    result = resilience.safety_filter_time_aware(candidate, cfg, actual, now=now)
+
+    assert result["safe_interval_kw"]["min"] == pytest.approx(0.03)
+    assert result["safe_action_kw"] == pytest.approx(0.03)
+    assert result["zero_deadband_applied"] is False
 
 
 def test_entity_resolution_is_cached(monkeypatch):
@@ -146,7 +168,8 @@ def test_dispatch_timeout_still_fails_when_readback_does_not_match(monkeypatch):
         asyncio.run(resilience._dispatch_with_reconciliation(FakeAdapter(), -0.8253))
 
 
-def test_runtime_hook_installs_resilience_before_dynamic_watchdog():
+def test_runtime_hook_installs_resilience_before_canonical_watchdog():
     source = (__import__("pathlib").Path(__file__).resolve().parents[1] / "app" / "actuator_physical_cap_v190.py").read_text(encoding="utf-8")
     assert "install_actuator_runtime_resilience_patch()" in source
-    assert source.index("install_actuator_runtime_resilience_patch()") < source.index("install_dynamic_safety_watchdog_patch()")
+    assert "install_actuator_watchdog_patch()" in source
+    assert source.index("install_actuator_runtime_resilience_patch()") < source.index("install_actuator_watchdog_patch()")
