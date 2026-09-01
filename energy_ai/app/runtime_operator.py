@@ -5,7 +5,7 @@ from . import runtime as base
 from . import ui_models as ui_models_module
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
-from .actuator_watchdog_dynamic_safety import install_dynamic_safety_watchdog_patch
+from .actuator_watchdog import install_actuator_watchdog_patch
 from .battery_health_routes import install_battery_health_routes
 from .deterministic_refined_runtime import refined_runtime_status, install_refined_runtime_patch
 from .engine_operator_selection import install_operator_engine_routing
@@ -27,7 +27,7 @@ from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_control_truth import decision_summary as control_truth_decision_summary
 
-RELEASE_BUILD = "1.0.109"
+RELEASE_BUILD = "1.0.113"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
@@ -47,10 +47,11 @@ ui_models_module.decision_summary = control_truth_decision_summary
 # that instance before any operator activation can call it.
 install_arm_control_mode_patch()
 
-# A shrinking dynamic SOC/grid safety envelope is a normal closed-loop condition.
-# Correct the live target to the nearest currently-safe value and remain ACTIVE;
-# genuine mode/target/readback/config/dispatch faults still use fail-safe.
-install_dynamic_safety_watchdog_patch()
+# Runtime.py has already installed the canonical watchdog before the
+# decision-start scheduler captured actuator methods. Repeating the idempotent
+# install here documents the operator runtime dependency without layering a second
+# watchdog implementation.
+install_actuator_watchdog_patch()
 
 # Continuous learned-model training and race qualification are separate. Neural
 # + hybrid share one frozen neural candidate; gradient_v1 has its own independently
