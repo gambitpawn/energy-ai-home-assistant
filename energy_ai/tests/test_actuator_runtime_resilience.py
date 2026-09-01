@@ -37,10 +37,7 @@ def _cfg():
 
 
 def test_remaining_horizon_does_not_create_minute_by_minute_soc_clamp():
-    candidate = {
-        "requested_action_kw": -0.9078,
-        "valid_until": "2026-08-31T13:45:00+00:00",
-    }
+    candidate = {"requested_action_kw": -0.9078, "valid_until": "2026-08-31T13:45:00+00:00"}
     actual = {
         "age_seconds": 8.272513,
         "soc_pct": 98.0,
@@ -57,13 +54,11 @@ def test_remaining_horizon_does_not_create_minute_by_minute_soc_clamp():
     assert result["clamped"] is False
     assert 420 <= result["safety_horizon_seconds"] <= 422
     assert result["safe_interval_kw"]["min"] < -0.9078
+    assert result["net_input_source"] == "load_minus_pv"
 
 
 def test_horizon_includes_candidate_grace_used_by_validity_gate():
-    candidate = {
-        "requested_action_kw": 0.0,
-        "valid_until": "2026-08-31T13:45:00+00:00",
-    }
+    candidate = {"requested_action_kw": 0.0, "valid_until": "2026-08-31T13:45:00+00:00"}
     now = datetime(2026, 8, 31, 13, 44, 0, tzinfo=timezone.utc)
     hours, seconds = resilience._candidate_safety_horizon_hours(candidate, _cfg(), now=now)
 
@@ -80,21 +75,57 @@ def test_zero_age_is_not_accidentally_treated_as_stale():
     assert result["safe_action_kw"] == 0.0
 
 
-def test_non_finite_telemetry_is_rejected():
+def test_non_finite_soc_is_rejected():
     candidate = {"requested_action_kw": 0.0, "valid_until": "2026-08-31T13:45:00+00:00"}
     actual = {"age_seconds": 1.0, "soc_pct": float("nan"), "load_kw": 1.0, "pv_kw": 0.0}
     now = datetime(2026, 8, 31, 13, 30, 0, tzinfo=timezone.utc)
 
-    with pytest.raises(RuntimeError, match="non_finite_soc_pct"):
+    with pytest.raises(RuntimeError, match="actual_state_missing_soc"):
         resilience.safety_filter_time_aware(candidate, _cfg(), actual, now=now)
+
+
+def test_missing_pv_can_use_grid_plus_battery_for_generic_safety():
+    candidate = {"requested_action_kw": -1.6766, "valid_until": "2026-09-01T11:45:00+00:00"}
+    actual = {
+        "age_seconds": 18.5,
+        "soc_pct": 42.9,
+        "load_kw": 0.997,
+        "pv_kw": None,
+        "grid_kw": -0.757,
+        "battery_kw": -1.661,
+    }
+    now = datetime(2026, 9, 1, 11, 33, 0, tzinfo=timezone.utc)
+
+    result = resilience.safety_filter_time_aware(candidate, _cfg(), actual, now=now)
+
+    assert result["net_input_source"] == "grid_plus_battery"
+    assert result["net_kw"] == pytest.approx(-2.418)
+    assert result["safe_action_kw"] == pytest.approx(-1.6766)
+
+
+def test_explicit_redundant_net_has_priority_when_provided_by_watchdog():
+    candidate = {"requested_action_kw": -1.6766, "valid_until": "2026-09-01T11:45:00+00:00"}
+    actual = {
+        "age_seconds": 18.5,
+        "soc_pct": 42.9,
+        "load_kw": 0.997,
+        "pv_kw": None,
+        "grid_kw": -0.757,
+        "battery_kw": -1.661,
+        "net_kw": -2.437,
+    }
+    now = datetime(2026, 9, 1, 11, 33, 0, tzinfo=timezone.utc)
+
+    result = resilience.safety_filter_time_aware(candidate, _cfg(), actual, now=now)
+
+    assert result["net_input_source"] == "provided_net_kw"
+    assert result["net_kw"] == pytest.approx(-2.437)
 
 
 def test_zero_deadband_never_moves_target_outside_safe_interval():
     cfg = _cfg()
     cfg["actuator"]["zero_deadband_kw"] = 0.05
     cfg["optimizer"]["physical_grid_import_limit_kw"] = 1.0
-    # net load is 1.03 kW, so at least +0.03 kW discharge is required to respect
-    # the 1.0 kW grid-import limit. Deadband must not round that action to zero.
     candidate = {"requested_action_kw": 0.03, "valid_until": "2026-08-31T13:45:00+00:00"}
     actual = {"age_seconds": 1.0, "soc_pct": 50.0, "load_kw": 1.03, "pv_kw": 0.0}
     now = datetime(2026, 8, 31, 13, 30, 0, tzinfo=timezone.utc)
