@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from app import actuator_arm_control_mode as arm_fix
+from app.actuator_control_lease import ActuatorControlLease
 
 
 class FakeAdapter:
@@ -27,6 +28,7 @@ class FakeActuator:
             }
         }
         self.adapter = FakeAdapter(entered)
+        self.control_lease = ActuatorControlLease()
 
     async def preflight(self):
         return {"ok": True}
@@ -62,6 +64,7 @@ def test_successful_arm_holds_ems_control_mode_and_records_zero_as_effective_com
     assert result["control_mode_held"] is True
     assert result["control_mode_test"]["working_mode"] == "EMS BattCtrl"
     assert result["handshake_command_id"] == 501
+    assert actuator.control_lease.current_command()["safe_action_kw"] == 0.0
     assert actuator.adapter.safe_release_calls == 0
     assert readiness[-1][0] is True
     assert len(commands) == 1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 import pytest
 
@@ -273,3 +274,36 @@ def test_unexpected_watchdog_exception_cannot_escape_active_control(monkeypatch)
 
     assert result["status"] == "fail_safe"
     assert actuator.failures[0][0] == "watchdog_safety_filter_failed"
+
+
+def test_database_exception_with_verified_zero_does_not_pause(monkeypatch):
+    _install_common(monkeypatch, action=0.0)
+    monkeypatch.setattr(
+        wd,
+        "effective_actuator_config_report",
+        lambda cfg: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+    )
+    actuator = FakeActuator(FakeAdapter(target=0.0))
+
+    result = asyncio.run(wd.watchdog_tick(actuator))
+
+    assert result["status"] == "healthy_waiting_safe_zero"
+    assert result["reason"] == "internal_error_zero_target_verified"
+    assert result["stage"] == "configuration_snapshot"
+    assert actuator.failures == []
+
+
+def test_database_exception_with_nonzero_target_still_fails_safe(monkeypatch):
+    _install_common(monkeypatch, action=1.5)
+    monkeypatch.setattr(
+        wd,
+        "effective_actuator_config_report",
+        lambda cfg: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+    )
+    actuator = FakeActuator(FakeAdapter(target=1.5))
+
+    result = asyncio.run(wd.watchdog_tick(actuator))
+
+    assert result["status"] == "fail_safe"
+    assert actuator.failures[0][0] == "watchdog_unhandled_exception"
+    assert actuator.failures[0][1]["stage"] == "configuration_snapshot"

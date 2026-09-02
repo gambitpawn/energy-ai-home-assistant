@@ -62,6 +62,18 @@ async def zero_handshake_and_arm_control_mode_held(self) -> dict[str, Any]:
             "physical_write_performed": True,
             "control_mode_held": True,
         }
+        # Establish process-local control truth before audit persistence. If the
+        # database is busy, the acknowledged zero target is still the target the
+        # watchdog must supervise.
+        lease = getattr(self, "control_lease", None)
+        if lease is None:
+            raise RuntimeError("actuator_control_lease_unavailable")
+        lease.acknowledge(
+            handshake_candidate,
+            target_kw=0.0,
+            reason="zero_handshake_acknowledged_control_mode_held",
+            readback=entered,
+        )
         handshake_command_id = da._insert_command(
             handshake_candidate,
             safe_action_kw=0.0,
@@ -89,6 +101,7 @@ async def zero_handshake_and_arm_control_mode_held(self) -> dict[str, Any]:
             "control_mode_held": True,
             "control_mode_test": entered,
             "handshake_command_id": handshake_command_id,
+            "audit_queued": handshake_command_id is None,
             "production": da.production_status(),
         }
     except Exception as exc:

@@ -4,11 +4,19 @@ import json
 import math
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from typing import Any
+from uuid import uuid4
 
-from .db import DB_PATH
+from .actuator_audit import ActuatorAuditBacklog
+from .actuator_control_lease import ActuatorControlLease
+from .db import DB_PATH, connect_db
 from .production_state import mark_actuator_ready, set_mode, status as production_status
 from .solinteg_command import SolintegCommandAdapter
+
+_TABLES_LOCK = RLock()
+_TABLES_INITIALIZED_PATH: str | None = None
+_AUDIT = ActuatorAuditBacklog()
 
 
 def _now() -> datetime:
@@ -23,11 +31,17 @@ def _dt(value: str) -> datetime:
 
 
 def _init_tables() -> None:
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
-        c.executescript(
-            '''
-            CREATE TABLE IF NOT EXISTS actuator_command(
+    global _TABLES_INITIALIZED_PATH
+    path = str(DB_PATH)
+    with _TABLES_LOCK:
+        if _TABLES_INITIALIZED_PATH == path:
+            return
+        with connect_db() as c:
+            c.executescript(
+                '''
+                CREATE TABLE IF NOT EXISTS actuator_command(
                 command_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                audit_key TEXT,
                 created_at TEXT NOT NULL,
                 source TEXT NOT NULL,
                 source_id TEXT,
@@ -41,26 +55,84 @@ def _init_tables() -> None:
                 reason TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_actuator_command_created
-                ON actuator_command(created_at DESC);
-            CREATE TABLE IF NOT EXISTS actuator_event(
+                CREATE INDEX IF NOT EXISTS idx_actuator_command_created
+                    ON actuator_command(created_at DESC);
+                CREATE TABLE IF NOT EXISTS actuator_event(
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                audit_key TEXT,
                 created_at TEXT NOT NULL,
                 event_type TEXT NOT NULL,
                 reason TEXT NOT NULL,
                 payload_json TEXT NOT NULL
-            );
-            '''
+                );
+                '''
+            )
+            command_cols = {row[1] for row in c.execute("PRAGMA table_info(actuator_command)")}
+            event_cols = {row[1] for row in c.execute("PRAGMA table_info(actuator_event)")}
+            if "audit_key" not in command_cols:
+                c.execute("ALTER TABLE actuator_command ADD COLUMN audit_key TEXT")
+            if "audit_key" not in event_cols:
+                c.execute("ALTER TABLE actuator_event ADD COLUMN audit_key TEXT")
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_actuator_command_audit_key "
+                "ON actuator_command(audit_key) WHERE audit_key IS NOT NULL"
+            )
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_actuator_event_audit_key "
+                "ON actuator_event(audit_key) WHERE audit_key IS NOT NULL"
+            )
+        _TABLES_INITIALIZED_PATH = path
+
+
+def _write_event(item: dict[str, Any], *, timeout: float = 0.05) -> None:
+    _init_tables()
+    with connect_db(timeout=timeout) as c:
+        c.execute(
+            "INSERT OR IGNORE INTO actuator_event(audit_key,created_at,event_type,reason,payload_json) VALUES (?,?,?,?,?)",
+            (
+                item["audit_key"],
+                item["created_at"],
+                item["event_type"],
+                item["reason"],
+                item["payload_json"],
+            ),
         )
 
 
 def _event(event_type: str, reason: str, payload: dict[str, Any] | None = None) -> None:
+    item = {
+        "audit_key": uuid4().hex,
+        "created_at": _now().isoformat(),
+        "event_type": str(event_type),
+        "reason": str(reason),
+        "payload_json": json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, default=str),
+    }
+    try:
+        _write_event(item)
+    except sqlite3.Error:
+        _AUDIT.enqueue("event", item)
+
+
+def _write_command(item: dict[str, Any], *, timeout: float = 0.05) -> int | None:
     _init_tables()
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
+    with connect_db(timeout=timeout) as c:
         c.execute(
-            "INSERT INTO actuator_event(created_at,event_type,reason,payload_json) VALUES (?,?,?,?)",
-            (_now().isoformat(), str(event_type), str(reason), json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)),
+            '''INSERT OR IGNORE INTO actuator_command(
+               audit_key,created_at,source,source_id,engine_id,decision_start,valid_until,
+               requested_action_kw,safe_action_kw,physical_write,status,reason,payload_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (
+                item["audit_key"], item["created_at"], item["source"], item["source_id"],
+                item["engine_id"], item["decision_start"], item["valid_until"],
+                item["requested_action_kw"], item["safe_action_kw"], item["physical_write"],
+                item["status"], item["reason"], item["payload_json"],
+            ),
         )
+        row = c.execute(
+            "SELECT command_id FROM actuator_command WHERE audit_key=?",
+            (item["audit_key"],),
+        ).fetchone()
+        return None if row is None else int(row[0])
 
 
 def _insert_command(
@@ -71,34 +143,43 @@ def _insert_command(
     status: str,
     reason: str,
     payload: dict[str, Any],
-) -> int:
-    _init_tables()
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
-        cur = c.execute(
-            '''INSERT INTO actuator_command(
-               created_at,source,source_id,engine_id,decision_start,valid_until,
-               requested_action_kw,safe_action_kw,physical_write,status,reason,payload_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
-            (
-                _now().isoformat(),
-                str(candidate.get("source") or "unknown"),
-                None if candidate.get("source_id") is None else str(candidate.get("source_id")),
-                None if candidate.get("engine_id") is None else str(candidate.get("engine_id")),
-                None if candidate.get("decision_start") is None else str(candidate.get("decision_start")),
-                None if candidate.get("valid_until") is None else str(candidate.get("valid_until")),
-                None if candidate.get("requested_action_kw") is None else float(candidate.get("requested_action_kw")),
-                None if safe_action_kw is None else float(safe_action_kw),
-                1 if physical_write else 0,
-                str(status),
-                str(reason),
-                json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
-            ),
-        )
-        return int(cur.lastrowid)
+) -> int | None:
+    item = {
+        "audit_key": uuid4().hex,
+        "created_at": _now().isoformat(),
+        "source": str(candidate.get("source") or "unknown"),
+        "source_id": None if candidate.get("source_id") is None else str(candidate.get("source_id")),
+        "engine_id": None if candidate.get("engine_id") is None else str(candidate.get("engine_id")),
+        "decision_start": None if candidate.get("decision_start") is None else str(candidate.get("decision_start")),
+        "valid_until": None if candidate.get("valid_until") is None else str(candidate.get("valid_until")),
+        "requested_action_kw": None if candidate.get("requested_action_kw") is None else float(candidate.get("requested_action_kw")),
+        "safe_action_kw": None if safe_action_kw is None else float(safe_action_kw),
+        "physical_write": 1 if physical_write else 0,
+        "status": str(status),
+        "reason": str(reason),
+        "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+    }
+    try:
+        return _write_command(item)
+    except sqlite3.Error:
+        _AUDIT.enqueue("command", item)
+        return None
+
+
+def flush_actuator_audit(limit: int = 64) -> dict[str, Any]:
+    return _AUDIT.flush(
+        lambda item: _write_command(item, timeout=30.0),
+        lambda item: _write_event(item, timeout=30.0),
+        limit=limit,
+    )
+
+
+def actuator_audit_status() -> dict[str, Any]:
+    return _AUDIT.status()
 
 
 def _latest_actual() -> dict[str, Any] | None:
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
+    with connect_db() as c:
         row = c.execute(
             "SELECT collected_at,payload_json FROM raw_state ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -133,7 +214,7 @@ def _latest_actual() -> dict[str, Any] | None:
 
 def _last_effective_command() -> dict[str, Any] | None:
     _init_tables()
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
+    with connect_db() as c:
         row = c.execute(
             '''SELECT command_id,created_at,source,source_id,engine_id,decision_start,valid_until,
                       requested_action_kw,safe_action_kw,status,reason,payload_json
@@ -258,11 +339,27 @@ class DeterministicActuator:
     def __init__(self, cfg: dict[str, Any], adapter: SolintegCommandAdapter):
         self.cfg = cfg
         self.adapter = adapter
+        self.control_lease = ActuatorControlLease()
+        self._actual_state_provider = None
         _init_tables()
+
+    def set_actual_state_provider(self, provider) -> None:
+        self._actual_state_provider = provider
+
+    def current_actual(self) -> dict[str, Any] | None:
+        if self._actual_state_provider is not None:
+            return self._actual_state_provider()
+        return _latest_actual()
+
+    def current_control_command(self) -> dict[str, Any] | None:
+        return self.control_lease.current_command()
+
+    def flush_audit(self, limit: int = 64) -> dict[str, Any]:
+        return flush_actuator_audit(limit)
 
     async def preflight(self) -> dict[str, Any]:
         prod = production_status()
-        actual = _latest_actual()
+        actual = self.current_actual()
         report: dict[str, Any] = {
             "ok": False,
             "production": prod,
@@ -306,6 +403,20 @@ class DeterministicActuator:
             if not released.get("released"):
                 raise RuntimeError(f"safe release failed after zero handshake: {released}")
             mark_actuator_ready(True, detail="solinteg_zero_handshake_acknowledged")
+            now = _now()
+            self.control_lease.acknowledge(
+                {
+                    "source": "actuator_arm_zero_handshake",
+                    "source_id": now.isoformat(),
+                    "engine_id": "actuator_safety",
+                    "decision_start": now.isoformat(),
+                    "valid_until": (now + timedelta(minutes=15)).isoformat(),
+                    "requested_action_kw": 0.0,
+                },
+                target_kw=0.0,
+                reason="zero_handshake_acknowledged",
+                readback=entered,
+            )
             _event("actuator_armed", "zero_handshake_acknowledged", {"entered": entered, "released": released})
             return {
                 "ok": True,
@@ -334,6 +445,11 @@ class DeterministicActuator:
             set_mode("shadow", reason=f"actuator_disarm:{reason}")
         finally:
             mark_actuator_ready(False, detail=f"disarmed:{reason}")
+        self.control_lease.release(
+            f"disarmed:{reason}",
+            readback=release.get("readback") if isinstance(release, dict) else None,
+            released=bool(release.get("released")) if isinstance(release, dict) else False,
+        )
         _event("actuator_disarmed", reason, {"safe_release": release})
         return {"ok": bool(release.get("released")), "safe_release": release, "production": production_status()}
 
@@ -347,6 +463,11 @@ class DeterministicActuator:
             set_mode("paused", reason=f"actuator_fault:{reason}")
         except Exception:
             pass
+        self.control_lease.release(
+            f"fail_safe:{reason}",
+            readback=release.get("readback") if isinstance(release, dict) else None,
+            released=bool(release.get("released")) if isinstance(release, dict) else False,
+        )
         _event("actuator_fail_safe", reason, {"detail": payload or {}, "safe_release": release})
         return {"ok": False, "status": "fail_safe", "reason": reason, "safe_release": release, "production": production_status()}
 
@@ -359,7 +480,7 @@ class DeterministicActuator:
                 return await self.fail_safe(valid_reason, candidate)
             return result
 
-        actual = _latest_actual()
+        actual = self.current_actual()
         if actual is None:
             result = {"status": "rejected", "reason": "no_actual_state", "physical_write_performed": False}
             _insert_command(candidate, safe_action_kw=None, physical_write=False, status="rejected", reason="no_actual_state", payload=result)
@@ -391,7 +512,7 @@ class DeterministicActuator:
         if not prod.get("actuator_ready"):
             return await self.fail_safe("active_without_actuator_ready", {"candidate": candidate})
 
-        previous = _last_effective_command()
+        previous = self.current_control_command()
         min_change = max(0.0, float((self.cfg.get("actuator") or {}).get("min_action_change_kw", 0.10)))
         if previous is not None and previous.get("safe_action_kw") is not None:
             prior = float(previous["safe_action_kw"])
@@ -400,17 +521,43 @@ class DeterministicActuator:
                 lo = float(safety["safe_interval_kw"]["min"])
                 hi = float(safety["safe_interval_kw"]["max"])
                 if lo - 1e-9 <= prior <= hi + 1e-9:
-                    result = {
-                        "status": "held_existing",
-                        "reason": "within_min_action_change",
-                        "requested_action_kw": float(candidate["requested_action_kw"]),
-                        "safe_action_kw": prior,
-                        "safety": safety,
-                        "physical_write_performed": True,
-                        "write_skipped": True,
-                    }
-                    _insert_command(candidate, safe_action_kw=prior, physical_write=True, status="held_existing", reason="within_min_action_change", payload=result)
-                    return result
+                    # Renew a lease only after the physical target and mode have
+                    # been re-verified. Otherwise min-action-change could extend
+                    # a lease for a target that an external actor has changed.
+                    try:
+                        held_readback = await self.adapter.readback()
+                        control_mode = str((self.cfg.get("actuator") or {}).get("control_working_mode") or "EMS BattCtrl")
+                        tolerance = max(0.01, float((self.cfg.get("actuator") or {}).get("ack_tolerance_kw", 0.10)))
+                        held_target = held_readback.get("battery_power_target_kw")
+                        held_verified = (
+                            str(held_readback.get("working_mode")) == control_mode
+                            and held_target is not None
+                            and abs(float(held_target) - prior) <= tolerance
+                        )
+                    except Exception:
+                        held_readback = None
+                        held_verified = False
+                    if held_verified:
+                        self.control_lease.renew(
+                            candidate,
+                            target_kw=prior,
+                            reason="within_min_action_change_verified",
+                            readback=held_readback,
+                        )
+                        result = {
+                            "status": "held_existing",
+                            "reason": "within_min_action_change",
+                            "requested_action_kw": float(candidate["requested_action_kw"]),
+                            "safe_action_kw": prior,
+                            "safety": safety,
+                            "readback": held_readback,
+                            "physical_write_performed": True,
+                            "write_skipped": True,
+                        }
+                        command_id = _insert_command(candidate, safe_action_kw=prior, physical_write=True, status="held_existing", reason="within_min_action_change", payload=result)
+                        result["command_id"] = command_id
+                        result["audit_queued"] = command_id is None
+                        return result
 
         try:
             ack = await self.adapter.dispatch(safe_action)
@@ -423,8 +570,18 @@ class DeterministicActuator:
                 "readback": ack,
                 "physical_write_performed": True,
             }
+            # The verified readback becomes control truth before audit storage.
+            # A locked/full/corrupt audit database must not leave the watchdog
+            # supervising the previous physical target.
+            self.control_lease.acknowledge(
+                candidate,
+                target_kw=safe_action,
+                reason="solinteg_target_acknowledged",
+                readback=ack,
+            )
             command_id = _insert_command(candidate, safe_action_kw=safe_action, physical_write=True, status="acknowledged", reason="solinteg_target_acknowledged", payload=result)
             result["command_id"] = command_id
+            result["audit_queued"] = command_id is None
             return result
         except Exception as exc:
             result = {"candidate": candidate, "safety": safety, "error": repr(exc)}
@@ -475,17 +632,27 @@ class DeterministicActuator:
 
     async def status(self) -> dict[str, Any]:
         preflight = await self.preflight()
-        last = _last_effective_command()
-        with sqlite3.connect(DB_PATH, timeout=10) as c:
-            recent = c.execute(
-                "SELECT command_id,created_at,source,engine_id,requested_action_kw,safe_action_kw,physical_write,status,reason FROM actuator_command ORDER BY command_id DESC LIMIT 10"
-            ).fetchall()
-            events = c.execute(
-                "SELECT event_id,created_at,event_type,reason,payload_json FROM actuator_event ORDER BY event_id DESC LIMIT 10"
-            ).fetchall()
+        history_error = None
+        try:
+            last = _last_effective_command()
+            with connect_db() as c:
+                recent = c.execute(
+                    "SELECT command_id,created_at,source,engine_id,requested_action_kw,safe_action_kw,physical_write,status,reason FROM actuator_command ORDER BY command_id DESC LIMIT 10"
+                ).fetchall()
+                events = c.execute(
+                    "SELECT event_id,created_at,event_type,reason,payload_json FROM actuator_event ORDER BY event_id DESC LIMIT 10"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            last = None
+            recent = []
+            events = []
+            history_error = repr(exc)
         return {
             "production": production_status(),
             "preflight": preflight,
+            "control_lease": self.control_lease.snapshot(),
+            "actuator_audit": actuator_audit_status(),
+            "history_persistence_error": history_error,
             "last_effective_command": last,
             "recent_commands": [
                 {

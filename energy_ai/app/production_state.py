@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -10,6 +11,10 @@ from .db import DB_PATH
 
 MODES = {"shadow", "active", "paused"}
 LOCAL_TZ = ZoneInfo("Europe/Stockholm")
+_LOCK = RLock()
+_INITIALIZED_PATH: str | None = None
+_CACHE: dict[str, Any] | None = None
+_LAST_PERSISTENCE_ERROR: str | None = None
 
 
 def _now() -> str:
@@ -17,89 +22,147 @@ def _now() -> str:
 
 
 def _init() -> None:
-    with sqlite3.connect(DB_PATH) as c:
-        c.executescript(
-            '''
-            CREATE TABLE IF NOT EXISTS production_state(
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                operating_mode TEXT NOT NULL,
-                physical_writes_enabled INTEGER NOT NULL DEFAULT 0,
-                actuator_ready INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL,
-                payload_json TEXT NOT NULL DEFAULT '{}'
-            );
-            CREATE TABLE IF NOT EXISTS user_override(
-                override_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                starts_at TEXT NOT NULL,
-                ends_at TEXT,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_user_override_active
-                ON user_override(status,starts_at,ends_at);
-            '''
-        )
-        row = c.execute("SELECT 1 FROM production_state WHERE singleton=1").fetchone()
-        if not row:
-            c.execute(
-                "INSERT INTO production_state(singleton,operating_mode,physical_writes_enabled,actuator_ready,updated_at,payload_json) VALUES(1,'shadow',0,0,?,?)",
-                (_now(), json.dumps({"reason": "first_start_safe_default"})),
+    global _CACHE, _INITIALIZED_PATH
+    path = str(DB_PATH)
+    with _LOCK:
+        if _CACHE is not None and _INITIALIZED_PATH == path:
+            return
+        with sqlite3.connect(DB_PATH, timeout=30) as c:
+            c.execute("PRAGMA busy_timeout=30000")
+            c.executescript(
+                '''
+                CREATE TABLE IF NOT EXISTS production_state(
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    operating_mode TEXT NOT NULL,
+                    physical_writes_enabled INTEGER NOT NULL DEFAULT 0,
+                    actuator_ready INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS user_override(
+                    override_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    starts_at TEXT NOT NULL,
+                    ends_at TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_override_active
+                    ON user_override(status,starts_at,ends_at);
+                '''
             )
+            row = c.execute(
+                "SELECT operating_mode,physical_writes_enabled,actuator_ready,updated_at,payload_json "
+                "FROM production_state WHERE singleton=1"
+            ).fetchone()
+            if not row:
+                created = _now()
+                payload = {"reason": "first_start_safe_default"}
+                c.execute(
+                    "INSERT INTO production_state(singleton,operating_mode,physical_writes_enabled,actuator_ready,updated_at,payload_json) VALUES(1,'shadow',0,0,?,?)",
+                    (created, json.dumps(payload)),
+                )
+                row = ("shadow", 0, 0, created, json.dumps(payload))
+        try:
+            payload = json.loads(row[4] or "{}")
+        except Exception:
+            payload = {}
+        _CACHE = {
+            "operating_mode": str(row[0]),
+            "physical_writes_enabled": bool(row[1]),
+            "actuator_ready": bool(row[2]),
+            "updated_at": str(row[3]),
+            "startup_policy": "always_disarmed_requires_new_zero_handshake",
+            "payload": payload,
+        }
+        _INITIALIZED_PATH = path
+
+
+def _persist(state: dict[str, Any]) -> None:
+    with sqlite3.connect(DB_PATH, timeout=30) as c:
+        c.execute("PRAGMA busy_timeout=30000")
+        c.execute(
+            "UPDATE production_state SET operating_mode=?,physical_writes_enabled=?,actuator_ready=?,updated_at=?,payload_json=? WHERE singleton=1",
+            (
+                state["operating_mode"],
+                int(bool(state["physical_writes_enabled"])),
+                int(bool(state["actuator_ready"])),
+                state["updated_at"],
+                json.dumps(state.get("payload") or {}, ensure_ascii=False),
+            ),
+        )
 
 
 def status() -> dict[str, Any]:
     _init()
-    with sqlite3.connect(DB_PATH) as c:
-        row = c.execute(
-            "SELECT operating_mode,physical_writes_enabled,actuator_ready,updated_at,payload_json FROM production_state WHERE singleton=1"
-        ).fetchone()
-    payload = {}
-    try:
-        payload = json.loads(row[4] or "{}")
-    except Exception:
-        pass
-    return {
-        "operating_mode": row[0],
-        "physical_writes_enabled": bool(row[1]),
-        "actuator_ready": bool(row[2]),
-        "updated_at": row[3],
-        "startup_policy": "always_disarmed_requires_new_zero_handshake",
-        "payload": payload,
-    }
+    with _LOCK:
+        result = dict(_CACHE or {})
+        result["payload"] = dict(result.get("payload") or {})
+        result["control_state_source"] = "process_memory"
+        result["persistence_error"] = _LAST_PERSISTENCE_ERROR
+        return result
 
 
 def set_mode(mode: str, *, reason: str = "ui") -> dict[str, Any]:
+    global _CACHE, _LAST_PERSISTENCE_ERROR
     _init()
     mode = str(mode).strip().lower()
     if mode not in MODES:
         raise ValueError(f"unsupported mode {mode!r}")
-    current = status()
-    if mode == "active" and not current["actuator_ready"]:
-        raise RuntimeError("ACTIVE is unavailable until deterministic actuator safety is ready")
-    writes = 1 if mode == "active" and current["actuator_ready"] else 0
-    payload = {"reason": reason, "previous_mode": current["operating_mode"]}
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "UPDATE production_state SET operating_mode=?,physical_writes_enabled=?,updated_at=?,payload_json=? WHERE singleton=1",
-            (mode, writes, _now(), json.dumps(payload, ensure_ascii=False)),
-        )
+    with _LOCK:
+        current = dict(_CACHE or {})
+        if mode == "active" and not current["actuator_ready"]:
+            raise RuntimeError("ACTIVE is unavailable until deterministic actuator safety is ready")
+        next_state = {
+            **current,
+            "operating_mode": mode,
+            "physical_writes_enabled": bool(mode == "active" and current["actuator_ready"]),
+            "updated_at": _now(),
+            "payload": {"reason": reason, "previous_mode": current["operating_mode"]},
+        }
+        if mode == "active":
+            # ACTIVE is the only transition that may enable writes. Require its
+            # durable marker before exposing it in memory.
+            _persist(next_state)
+            _CACHE = next_state
+            _LAST_PERSISTENCE_ERROR = None
+        else:
+            # Safe transitions must take effect in memory even if audit storage
+            # is temporarily unavailable after the inverter has been released.
+            _CACHE = next_state
+            try:
+                _persist(next_state)
+                _LAST_PERSISTENCE_ERROR = None
+            except sqlite3.Error as exc:
+                _LAST_PERSISTENCE_ERROR = repr(exc)
     return status()
 
 
 def mark_actuator_ready(ready: bool, *, detail: str = "") -> dict[str, Any]:
+    global _CACHE, _LAST_PERSISTENCE_ERROR
     _init()
-    current = status()
-    mode = current["operating_mode"]
-    writes = int(bool(ready) and mode == "active")
-    payload = {"reason": "actuator_readiness", "detail": detail}
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "UPDATE production_state SET actuator_ready=?,physical_writes_enabled=?,updated_at=?,payload_json=? WHERE singleton=1",
-            (int(bool(ready)), writes, _now(), json.dumps(payload, ensure_ascii=False)),
-        )
+    with _LOCK:
+        current = dict(_CACHE or {})
+        next_state = {
+            **current,
+            "actuator_ready": bool(ready),
+            "physical_writes_enabled": bool(ready and current["operating_mode"] == "active"),
+            "updated_at": _now(),
+            "payload": {"reason": "actuator_readiness", "detail": detail},
+        }
+        if ready:
+            _persist(next_state)
+            _CACHE = next_state
+            _LAST_PERSISTENCE_ERROR = None
+        else:
+            _CACHE = next_state
+            try:
+                _persist(next_state)
+                _LAST_PERSISTENCE_ERROR = None
+            except sqlite3.Error as exc:
+                _LAST_PERSISTENCE_ERROR = repr(exc)
     return status()
 
 

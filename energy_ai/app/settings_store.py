@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Any, Iterable
 
 from .db import DB_PATH
@@ -13,6 +14,9 @@ SENSITIVE_EXACT_KEYS = {
     "ha_access_token",
     "supervisor_token",
 }
+_LOCK = RLock()
+_INITIALIZED_PATH: str | None = None
+_OVERRIDE_CACHE: dict[str, Any] | None = None
 
 
 def _now() -> str:
@@ -31,21 +35,36 @@ def _is_sensitive_key(key: str) -> bool:
 
 
 def init_settings_store() -> None:
+    global _INITIALIZED_PATH, _OVERRIDE_CACHE
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
-        c.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS app_setting(
-                key TEXT PRIMARY KEY,
-                value_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                source TEXT NOT NULL,
-                schema_version INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_app_setting_updated_at
-                ON app_setting(updated_at);
-            """
-        )
+    path = str(DB_PATH)
+    with _LOCK:
+        if _INITIALIZED_PATH == path and _OVERRIDE_CACHE is not None:
+            return
+        with sqlite3.connect(DB_PATH, timeout=30) as c:
+            c.execute("PRAGMA busy_timeout=30000")
+            c.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS app_setting(
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_app_setting_updated_at
+                    ON app_setting(updated_at);
+                """
+            )
+            rows = c.execute("SELECT key,value_json FROM app_setting ORDER BY key").fetchall()
+        cache: dict[str, Any] = {}
+        for key, raw in rows:
+            try:
+                cache[str(key)] = json.loads(raw)
+            except Exception:
+                continue
+        _OVERRIDE_CACHE = cache
+        _INITIALIZED_PATH = path
 
 
 def load_setting_overrides() -> dict[str, Any]:
@@ -55,15 +74,8 @@ def load_setting_overrides() -> dict[str, Any]:
     storage. Secrets are deliberately excluded from this store.
     """
     init_settings_store()
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
-        rows = c.execute("SELECT key,value_json FROM app_setting ORDER BY key").fetchall()
-    out: dict[str, Any] = {}
-    for key, raw in rows:
-        try:
-            out[str(key)] = json.loads(raw)
-        except Exception:
-            continue
-    return out
+    with _LOCK:
+        return dict(_OVERRIDE_CACHE or {})
 
 
 def apply_setting_overrides(base: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -72,6 +84,7 @@ def apply_setting_overrides(base: dict[str, Any] | None = None) -> dict[str, Any
 
 
 def set_setting_overrides(values: dict[str, Any], *, source: str = "ui") -> dict[str, Any]:
+    global _OVERRIDE_CACHE
     if not isinstance(values, dict):
         raise TypeError("values must be a dict")
     bad = sorted(str(k) for k in values if _is_sensitive_key(str(k)))
@@ -80,7 +93,8 @@ def set_setting_overrides(values: dict[str, Any], *, source: str = "ui") -> dict
 
     init_settings_store()
     updated_at = _now()
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
+    with sqlite3.connect(DB_PATH, timeout=30) as c:
+        c.execute("PRAGMA busy_timeout=30000")
         c.execute("BEGIN IMMEDIATE")
         for key, value in values.items():
             c.execute(
@@ -101,17 +115,28 @@ def set_setting_overrides(values: dict[str, Any], *, source: str = "ui") -> dict
                     SCHEMA_VERSION,
                 ),
             )
+    with _LOCK:
+        cache = dict(_OVERRIDE_CACHE or {})
+        cache.update(values)
+        _OVERRIDE_CACHE = cache
     return {"saved": sorted(str(k) for k in values), "updated_at": updated_at}
 
 
 def delete_setting_overrides(keys: Iterable[str]) -> list[str]:
+    global _OVERRIDE_CACHE
     clean = sorted({str(k) for k in keys if str(k)})
     if not clean:
         return []
     init_settings_store()
-    with sqlite3.connect(DB_PATH, timeout=10) as c:
+    with sqlite3.connect(DB_PATH, timeout=30) as c:
+        c.execute("PRAGMA busy_timeout=30000")
         c.execute("BEGIN IMMEDIATE")
         c.executemany("DELETE FROM app_setting WHERE key=?", [(key,) for key in clean])
+    with _LOCK:
+        cache = dict(_OVERRIDE_CACHE or {})
+        for key in clean:
+            cache.pop(key, None)
+        _OVERRIDE_CACHE = cache
     return clean
 
 

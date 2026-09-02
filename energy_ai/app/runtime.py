@@ -145,6 +145,7 @@ if _NEEDS_STARTUP_RELEASE:
 
 ADAPTER = TrackedSolintegCommandAdapter(core.cfg, core.collector.ha)
 ACTUATOR = DeterministicActuator(core.cfg, ADAPTER)
+ACTUATOR.set_actual_state_provider(core.collector.actuator_actual)
 install_actuator_diagnostics_patch()
 install_physical_command_cap_patch()
 ACTUATOR_TIMING = install_decision_start_scheduler(ACTUATOR)
@@ -414,15 +415,27 @@ async def _actuator_watchdog_loop() -> None:
     await asyncio.sleep(10)
     while True:
         try:
-            if release_status().get("release_pending"):
+            prod = production_status()
+            if prod.get("physical_writes_enabled") and prod.get("operating_mode") == "active":
+                # ACTIVE supervision must never be skipped because the persisted
+                # release-retry record is temporarily unavailable.
+                await ACTUATOR.watchdog_tick()
+            elif release_status().get("release_pending"):
                 release = await ADAPTER.safe_release()
                 if release.get("released"):
                     _NEEDS_STARTUP_RELEASE = False
-            else:
-                await ACTUATOR.watchdog_tick()
         except Exception:
             pass
         await asyncio.sleep(max(10.0, float((core.cfg.get("actuator") or {}).get("watchdog_poll_seconds", 30.0))))
+
+
+async def _actuator_audit_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(ACTUATOR.flush_audit, 64)
+        except Exception:
+            pass
+        await asyncio.sleep(2.0)
 
 
 async def _combined_maintenance() -> None:
@@ -431,6 +444,7 @@ async def _combined_maintenance() -> None:
         core.cfg,
         _soc_replanning_loop,
         _actuator_watchdog_loop,
+        _actuator_audit_loop,
     )
 
 

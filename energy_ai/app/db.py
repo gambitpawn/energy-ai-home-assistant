@@ -8,11 +8,29 @@ DB_PATH=Path(os.getenv("ENERGY_AI_DB","/data/energy_ai.db"))
 STOCKHOLM=ZoneInfo("Europe/Stockholm")
 CORE_KEYS=("pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","battery_soc_pct")
 LEGACY_MARKERS=("sensor.energy_pv_power","sensor.energy_house_load","sensor.energy_grid_power","sensor.energy_battery_power","sensor.energy_battery_soc","sensor.energy_spot_price")
+DB_BUSY_TIMEOUT_SECONDS = 30.0
+
+
+def connect_db(*, timeout: float = DB_BUSY_TIMEOUT_SECONDS):
+    """Return a consistently configured SQLite connection.
+
+    WAL is enabled once by ``init_db`` and persists in the database file. The
+    per-connection busy timeout is still required because SQLite does not persist
+    that setting. Critical control code uses this helper so a transient writer
+    cannot turn an otherwise harmless read into an immediate exception.
+    """
+    connection = sqlite3.connect(DB_PATH, timeout=max(0.0, float(timeout)))
+    connection.execute(f"PRAGMA busy_timeout={int(max(0.0, float(timeout)) * 1000)}")
+    connection.execute("PRAGMA foreign_keys=ON")
+    return connection
 
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as c:
+    with connect_db() as c:
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        c.execute("PRAGMA wal_autocheckpoint=1000")
         c.executescript('''
         CREATE TABLE IF NOT EXISTS raw_state(id INTEGER PRIMARY KEY AUTOINCREMENT,collected_at TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS state_15m(bucket_start TEXT PRIMARY KEY,collected_at TEXT NOT NULL,payload_json TEXT NOT NULL);
@@ -30,11 +48,11 @@ def init_db():
 
 
 def insert_raw(ts,payload):
-    with sqlite3.connect(DB_PATH) as c: c.execute("INSERT INTO raw_state(collected_at,payload_json) VALUES (?,?)",(ts,json.dumps(payload,ensure_ascii=False)))
+    with connect_db() as c: c.execute("INSERT INTO raw_state(collected_at,payload_json) VALUES (?,?)",(ts,json.dumps(payload,ensure_ascii=False)))
 
 
 def upsert_15m(bucket,ts,payload):
-    with sqlite3.connect(DB_PATH) as c: c.execute('''INSERT INTO state_15m(bucket_start,collected_at,payload_json) VALUES (?,?,?) ON CONFLICT(bucket_start) DO UPDATE SET collected_at=excluded.collected_at,payload_json=excluded.payload_json''',(bucket,ts,json.dumps(payload,ensure_ascii=False)))
+    with connect_db() as c: c.execute('''INSERT INTO state_15m(bucket_start,collected_at,payload_json) VALUES (?,?,?) ON CONFLICT(bucket_start) DO UPDATE SET collected_at=excluded.collected_at,payload_json=excluded.payload_json''',(bucket,ts,json.dumps(payload,ensure_ascii=False)))
 
 
 def _numeric_state(payload,key):
@@ -57,7 +75,7 @@ def _usable_core_sample(payload): return any(_numeric_state(payload,key) is not 
 
 
 def rebuild_15m_bucket(bucket_start,bucket_end,expected_samples=None):
-    with sqlite3.connect(DB_PATH) as c: rows=c.execute("SELECT collected_at,payload_json FROM raw_state WHERE collected_at>=? AND collected_at<? ORDER BY collected_at ASC",(bucket_start,bucket_end)).fetchall()
+    with connect_db() as c: rows=c.execute("SELECT collected_at,payload_json FROM raw_state WHERE collected_at>=? AND collected_at<? ORDER BY collected_at ASC",(bucket_start,bucket_end)).fetchall()
     if not rows: return None
     parsed=[(ts,json.loads(pj)) for ts,pj in rows]; usable=[(ts,p) for ts,p in parsed if _usable_core_sample(p)]
     if not usable: return None

@@ -78,6 +78,7 @@ async def lifespan(app):
     collector_task=asyncio.create_task(collector.loop()); maintenance_task=asyncio.create_task(_forecast_maintenance_loop()); yield; collector.stop()
     for task in (collector_task,maintenance_task):
         if task: task.cancel()
+    await collector.close()
 
 app=FastAPI(title="Energy AI",version=RUNTIME_VERSION,description="Read-only HA energy data, component-based forecasts, deterministic shadow planning, continuous evaluation and LLM analysis",lifespan=lifespan,docs_url=None,redoc_url=None)
 app.include_router(training_router)

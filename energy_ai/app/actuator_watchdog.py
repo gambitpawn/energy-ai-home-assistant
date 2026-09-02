@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import traceback
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,7 +11,7 @@ from .actuator_config import effective_actuator_config_report
 
 _INSTALLED = False
 _ORIGINAL_STATUS = None
-_POLICY = "watchdog_v4_redundant_telemetry"
+_POLICY = "watchdog_v5_memory_control_lease"
 
 
 def _now_iso() -> str:
@@ -30,9 +31,33 @@ def _runtime_state(self) -> dict[str, Any]:
             "degraded_count": 0,
             "fail_safe_count": 0,
             "last_event_keys": {},
+            "current_stage": None,
         }
         setattr(self, "_energy_ai_watchdog_runtime", state)
     return state
+
+
+def _stage(self, name: str) -> None:
+    _runtime_state(self)["current_stage"] = str(name)
+
+
+def _control_command(self) -> dict[str, Any] | None:
+    getter = getattr(self, "current_control_command", None)
+    if callable(getter):
+        return getter()
+    lease = getattr(self, "control_lease", None)
+    if lease is not None and callable(getattr(lease, "current_command", None)):
+        return lease.current_command()
+    # Compatibility for isolated legacy test doubles only. Every production
+    # DeterministicActuator owns a process lease from construction.
+    return da._last_effective_command()
+
+
+def _actual_state(self) -> dict[str, Any] | None:
+    getter = getattr(self, "current_actual", None)
+    if callable(getter):
+        return getter()
+    return da._latest_actual()
 
 
 def _record(self, status: str, reason: str | None = None, detail: dict[str, Any] | None = None) -> None:
@@ -215,6 +240,7 @@ def _prepare_safety_actual(
 
 
 async def _watchdog_tick_impl(self) -> dict[str, Any]:
+    _stage(self, "production_state")
     prod = da.production_status()
     if not prod.get("physical_writes_enabled") or prod.get("operating_mode") != "active":
         result = {"status": "inactive", "production": prod}
@@ -223,6 +249,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
     if not prod.get("actuator_ready"):
         return await _fail_safe(self, "watchdog_active_without_actuator_ready", {"production": prod})
 
+    _stage(self, "configuration_snapshot")
     effective_cfg = effective_actuator_config_report(self.cfg)
     if effective_cfg.get("restart_required"):
         return await _fail_safe(
@@ -231,9 +258,10 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
             {"effective_config": effective_cfg},
         )
 
-    last = da._last_effective_command()
+    _stage(self, "control_lease")
+    last = _control_command(self)
     if last is None:
-        return await _fail_safe(self, "active_without_successful_command")
+        return await _fail_safe(self, "active_without_process_control_lease")
 
     expected = float(last.get("safe_action_kw") or 0.0)
     actuator_cfg = self.cfg.get("actuator") or {}
@@ -244,6 +272,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
         max(0.0, float(actuator_cfg.get("zero_deadband_kw", 0.05))),
     )
 
+    _stage(self, "physical_readback")
     readback, mode_ok, target_ok, read_errors = await _readback_confirmed(
         self,
         expected_kw=expected,
@@ -280,6 +309,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
         "valid_until": last.get("valid_until"),
         "requested_action_kw": expected,
     }
+    _stage(self, "lease_validity")
     valid, valid_reason = da._candidate_valid(candidate, self.cfg)
     if not valid:
         if valid_reason == "candidate_expired" and zero_held:
@@ -296,7 +326,8 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
             {"last_command": last, "readback": readback},
         )
 
-    actual = da._latest_actual()
+    _stage(self, "live_actual_state")
+    actual = _actual_state(self)
     if actual is None:
         if zero_held:
             return await _wait_safe_zero(
@@ -357,6 +388,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
         )
 
     try:
+        _stage(self, "safety_filter")
         safety = da.safety_filter(candidate, self.cfg, safety_actual)
     except Exception as exc:
         return await _fail_safe(
@@ -418,6 +450,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
 
     corrected = float(safety["safe_action_kw"])
     try:
+        _stage(self, "safety_correction_dispatch")
         ack = await self.adapter.dispatch(corrected)
     except Exception as exc:
         return await _fail_safe(
@@ -447,6 +480,23 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
         "readback": ack,
         "physical_write_performed": True,
     }
+    lease = getattr(self, "control_lease", None)
+    if lease is None:
+        if isinstance(self, da.DeterministicActuator):
+            return await _fail_safe(
+                self,
+                "watchdog_control_lease_unavailable_after_correction",
+                {"old_target_kw": expected, "new_target_kw": corrected, "readback": ack},
+            )
+    else:
+        # Update physical control truth before best-effort audit persistence.
+        lease.acknowledge(
+            candidate,
+            target_kw=corrected,
+            reason="watchdog_dynamic_safety_correction",
+            readback=ack,
+        )
+    _stage(self, "audit_persistence")
     command_id = da._insert_command(
         candidate,
         safe_action_kw=corrected,
@@ -477,6 +527,7 @@ async def _watchdog_tick_impl(self) -> dict[str, Any]:
         "new_target_kw": corrected,
         "envelope_violation_kw": violation,
         "command_id": command_id,
+        "audit_queued": command_id is None,
         "last_command": last,
         "readback": ack,
         "actual": actual,
@@ -500,7 +551,56 @@ async def watchdog_tick(self) -> dict[str, Any]:
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        payload = {"error": repr(exc), "policy": _POLICY}
+        state = _runtime_state(self)
+        payload = {
+            "error": repr(exc),
+            "policy": _POLICY,
+            "stage": state.get("current_stage"),
+            "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:],
+        }
+        # An internal software/persistence failure is not itself a physical
+        # hazard when both the process lease and fresh inverter readback prove
+        # that zero is held in the expected control mode.
+        try:
+            last = _control_command(self)
+        except Exception as lease_exc:
+            last = None
+            payload["emergency_control_lease_error"] = repr(lease_exc)
+        actuator_cfg = self.cfg.get("actuator") or {}
+        tolerance = max(
+            0.01,
+            float(actuator_cfg.get("ack_tolerance_kw", 0.10)),
+            float(actuator_cfg.get("zero_deadband_kw", 0.05)),
+        )
+        expected = None if last is None else last.get("safe_action_kw")
+        if _target_zero(expected, tolerance):
+            try:
+                readback = await self.adapter.readback()
+                mode_ok = str(readback.get("working_mode")) == str(
+                    actuator_cfg.get("control_working_mode") or "EMS BattCtrl"
+                )
+                target_ok = _target_zero(readback.get("battery_power_target_kw"), tolerance)
+                if mode_ok and target_ok:
+                    detail = {**payload, "readback": readback, "last_command": last}
+                    _emit_throttled(
+                        self,
+                        "actuator_watchdog_internal_error_safe_zero",
+                        "internal_error_zero_target_verified",
+                        detail,
+                    )
+                    _record(
+                        self,
+                        "healthy_waiting_safe_zero",
+                        "internal_error_zero_target_verified",
+                        detail,
+                    )
+                    return {
+                        "status": "healthy_waiting_safe_zero",
+                        "reason": "internal_error_zero_target_verified",
+                        **detail,
+                    }
+            except Exception as readback_exc:
+                payload["emergency_readback_error"] = repr(readback_exc)
         try:
             return await _fail_safe(self, "watchdog_unhandled_exception", payload)
         except Exception as fail_exc:
@@ -553,6 +653,9 @@ async def _status_with_watchdog(self) -> dict[str, Any]:
         "minor_envelope_tolerance_kw_max": 0.10,
         "readback_confirmation_attempts": 2,
         "unexpected_exception_barrier": True,
+        "control_truth_source": "process_memory_verified_control_lease",
+        "sqlite_in_control_path": False,
+        "internal_error_verified_zero_stays_active": True,
     }
     return data
 
