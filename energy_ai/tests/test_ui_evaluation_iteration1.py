@@ -29,6 +29,12 @@ def test_iteration_one_uses_only_existing_persisted_read_endpoints():
     assert "loadHistory=async" not in EVALUATION_EXTENSION
 
 
+def test_iteration_one_does_not_replace_base_history_loader_or_renderer():
+    assert "renderHistory=function" not in EVALUATION_EXTENSION
+    assert "periodRequestId" in EVALUATION_EXTENSION
+    assert "requestId!==periodRequestId" in EVALUATION_EXTENSION
+
+
 def test_iteration_one_registers_no_new_backend_routes():
     app = FastAPI()
     before = list(app.router.routes)
