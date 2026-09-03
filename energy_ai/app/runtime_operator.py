@@ -9,6 +9,7 @@ from .persistent_operating_mode import install_persistent_operating_mode, prepar
 _STARTUP_MODE_STATE = prepare_startup()
 
 from . import runtime as base
+from . import operator_mode_control as operator_mode_control_module
 from . import ui_models as ui_models_module
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
@@ -23,6 +24,7 @@ from .gradient_qualification import (
 from .gradient_runtime import gradient_runtime_status, install_gradient_runtime_patch
 from .gradient_selector_qualification import install_gradient_selector_qualification
 from .hybrid_runtime import hybrid_runtime_status, install_hybrid_runtime_patch
+from .maintenance_coordination import install_process_worker
 from .neural_qualification import (
     install_qualification_candidate_runtime,
     qualification_status,
@@ -34,7 +36,7 @@ from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_control_truth import decision_summary as control_truth_decision_summary
 
-RELEASE_BUILD = "1.0.124"
+RELEASE_BUILD = "1.0.125"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
@@ -93,6 +95,14 @@ install_hybrid_runtime_patch(base.core.cfg)
 install_stochastic_runtime_patch(base.core.cfg)
 install_refined_runtime_patch(base.core.cfg)
 install_gradient_runtime_patch(base.core.cfg)
+
+# Fork the single maintenance process only after every model/selector runtime
+# patch above is installed, but before FastAPI lifespan tasks or worker threads
+# start. This lets the child inherit the exact patched maintenance implementation
+# without forking an already-threaded uvicorn process. Its lifespan wrapper is
+# intentionally installed before persistent operating-mode handling so shutdown
+# terminates heavy CPU work before the clean-shutdown marker is written.
+MAINTENANCE_PROCESS = install_process_worker(app=app)
 
 # Pool integration starts read-only. Apply mappings verified on the installed
 # AquaTemp entity surface before installing routes: O08 is actual compressor
@@ -173,6 +183,7 @@ PERSISTENT_OPERATING_MODE = install_persistent_operating_mode(
     app=app,
     actuator=base.ACTUATOR,
     ha=base.core.collector.ha,
+    operator_module=operator_mode_control_module,
     startup_state=_STARTUP_MODE_STATE,
 )
 
