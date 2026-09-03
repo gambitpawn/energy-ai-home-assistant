@@ -11,7 +11,7 @@ from .optimizer_evaluation import _day_bounds
 from .regret_decomposition import ENGINE_NAME as REGRET_ENGINE_NAME, regret_decomposition
 
 
-ARTIFACT_SCHEMA = "evaluation_decomposition_v1"
+ARTIFACT_SCHEMA = "evaluation_decomposition_v2"
 _RETRY_AFTER_HOURS = 6
 
 
@@ -23,22 +23,27 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def config_fingerprint(cfg: dict[str, Any]) -> str:
-    relevant = {
-        "policy": cfg.get("policy") or {},
-        "optimizer": cfg.get("optimizer") or {},
-        "tariffs": cfg.get("tariffs") or {},
-    }
-    raw = json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def _hash_json(value: Any) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def config_fingerprint(cfg: dict[str, Any]) -> str:
+    return _hash_json(
+        {
+            "policy": cfg.get("policy") or {},
+            "optimizer": cfg.get("optimizer") or {},
+            "tariffs": cfg.get("tariffs") or {},
+        }
+    )
 
 
 def _ensure_table() -> None:
     with connect_db() as c:
         c.execute(
-            """CREATE TABLE IF NOT EXISTS optimizer_evaluation_decomposition(
+            """CREATE TABLE IF NOT EXISTS optimizer_evaluation_decomposition_v2(
                 local_date TEXT NOT NULL,
-                source_created_at TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL,
                 config_fingerprint TEXT NOT NULL,
                 engine TEXT NOT NULL,
                 artifact_schema TEXT NOT NULL,
@@ -48,7 +53,7 @@ def _ensure_table() -> None:
                 next_retry_after TEXT,
                 payload_json TEXT,
                 error TEXT,
-                PRIMARY KEY(local_date, source_created_at, config_fingerprint, engine, artifact_schema)
+                PRIMARY KEY(local_date, source_fingerprint, config_fingerprint, engine, artifact_schema)
             )"""
         )
 
@@ -74,34 +79,37 @@ def _normalized(raw: dict[str, Any]) -> dict[str, Any]:
 def _stored_evaluations(limit: int) -> list[dict[str, Any]]:
     with connect_db(timeout=5.0) as c:
         rows = c.execute(
-            "SELECT local_date,created_at,payload_json FROM optimizer_day_eval ORDER BY local_date DESC LIMIT ?",
+            "SELECT local_date,payload_json FROM optimizer_day_eval ORDER BY local_date DESC LIMIT ?",
             (max(1, min(180, int(limit))),),
         ).fetchall()
     out: list[dict[str, Any]] = []
-    for local_date, created_at, payload_raw in rows:
+    for local_date, payload_raw in rows:
         try:
             payload = json.loads(payload_raw)
         except Exception:
             continue
+        # optimizer_day_eval.created_at changes whenever the existing day is
+        # refreshed. Keying on the payload itself prevents needless re-running of
+        # expensive decomposition when the persisted evaluation is unchanged.
         out.append(
             {
                 "local_date": str(local_date),
-                "source_created_at": str(created_at),
+                "source_fingerprint": hashlib.sha256(str(payload_raw).encode("utf-8")).hexdigest(),
                 "status": payload.get("status"),
             }
         )
     return out
 
 
-def _artifact_row(local_date: str, source_created_at: str, fingerprint: str) -> dict[str, Any] | None:
+def _artifact_row(local_date: str, source_fingerprint: str, fingerprint: str) -> dict[str, Any] | None:
     try:
         with connect_db(timeout=5.0) as c:
             row = c.execute(
                 """SELECT status,attempts,updated_at,next_retry_after,payload_json,error
-                   FROM optimizer_evaluation_decomposition
-                   WHERE local_date=? AND source_created_at=? AND config_fingerprint=?
+                   FROM optimizer_evaluation_decomposition_v2
+                   WHERE local_date=? AND source_fingerprint=? AND config_fingerprint=?
                      AND engine=? AND artifact_schema=?""",
-                (local_date, source_created_at, fingerprint, REGRET_ENGINE_NAME, ARTIFACT_SCHEMA),
+                (local_date, source_fingerprint, fingerprint, REGRET_ENGINE_NAME, ARTIFACT_SCHEMA),
             ).fetchone()
     except sqlite3.OperationalError:
         return None
@@ -143,7 +151,7 @@ def _retry_due(artifact: dict[str, Any] | None, now: datetime) -> bool:
 def _store_artifact(
     *,
     local_date: str,
-    source_created_at: str,
+    source_fingerprint: str,
     fingerprint: str,
     status: str,
     attempts: int,
@@ -153,15 +161,18 @@ def _store_artifact(
 ) -> None:
     now = _now()
     next_retry = _iso(now + timedelta(hours=_RETRY_AFTER_HOURS)) if retry else None
+    # Keep the write transaction deliberately tiny. Decomposition itself runs
+    # before this connection is opened, so SQLite is never held for the expensive
+    # computation.
     with connect_db() as c:
         c.execute(
-            """INSERT OR REPLACE INTO optimizer_evaluation_decomposition(
-                local_date,source_created_at,config_fingerprint,engine,artifact_schema,status,
+            """INSERT OR REPLACE INTO optimizer_evaluation_decomposition_v2(
+                local_date,source_fingerprint,config_fingerprint,engine,artifact_schema,status,
                 attempts,updated_at,next_retry_after,payload_json,error
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 local_date,
-                source_created_at,
+                source_fingerprint,
                 fingerprint,
                 REGRET_ENGINE_NAME,
                 ARTIFACT_SCHEMA,
@@ -178,9 +189,9 @@ def _store_artifact(
 def run_pending_evaluation_decomposition(cfg: dict[str, Any], max_days: int = 1) -> dict[str, Any]:
     """Evaluate at most ``max_days`` persisted complete days.
 
-    This function is intentionally not called from UI routes. Runtime maintenance
-    executes it through the shared low-priority worker so decomposition cannot
-    become a prerequisite for application startup, arming or control planning.
+    This function is never called by UI routes. Runtime maintenance invokes one
+    day at a time through the shared low-priority worker so startup, arming,
+    quarter planning and the actuator watchdog do not queue behind it.
     """
     _ensure_table()
     fingerprint = config_fingerprint(cfg)
@@ -189,7 +200,7 @@ def run_pending_evaluation_decomposition(cfg: dict[str, Any], max_days: int = 1)
     for item in reversed(_stored_evaluations(30)):
         if item.get("status") != "ok":
             continue
-        artifact = _artifact_row(item["local_date"], item["source_created_at"], fingerprint)
+        artifact = _artifact_row(item["local_date"], item["source_fingerprint"], fingerprint)
         if _retry_due(artifact, now):
             candidates.append((item, artifact))
     processed: list[dict[str, Any]] = []
@@ -203,7 +214,7 @@ def run_pending_evaluation_decomposition(cfg: dict[str, Any], max_days: int = 1)
             if normalized["valid"]:
                 _store_artifact(
                     local_date=local_date,
-                    source_created_at=item["source_created_at"],
+                    source_fingerprint=item["source_fingerprint"],
                     fingerprint=fingerprint,
                     status="complete",
                     attempts=attempts,
@@ -214,10 +225,14 @@ def run_pending_evaluation_decomposition(cfg: dict[str, Any], max_days: int = 1)
                 processed.append({"local_date": local_date, "status": "complete"})
             else:
                 raw_status = str(raw.get("status") or "unavailable")
-                retryable = raw_status in {"insufficient_future_actual_coverage", "insufficient_actual_coverage", "unavailable"}
+                retryable = raw_status in {
+                    "insufficient_future_actual_coverage",
+                    "insufficient_actual_coverage",
+                    "unavailable",
+                }
                 _store_artifact(
                     local_date=local_date,
-                    source_created_at=item["source_created_at"],
+                    source_fingerprint=item["source_fingerprint"],
                     fingerprint=fingerprint,
                     status="pending" if retryable else "failed",
                     attempts=attempts,
@@ -225,11 +240,17 @@ def run_pending_evaluation_decomposition(cfg: dict[str, Any], max_days: int = 1)
                     error=None,
                     retry=retryable,
                 )
-                processed.append({"local_date": local_date, "status": "pending" if retryable else "failed", "detail": raw_status})
+                processed.append(
+                    {
+                        "local_date": local_date,
+                        "status": "pending" if retryable else "failed",
+                        "detail": raw_status,
+                    }
+                )
         except Exception as exc:
             _store_artifact(
                 local_date=local_date,
-                source_created_at=item["source_created_at"],
+                source_fingerprint=item["source_fingerprint"],
                 fingerprint=fingerprint,
                 status="failed",
                 attempts=attempts,
@@ -257,7 +278,7 @@ def decomposition_history(cfg: dict[str, Any], days: int = 30) -> dict[str, Any]
         if item.get("status") != "ok":
             result.append({"local_date": item["local_date"], "status": "not_applicable", "valid": False})
             continue
-        artifact = _artifact_row(item["local_date"], item["source_created_at"], fingerprint)
+        artifact = _artifact_row(item["local_date"], item["source_fingerprint"], fingerprint)
         if artifact is None:
             result.append({"local_date": item["local_date"], "status": "pending", "valid": False})
             continue
