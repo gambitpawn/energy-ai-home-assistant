@@ -39,6 +39,19 @@ def test_iteration_three_preserves_request_race_guard_and_graceful_decomposition
     assert "core evaluation data is unaffected" in EVALUATION_EXTENSION
 
 
+def test_iteration_three_guards_optional_dom_bindings():
+    assert "if(reloadBtn)reloadBtn.onclick" in EVALUATION_EXTENSION
+    assert "if(periodSelect)periodSelect.onchange" in EVALUATION_EXTENSION
+    assert "if(filterSelect)filterSelect.onchange" in EVALUATION_EXTENSION
+    assert "if(periodTable)periodTable.addEventListener" in EVALUATION_EXTENSION
+    assert "if(tabs)tabs.addEventListener" in EVALUATION_EXTENSION
+
+
+def test_capture_trend_does_not_assume_zero_to_one_range():
+    assert "Math.min(0,...values)" in EVALUATION_EXTENSION
+    assert "Math.max(1,...values)" in EVALUATION_EXTENSION
+
+
 def test_iteration_three_does_not_touch_model_semantics():
     assert "model comparison" not in EVALUATION_EXTENSION.lower()
     assert "selector score" not in EVALUATION_EXTENSION.lower()
