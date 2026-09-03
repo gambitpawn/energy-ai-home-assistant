@@ -36,7 +36,7 @@ from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_control_truth import decision_summary as control_truth_decision_summary
 
-RELEASE_BUILD = "1.0.125"
+RELEASE_BUILD = "1.0.126"
 base.RUNTIME_BUILD = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
@@ -183,7 +183,6 @@ PERSISTENT_OPERATING_MODE = install_persistent_operating_mode(
     app=app,
     actuator=base.ACTUATOR,
     ha=base.core.collector.ha,
-    operator_module=operator_mode_control_module,
     startup_state=_STARTUP_MODE_STATE,
 )
 
