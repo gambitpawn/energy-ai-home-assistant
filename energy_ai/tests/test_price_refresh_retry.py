@@ -8,6 +8,7 @@ import pytest
 
 from app import db
 from app import main as core
+from app.ha import HomeAssistantClient
 
 
 LOCAL_TZ = ZoneInfo("Europe/Stockholm")
@@ -46,6 +47,26 @@ def _price_rows(day: date):
         })
         stamp += timedelta(minutes=15)
     return rows
+
+
+def test_supervisor_websocket_url_uses_core_websocket(monkeypatch):
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "test-token")
+    monkeypatch.delenv("HA_ACCESS_TOKEN", raising=False)
+    client = HomeAssistantClient({})
+
+    assert client.auth_mode == "supervisor"
+    assert client.base_url == "http://supervisor/core/api"
+    assert client._websocket_url() == "ws://supervisor/core/websocket"
+
+
+def test_long_lived_token_websocket_url_uses_home_assistant_api(monkeypatch):
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    monkeypatch.setenv("HA_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("HA_BASE_URL", "http://homeassistant.local")
+    client = HomeAssistantClient({})
+
+    assert client.auth_mode == "long_lived_token"
+    assert client._websocket_url() == "ws://homeassistant.local/api/websocket"
 
 
 @pytest.mark.parametrize(
@@ -235,7 +256,7 @@ def test_complete_prices_sleep_until_next_local_thirteen(monkeypatch):
     assert calls == []
 
 
-def test_price_retry_change_does_not_bump_addon_version():
+def test_price_refresh_fix_bumps_addon_version():
     root = __import__("pathlib").Path(__file__).resolve().parents[1]
-    assert 'version: "1.0.115"' in (root / "config.yaml").read_text(encoding="utf-8")
-    assert 'RELEASE_BUILD = "1.0.115"' in (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    assert 'version: "1.0.116"' in (root / "config.yaml").read_text(encoding="utf-8")
+    assert 'RELEASE_BUILD = "1.0.116"' in (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
