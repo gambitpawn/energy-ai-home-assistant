@@ -51,12 +51,11 @@ def _init() -> None:
 
 
 def prepare_startup() -> dict[str, Any]:
-    """Capture persistent operator intent before runtime.py stages the actuator safe.
+    """Capture operator intent before runtime.py performs its mandatory disarm.
 
-    Runtime.py deliberately releases/disarms every new process. This table keeps
-    the operator's requested mode separate from that transient physical state.
-    The boot marker is changed to unclean immediately, so a crash/SIGKILL leaves
-    durable evidence for the next process.
+    The boot marker is changed to unclean immediately. A crash/SIGKILL therefore
+    leaves durable evidence and the next process starts PAUSED rather than
+    automatically restoring physical writes.
     """
     _init()
     current = production_state.status()
@@ -240,23 +239,23 @@ def notification_settings() -> dict[str, Any]:
 
 
 async def send_pending_fault_notification(ha) -> dict[str, Any]:
-    """Best-effort notification through an existing Home Assistant notify service.
+    """Best-effort mail through an existing Home Assistant notify service.
 
-    Notification transport is deliberately outside the actuator safety path. A
-    delivery failure never re-enables control and remains pending for a later
-    retry/startup.
+    All SQLite/config reads are moved off the event loop. Notification transport
+    never participates in the actuator safety decision and delivery failure leaves
+    the fault pending for a later startup retry.
     """
     async with _NOTIFICATION_LOCK:
-        fault = pending_fault()
+        fault = await asyncio.to_thread(pending_fault)
         if fault is None:
             return {"status": "nothing_pending"}
-        settings = notification_settings()
+        settings = await asyncio.to_thread(notification_settings)
         if not settings["enabled"]:
             return {"status": "disabled", "fault": fault}
         service_spec = settings["service"]
         if not service_spec:
             error = "fault_notification_service_not_configured"
-            _mark_notification_error(error)
+            await asyncio.to_thread(_mark_notification_error, error)
             return {"status": "not_configured", "error": error, "fault": fault}
         if "." in service_spec:
             domain, service = service_spec.split(".", 1)
@@ -264,11 +263,11 @@ async def send_pending_fault_notification(ha) -> dict[str, Any]:
             domain, service = "notify", service_spec
         if domain != "notify" or not service:
             error = "fault_notification_service_must_be_notify_service"
-            _mark_notification_error(error)
+            await asyncio.to_thread(_mark_notification_error, error)
             return {"status": "invalid_configuration", "error": error, "fault": fault}
         if not getattr(ha, "authenticated", False):
             error = "home_assistant_not_authenticated"
-            _mark_notification_error(error)
+            await asyncio.to_thread(_mark_notification_error, error)
             return {"status": "delivery_failed", "error": error, "fault": fault}
 
         title = "Energy AI paused"
@@ -294,11 +293,11 @@ async def send_pending_fault_notification(ha) -> dict[str, Any]:
                         timeout=10.0,
                     )
                     response.raise_for_status()
-                _mark_notification_success(int(fault["sequence"]))
+                await asyncio.to_thread(_mark_notification_success, int(fault["sequence"]))
                 return {"status": "sent", "fault": fault, "service": service_spec}
             except Exception as exc:
                 last_error = repr(exc)
-        _mark_notification_error(last_error or "unknown_notification_error")
+        await asyncio.to_thread(_mark_notification_error, last_error or "unknown_notification_error")
         return {"status": "delivery_failed", "error": last_error, "fault": fault}
 
 
@@ -321,37 +320,14 @@ def _find_route(app, path: str, method: str):
     raise RuntimeError(f"operator mode route missing: {method} {path}")
 
 
-def install_persistent_operating_mode(*, app, actuator, ha, operator_module, startup_state: dict[str, Any]) -> dict[str, Any]:
+def install_persistent_operating_mode(*, app, actuator, ha, startup_state: dict[str, Any]) -> dict[str, Any]:
     if getattr(app.state, "persistent_operating_mode_installed", False):
         return {"installed": True, "already_installed": True, **lifecycle_status()}
     app.state.persistent_operating_mode_installed = True
 
-    # ACTIVE uses operator_mode_control.set_mode through a module global. Patch
-    # that narrow call site so only a successful operator activation changes the
-    # persistent requested mode.
-    original_operator_set_mode = operator_module.set_mode
-
-    def persistent_operator_set_mode(mode: str, *, reason: str = "ui"):
-        result = original_operator_set_mode(mode, reason=reason)
-        if str(mode).lower() == "active" and reason == "operator_mode_active":
-            set_desired_mode("active", reason=reason)
-        return result
-
-    operator_module.set_mode = persistent_operator_set_mode
-
-    original_disarm = actuator.disarm
-
-    async def persistent_disarm(reason: str):
-        result = await original_disarm(reason)
-        if reason == "operator_mode_shadow" and bool((result or {}).get("ok")):
-            set_desired_mode("shadow", reason=reason)
-        return result
-
-    actuator.disarm = persistent_disarm
-
-    # All actuator fail-safe paths converge on this method, including watchdog,
-    # quarter actuation and live-replan exceptions. Record PAUSED durably and
-    # schedule mail delivery only after the original safety transition has run.
+    # All actuator fail-safe paths converge here: watchdog, quarter actuation and
+    # live-replan exceptions. The physical safety transition runs first. Fault
+    # persistence then runs in a worker thread; mail is fire-and-forget.
     original_fail_safe = actuator.fail_safe
 
     async def persistent_fail_safe(reason: str, payload: dict[str, Any] | None = None):
@@ -359,36 +335,63 @@ def install_persistent_operating_mode(*, app, actuator, ha, operator_module, sta
             result = await original_fail_safe(reason, payload)
         except Exception as exc:
             try:
-                production_state.set_mode("paused", reason=f"actuator_fault_wrapper:{reason}")
+                await asyncio.to_thread(
+                    production_state.set_mode,
+                    "paused",
+                    reason=f"actuator_fault_wrapper:{reason}",
+                )
             except Exception:
                 pass
-            record_fault(reason, {"payload": payload or {}, "fail_safe_error": repr(exc)})
+            await asyncio.to_thread(
+                record_fault,
+                reason,
+                {"payload": payload or {}, "fail_safe_error": repr(exc)},
+            )
             _schedule_notification(ha)
             raise
-        record_fault(reason, payload or {})
+        await asyncio.to_thread(record_fault, reason, payload or {})
         _schedule_notification(ha)
         return result
 
     actuator.fail_safe = persistent_fail_safe
 
-    # Serialize manual Active/Shadow transitions with automatic startup restore.
-    # This is only a transition lock; fail-safe never waits for it.
+    # Serialize automatic restore with manual Active/Shadow transitions. The
+    # fail-safe path intentionally does not take this lock and therefore can
+    # always pre-empt a normal mode transition.
     transition_lock = asyncio.Lock()
 
-    def lock_route(path: str):
+    def lock_route(path: str, desired_on_success: str):
         route = _find_route(app, path, "POST")
         original = route.dependant.call
 
         async def locked_call():
             async with transition_lock:
-                return await original()
+                result = await original()
+                prod = (result or {}).get("production") or {}
+                if desired_on_success == "active":
+                    successful = (
+                        prod.get("operating_mode") == "active"
+                        and bool(prod.get("physical_writes_enabled"))
+                    )
+                else:
+                    successful = (
+                        prod.get("operating_mode") == "shadow"
+                        and not bool(prod.get("physical_writes_enabled"))
+                    )
+                if successful:
+                    await asyncio.to_thread(
+                        set_desired_mode,
+                        desired_on_success,
+                        reason=f"operator_mode_{desired_on_success}",
+                    )
+                return result
 
         route.dependant.call = locked_call
         route.endpoint = locked_call
         return locked_call
 
-    active_call = lock_route("/control/operator-mode/active")
-    lock_route("/control/operator-mode/shadow")
+    active_call = lock_route("/control/operator-mode/active", "active")
+    lock_route("/control/operator-mode/shadow", "shadow")
 
     target_mode = str(startup_state.get("desired_mode") or "shadow")
     if target_mode == "paused":
@@ -399,17 +402,18 @@ def install_persistent_operating_mode(*, app, actuator, ha, operator_module, sta
 
     base_lifespan = app.router.lifespan_context
 
+    async def desired_mode() -> str:
+        state = await asyncio.to_thread(lifecycle_status)
+        return str(state.get("desired_mode") or "shadow")
+
     async def startup_restore_worker() -> None:
-        # Let HA connectivity/live telemetry settle before a persisted ACTIVE
-        # request is restored. Fault mail is also retried here if a previous
-        # delivery failed.
         await asyncio.sleep(5.0)
         await send_pending_fault_notification(ha)
         if target_mode != "active":
             return
         last_error = None
         for attempt in range(18):
-            if lifecycle_status().get("desired_mode") != "active":
+            if await desired_mode() != "active":
                 return
             try:
                 result = await active_call()
@@ -421,22 +425,25 @@ def install_persistent_operating_mode(*, app, actuator, ha, operator_module, sta
                 last_error = repr(exc.detail)
             except Exception as exc:
                 last_error = repr(exc)
-            if lifecycle_status().get("desired_mode") != "active":
-                # A fail-safe or explicit operator action superseded autoresume.
+            if await desired_mode() != "active":
                 return
             if attempt + 1 < 18:
                 await asyncio.sleep(5.0)
 
-        fault = record_fault(
+        await asyncio.to_thread(
+            record_fault,
             "startup_active_restore_failed",
             {"attempts": 18, "last_error": last_error},
         )
         try:
-            production_state.set_mode("paused", reason="startup_active_restore_failed")
+            await asyncio.to_thread(
+                production_state.set_mode,
+                "paused",
+                reason="startup_active_restore_failed",
+            )
         except Exception:
             pass
         _schedule_notification(ha)
-        return None
 
     @asynccontextmanager
     async def persistent_lifespan(application):
@@ -459,12 +466,9 @@ def install_persistent_operating_mode(*, app, actuator, ha, operator_module, sta
                 except Exception:
                     pass
             if clean:
-                mark_clean_shutdown()
-            else:
-                # Keep previous_shutdown_clean=0. If this process is restarted,
-                # prepare_startup() converts that marker into a durable PAUSED
-                # fault and the pending notification is sent after HA comes up.
-                pass
+                await asyncio.to_thread(mark_clean_shutdown)
+            # Exceptional lifespan exit intentionally leaves the boot marker
+            # unclean. The next startup converts it to PAUSED and retries mail.
 
     app.router.lifespan_context = persistent_lifespan
     return {
