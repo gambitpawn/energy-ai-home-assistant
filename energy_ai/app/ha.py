@@ -72,6 +72,8 @@ class HomeAssistantClient:
         return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
 
     def _websocket_url(self) -> str:
+        if self.auth_mode == "supervisor":
+            return "ws://supervisor/core/websocket"
         parsed = urlparse(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         return f"{scheme}://{parsed.netloc}/api/websocket"
