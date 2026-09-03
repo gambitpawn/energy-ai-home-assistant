@@ -57,12 +57,13 @@ def test_decomposition_reader_is_compute_free(monkeypatch):
 
 def test_nightly_schedule_is_mid_gap_and_supports_retroactive_backfill():
     source = (ROOT / "app" / "runtime_maintenance.py").read_text(encoding="utf-8")
-    assert "_seconds_until_daily_utc(hour=2, minute=50)" in source
+    assert "_seconds_until_daily_utc(hour=1, minute=50)" in source
+    assert "02:50 CET / 03:50 CEST" in source
     assert "for _ in range(14)" in source
     assert '"evaluation_decomposition"' in source
     assert "run_pending_evaluation_decomposition" in source
     assert "await asyncio.sleep(20)" in source
-    assert "03:50,\n    09:50, 15:50, 21:50 UTC" in source
+    assert "03:50/09:50/15:50/21:50 UTC" in source
 
 
 def test_background_runner_is_not_part_of_ui_or_control_activation():
