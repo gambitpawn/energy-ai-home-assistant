@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Regression contract for the lightweight, persisted-data-only Evaluation UI.
+
 from pathlib import Path
 
 from fastapi import FastAPI
