@@ -10,7 +10,6 @@ from .dashboard import DASHBOARD_HTML, install_dashboard
 from .overview_extension import OVERVIEW_EXTENSION, _history_rows
 from .ui_charts import CHARTS_EXTENSION
 from .ui_evaluation import EVALUATION_EXTENSION, install_evaluation_routes
-from .ui_evaluation_late import EVALUATION_LATE_EXTENSION
 from .ui_gradient import GRADIENT_UI_EXTENSION
 from .ui_live import LIVE_EXTENSION, install_live_routes
 from .ui_model_control import MODELS_CONTROL_EXTENSION, install_model_control_routes
@@ -29,7 +28,6 @@ CURRENT_UI_EXTENSION = (
     + STOCHASTIC_UI_EXTENSION
     + GRADIENT_UI_EXTENSION
     + CHARTS_EXTENSION
-    + EVALUATION_LATE_EXTENSION
 )
 
 
