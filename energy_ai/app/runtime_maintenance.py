@@ -90,15 +90,18 @@ async def _optimizer_day_loop(cfg) -> None:
 async def _evaluation_decomposition_loop(cfg) -> None:
     """Nightly detailed evaluation, including initial retroactive backfill.
 
-    02:50 UTC sits halfway between the hourly gradient job at :35 and the next
-    neural job at :05, and it does not coincide with the six-hour PV job (03:50,
-    09:50, 15:50, 21:50 UTC). On the first night the loop can therefore backfill
-    the small existing history. Each day is a separate low-priority job with a
-    short pause between days, so other maintenance can interleave if necessary.
-    Control planning, arming and the watchdog never acquire the low-priority lock.
+    01:50 UTC is 15 minutes after the hourly gradient job at :35 and 15 minutes
+    before the next neural job at :05. It also avoids the six-hour PV job at
+    03:50/09:50/15:50/21:50 UTC and the optimizer/selector maintenance slots.
+    In Sweden this is 02:50 CET / 03:50 CEST, safely inside the night window.
+
+    On the first night up to 14 historical complete days are backfilled. Each day
+    is a separate low-priority job with a short pause, allowing other low-priority
+    work to interleave. Control planning, arming and the watchdog never acquire
+    the low-priority lock.
     """
     while True:
-        await asyncio.sleep(_seconds_until_daily_utc(hour=2, minute=50))
+        await asyncio.sleep(_seconds_until_daily_utc(hour=1, minute=50))
         for _ in range(14):
             try:
                 result = await run_low_priority(
