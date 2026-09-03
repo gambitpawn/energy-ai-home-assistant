@@ -40,6 +40,28 @@ def test_persisted_active_intent_survives_clean_runtime_shadow_staging(tmp_path,
     assert second["desired_mode"] == "active"
 
 
+def test_persisted_paused_intent_survives_clean_restart(tmp_path, monkeypatch):
+    _reset_state(tmp_path, monkeypatch)
+    pom.prepare_startup()
+    pom.set_desired_mode("paused", reason="test_paused")
+    pom.mark_clean_shutdown()
+    restarted = pom.prepare_startup()
+    assert restarted["previous_shutdown_clean"] is True
+    assert restarted["desired_mode"] == "paused"
+    assert restarted["startup_fault"] is None
+
+
+def test_persisted_shadow_intent_survives_clean_restart(tmp_path, monkeypatch):
+    _reset_state(tmp_path, monkeypatch)
+    pom.prepare_startup()
+    pom.set_desired_mode("shadow", reason="test_shadow")
+    pom.mark_clean_shutdown()
+    restarted = pom.prepare_startup()
+    assert restarted["previous_shutdown_clean"] is True
+    assert restarted["desired_mode"] == "shadow"
+    assert restarted["startup_fault"] is None
+
+
 def test_unclean_restart_forces_persistent_paused_and_records_fault(tmp_path, monkeypatch):
     _reset_state(tmp_path, monkeypatch)
     pom.prepare_startup()
@@ -73,22 +95,40 @@ def test_runtime_captures_intent_before_base_runtime_disarms():
 def test_fault_notification_is_nonblocking_for_actuator_safety_path():
     source = (ROOT / "app" / "persistent_operating_mode.py").read_text(encoding="utf-8")
     assert "result = await original_fail_safe(reason, payload)" in source
+    assert "await asyncio.to_thread(record_fault" in source
     assert "_schedule_notification(ha)" in source
     assert "loop.create_task(send_pending_fault_notification" in source
     assert "smtplib" not in source
 
 
-def test_startup_restore_is_serialized_with_manual_mode_transitions():
+def test_startup_restore_is_serialized_with_manual_mode_transitions_but_not_fail_safe():
     source = (ROOT / "app" / "persistent_operating_mode.py").read_text(encoding="utf-8")
     assert "transition_lock = asyncio.Lock()" in source
-    assert 'lock_route("/control/operator-mode/active")' in source
-    assert 'lock_route("/control/operator-mode/shadow")' in source
-    assert "fail-safe never waits for it" in source
+    assert 'lock_route("/control/operator-mode/active", "active")' in source
+    assert 'lock_route("/control/operator-mode/shadow", "shadow")' in source
+    assert "fail-safe path intentionally does not take this lock" in source
+
+
+def test_manual_mode_intent_is_persisted_only_after_successful_transition():
+    source = (ROOT / "app" / "persistent_operating_mode.py").read_text(encoding="utf-8")
+    original_pos = source.index("result = await original()")
+    persist_pos = source.index("set_desired_mode,", original_pos)
+    assert original_pos < persist_pos
+    assert 'desired_on_success == "active"' in source
+    assert 'prod.get("operating_mode") == "shadow"' in source
 
 
 def test_notification_parameters_are_added_without_release_bump():
     source = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    config = (ROOT / "config.yaml").read_text(encoding="utf-8")
     assert 'RELEASE_BUILD = "1.0.124"' in source
+    assert 'version: "1.0.124"' in config
     assert '"fault_notification_enabled"' in source
     assert '"fault_notification_service"' in source
     assert '"fault_notification_target"' in source
+
+
+def test_existing_two_thread_cpu_cap_is_untouched():
+    run_sh = (ROOT / "run.sh").read_text(encoding="utf-8")
+    for key in ("LOKY_MAX_CPU_COUNT", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        assert f"export {key}=2" in run_sh
