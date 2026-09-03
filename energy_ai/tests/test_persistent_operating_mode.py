@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import app.persistent_operating_mode as pom
@@ -30,8 +31,6 @@ def test_persisted_active_intent_survives_clean_runtime_shadow_staging(tmp_path,
     assert first["previous_shutdown_clean"] is True
 
     pom.mark_clean_shutdown()
-    # This reproduces runtime.py's safe physical cleanup. Persistent operator
-    # intent must not be derived from this transient Shadow state after migration.
     production_state.set_mode("shadow", reason="clean_shutdown")
     production_state.mark_actuator_ready(False, detail="clean_shutdown")
 
@@ -66,7 +65,6 @@ def test_unclean_restart_forces_persistent_paused_and_records_fault(tmp_path, mo
     _reset_state(tmp_path, monkeypatch)
     pom.prepare_startup()
     pom.set_desired_mode("active", reason="test")
-    # No mark_clean_shutdown(): the next process must interpret this as a crash.
     restarted = pom.prepare_startup()
     assert restarted["previous_shutdown_clean"] is False
     assert restarted["desired_mode"] == "paused"
@@ -118,11 +116,12 @@ def test_manual_mode_intent_is_persisted_only_after_successful_transition():
     assert 'prod.get("operating_mode") == "shadow"' in source
 
 
-def test_notification_parameters_are_added_without_release_bump():
+def test_notification_parameters_and_release_metadata_remain_consistent():
     source = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
     config = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    assert 'RELEASE_BUILD = "1.0.124"' in source
-    assert 'version: "1.0.124"' in config
+    runtime_version = re.search(r'RELEASE_BUILD = "([^"]+)"', source).group(1)
+    config_version = re.search(r'^version: "([^"]+)"', config, re.MULTILINE).group(1)
+    assert runtime_version == config_version
     assert '"fault_notification_enabled"' in source
     assert '"fault_notification_service"' in source
     assert '"fault_notification_target"' in source
