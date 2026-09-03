@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -258,5 +259,10 @@ def test_complete_prices_sleep_until_next_local_thirteen(monkeypatch):
 
 def test_release_version_is_current():
     root = __import__("pathlib").Path(__file__).resolve().parents[1]
-    assert 'version: "1.0.117"' in (root / "config.yaml").read_text(encoding="utf-8")
-    assert 'RELEASE_BUILD = "1.0.117"' in (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    config = (root / "config.yaml").read_text(encoding="utf-8")
+    runtime = (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    config_match = re.search(r'^version:\s*"([^"]+)"', config, re.MULTILINE)
+    runtime_match = re.search(r'^RELEASE_BUILD\s*=\s*"([^"]+)"', runtime, re.MULTILINE)
+    assert config_match is not None
+    assert runtime_match is not None
+    assert config_match.group(1) == runtime_match.group(1)
