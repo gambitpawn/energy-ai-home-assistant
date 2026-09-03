@@ -256,7 +256,7 @@ def test_complete_prices_sleep_until_next_local_thirteen(monkeypatch):
     assert calls == []
 
 
-def test_price_refresh_fix_bumps_addon_version():
+def test_release_version_is_current():
     root = __import__("pathlib").Path(__file__).resolve().parents[1]
-    assert 'version: "1.0.116"' in (root / "config.yaml").read_text(encoding="utf-8")
-    assert 'RELEASE_BUILD = "1.0.116"' in (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    assert 'version: "1.0.117"' in (root / "config.yaml").read_text(encoding="utf-8")
+    assert 'RELEASE_BUILD = "1.0.117"' in (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
