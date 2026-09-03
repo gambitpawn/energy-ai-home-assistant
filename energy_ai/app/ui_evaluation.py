@@ -97,7 +97,6 @@ function opportunityBars(el,days){
 }
 const renderEvalBase=renderEval;
 renderEval=function(){renderEvalBase();renderEvaluationSummary();drawEvaluationCurrent()};
-const renderHistoryBase=renderHistory;
 renderHistory=function(){
   const h=state.history||{},days=h.days||[],s=h.evaluation_summary||{};
   $('historyKpis').innerHTML=card('Complete days',n(h.complete_days,0),`${n(h.partial_days,0)} partial`)+card('Total saving',sek(s.total_saving_sek),'Complete days only',s.total_saving_sek>0?'good':'')+card('Available opportunity',sek(s.total_opportunity_sek),'Saving + remaining gap')+card('Opportunity captured',captureText(s.capture_fraction),'Aggregate complete days',s.capture_fraction>=.7?'good':s.capture_fraction!=null&&s.capture_fraction<.4?'warn':'')+card('Remaining gap',sek(s.total_remaining_gap_sek),'Gap to hindsight')+card('Data quality',`${n(h.complete_days,0)}/${n(h.stored_days,0)}`,'Complete / stored days');
@@ -106,6 +105,9 @@ renderHistory=function(){
 };
 loadEval=async function(localDate){try{state.eval=await api(`ui/evaluation-day?local_date=${localDate}`);renderEval()}catch(e){$('evalMeta').textContent=e.message}};
 loadHistory=async function(){try{state.history=await api(`ui/evaluation-history?days=${$('historyDays').value}`);renderHistory()}catch(e){$('historyTable').innerHTML=`<div class="empty">${e.message}</div>`}};
+$('reloadHistory').onclick=loadHistory;
+$('historyDays').onchange=loadHistory;
+$('tabs').addEventListener('click',e=>{const b=e.target.closest('.tab');if(!b)return;if(b.dataset.view==='history')loadHistory();if(b.dataset.view==='evaluation'&&$('evalDate').value)loadEval($('evalDate').value)});
 const evalNote=document.querySelector('#evaluation .chart-note');if(evalNote)evalNote.textContent='Solid = realized · dashed = forecast/plan · hindsight = perfect-information benchmark at the same terminal SOC. Hover for exact values.';
 evalPickerCurrent();
 </script>
