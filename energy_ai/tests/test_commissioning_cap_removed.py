@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from app import actuator_config
@@ -7,6 +8,16 @@ from app.actuator_physical_cap_v190 import apply_physical_command_cap, install_p
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _release_versions() -> tuple[str, str]:
+    config = (ROOT / "config.yaml").read_text(encoding="utf-8")
+    runtime = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    config_match = re.search(r'^version:\s*"([^"]+)"', config, re.MULTILINE)
+    runtime_match = re.search(r'^RELEASE_BUILD\s*=\s*"([^"]+)"', runtime, re.MULTILINE)
+    assert config_match is not None
+    assert runtime_match is not None
+    return config_match.group(1), runtime_match.group(1)
 
 
 def test_retired_cap_is_a_noop_even_if_legacy_value_is_two_kw():
@@ -35,15 +46,17 @@ def test_actuator_configuration_no_longer_contains_commissioning_cap():
 
 def test_home_assistant_schema_keeps_only_ignored_upgrade_compatibility_key():
     config = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    assert 'version: "1.0.120"' in config
+    config_version, runtime_version = _release_versions()
+    assert config_version == runtime_version
     assert "Legacy compatibility only; ignored by the runtime" in config
     assert "actuator_max_physical_command_kw: 8.0" in config
 
 
 def test_production_operator_wrapper_retires_old_parameter_and_status_semantics():
     source = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    config_version, runtime_version = _release_versions()
+    assert config_version == runtime_version
     assert '"actuator_max_physical_command_kw"' in source
     assert "_RETIRED_PARAMETER_KEYS" in source
     assert '"enabled": False' in source
     assert '"temporary_commissioning_cap_removed"' in source
-    assert 'RELEASE_BUILD = "1.0.120"' in source
