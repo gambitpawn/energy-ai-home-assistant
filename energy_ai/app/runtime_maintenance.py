@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 from . import model_selector as selector
 from .adaptive_auto import automatic_maintenance_once as adaptive_maintenance_once
 from .adaptive_learning import active_run
+from .evaluation_decomposition import run_pending_evaluation_decomposition
 from .gradient_training import automatic_maintenance_once as gradient_maintenance_once
 from .maintenance_coordination import run_low_priority
 from .neural_auto import automatic_maintenance_once as neural_maintenance_once
@@ -78,6 +79,26 @@ async def _optimizer_day_loop(cfg) -> None:
             pass
 
 
+async def _evaluation_decomposition_loop(cfg) -> None:
+    """Backfill at most one detailed evaluation artifact per six-hour slot.
+
+    The shared low-priority lock serializes this CPU/SQLite-heavy work with model
+    maintenance. Control planning, arming and the actuator watchdog never acquire
+    that lock, and the UI never invokes this function.
+    """
+    while True:
+        await asyncio.sleep(_seconds_until_slot(minute=47, period_hours=6, phase_hour=2))
+        try:
+            await run_low_priority(
+                "evaluation_decomposition",
+                run_pending_evaluation_decomposition,
+                cfg,
+                1,
+            )
+        except Exception:
+            pass
+
+
 async def _selector_loop(cfg) -> None:
     # Resolve selector functions through the module at call time. The consolidated
     # runtime installs the robust selector patches after modules are imported, so
@@ -123,6 +144,7 @@ async def combined_maintenance_loop(
         _gradient_loop(cfg),
         _pv_loop(cfg),
         _optimizer_day_loop(cfg),
+        _evaluation_decomposition_loop(cfg),
         _selector_loop(cfg),
         soc_replanning_loop(),
         actuator_watchdog_loop(),
