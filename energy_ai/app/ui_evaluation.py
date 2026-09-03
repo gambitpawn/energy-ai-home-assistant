@@ -21,7 +21,7 @@ EVALUATION_EXTENSION = r'''
 .eval-gap-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.eval-gap-piece{background:#0f1720;border:1px solid var(--line);border-radius:10px;padding:12px}.eval-gap-piece .name{color:var(--muted);font-size:11px}.eval-gap-piece .amount{font-size:22px;font-weight:750;margin-top:3px}.eval-gap-piece .share{font-size:11px;color:var(--muted);margin-top:2px}
 .eval-gap-bar{height:22px;border-radius:8px;overflow:hidden;display:flex;background:#0f1720;border:1px solid var(--line);margin:10px 0 4px}.eval-gap-bar span{height:100%;min-width:0}
 .eval-pending{padding:10px 12px;border:1px solid var(--line);border-radius:10px;color:var(--muted);background:#0f1720}
-.eval-trend-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.eval-trend-chart{height:220px}.eval-table-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}.eval-detail-row td{background:#0d151e;padding:0!important}.eval-detail-box{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:12px}.eval-detail-box .row{display:block}.eval-detail-label{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}.eval-detail-value{font-size:14px;font-weight:700;margin-top:2px}.eval-expand{cursor:pointer;color:var(--muted);font-size:11px;margin-right:6px}.eval-expand:hover{color:var(--text)}
+.eval-trend-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.eval-trend-chart{height:220px}.eval-table-toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}.eval-detail-row td{background:#0d151e;padding:0!important}.eval-detail-box{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:12px}.eval-detail-label{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}.eval-detail-value{font-size:14px;font-weight:700;margin-top:2px}.eval-expand{cursor:pointer;color:var(--muted);font-size:11px;margin-right:6px}.eval-expand:hover{color:var(--text)}
 @media(max-width:900px){.eval-trend-grid{grid-template-columns:1fr}.eval-detail-box{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:720px){.eval-gap-grid{grid-template-columns:1fr}.eval-detail-box{grid-template-columns:1fr}}
 </style>
 <script>
@@ -31,7 +31,7 @@ drawOverview=function(){
   const el=$('overviewPlan'),actual=overviewRealized.rows||[],planned=pRows();
   const stamps=[...actual.map(r=>Date.parse(r.start)),...planned.map(r=>Date.parse(r.start||r.start_utc))].filter(Number.isFinite);
   const now=Date.parse(overviewRealized.now||new Date().toISOString());
-  if(stamps.length&&Number.isFinite(now)){
+  if(el&&stamps.length&&Number.isFinite(now)){
     const lo=Math.min(...stamps),hi=Math.max(...stamps),pctNow=Math.max(0,Math.min(100,100*(now-lo)/Math.max(1,hi-lo)));
     el.style.background=`linear-gradient(to right, transparent 0%, transparent ${pctNow}%, rgba(79,179,255,.045) ${pctNow}%, rgba(79,179,255,.045) 100%)`;
   }
@@ -100,12 +100,12 @@ drawOverview=function(){
     if(!usableRows.length){el.innerHTML='<div class="empty">No comparable data.</div>';return}
     const W=1000,H=205,p={l:52,r:18,t:16,b:42},base=H-p.b,usable=base-p.t;
     const vals=[];usableRows.forEach(x=>series.forEach(s=>{const v=Number(x[s.key]);if(Number.isFinite(v))vals.push(v)}));
-    const lo=Number.isFinite(minValue)?Number(minValue):Math.min(...vals),hi=maxValue!=null?Number(maxValue):Math.max(lo+0.001,...vals),span=Math.max(0.001,hi-lo),slot=(W-p.l-p.r)/Math.max(1,usableRows.length-1);
+    const lo=minValue==null?Math.min(...vals):Number(minValue),hi=maxValue!=null?Number(maxValue):Math.max(lo+0.001,...vals),span=Math.max(0.001,hi-lo),slot=(W-p.l-p.r)/Math.max(1,usableRows.length-1);
     let svg=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
     for(let j=0;j<5;j++){const v=hi-span*j/4,y=p.t+usable*j/4;svg+=`<line x1="${p.l}" y1="${y}" x2="${W-p.r}" y2="${y}" stroke="#263647"/><text x="4" y="${y+4}" fill="#91a2b3" font-size="10">${percent?n(100*v,0)+'%':n(v,1)}</text>`}
     series.forEach(s=>{let points=[];usableRows.forEach((x,i)=>{const v=Number(x[s.key]);if(!Number.isFinite(v))return;const px=p.l+slot*i,py=base-usable*(v-lo)/span;points.push(`${px},${py}`);svg+=`<circle cx="${px}" cy="${py}" r="4" fill="${s.color}"><title>${x.local_date}: ${s.label} ${percent?n(100*v,1)+'%':n(v,2)}</title></circle>`});if(points.length>1)svg+=`<polyline points="${points.join(' ')}" fill="none" stroke="${s.color}" stroke-width="3" vector-effect="non-scaling-stroke"/>`});
     usableRows.forEach((x,i)=>{if(usableRows.length<=14||i%Math.ceil(usableRows.length/12)===0)svg+=`<text x="${p.l+slot*i}" y="${H-14}" fill="#91a2b3" font-size="9" text-anchor="middle">${String(x.local_date).slice(5)}</text>`});
-    svg+=`</svg>`;el.innerHTML=svg;
+    svg+='</svg>';el.innerHTML=svg;
   }
 
   function signedBarMetricChart(el,rows,key,label){
@@ -118,7 +118,8 @@ drawOverview=function(){
 
   function renderCaptureTrend(days){
     const rows=(days||[]).filter(x=>x.status==='ok').map(x=>{const e=dayEconomics(x);return {local_date:x.local_date,capture:e.capture}}).filter(x=>x.capture!=null&&Number.isFinite(Number(x.capture)));
-    lineMetricChart($('evalCaptureTrend'),rows,[{key:'capture',label:'Captured',color:'#51d88a'}],{minValue:0,maxValue:1,percent:true});
+    const values=rows.map(x=>Number(x.capture));
+    lineMetricChart($('evalCaptureTrend'),rows,[{key:'capture',label:'Captured',color:'#51d88a'}],{minValue:values.length?Math.min(0,...values):0,maxValue:values.length?Math.max(1,...values):1,percent:true});
   }
   function renderForecastQuality(days){
     const mae=(days||[]).filter(x=>x.status==='ok').map(x=>({local_date:x.local_date,load_mae_kw:x.load_mae_kw,pv_mae_kw:x.pv_mae_kw}));
@@ -190,7 +191,7 @@ drawOverview=function(){
         decompositionMeta={complete_days:0,pending_days:0,failed_days:0};decompositionByDate=new Map();
       }
       renderEvaluationPeriod(historyResult.value);
-      if(decompResult.status!=='fulfilled'){$('evalGapMeta').textContent='Detailed evaluation status unavailable; core evaluation data is unaffected.'}
+      if(decompResult.status!=='fulfilled'){const gapMeta=$('evalGapMeta');if(gapMeta)gapMeta.textContent='Detailed evaluation status unavailable; core evaluation data is unaffected.'}
       if($('evalDate')?.value)renderDayGap($('evalDate').value);
     }catch(e){
       if(requestId!==periodRequestId)return;if(meta)meta.textContent=e.message;const table=$('evalPeriodTable');if(table)table.innerHTML=`<div class="empty">${e.message}</div>`;
@@ -200,18 +201,20 @@ drawOverview=function(){
   const baseRenderEval=renderEval;
   renderEval=function(){
     baseRenderEval();const e=state.eval||{};if(!e.local_date)return;const c=e.comparison||{},d=e.data||{},rt=e.realtime_counterfactual||{},saving=c.realtime_economic_saving_vs_zero_battery_sek,gap=c.perfect_information_gap_sek,opp=saving!=null&&gap!=null?Number(saving)+Number(gap):null,capture=e.status==='ok'&&opp!=null&&opp>OPPORTUNITY_EPS_SEK?Number(saving)/opp:null;
-    $('evalKpis').innerHTML=card('Saving',sek(saving),'vs zero-battery baseline',saving>0?'good':saving<0?'bad':'')+card('Available opportunity',sek(opp),'Saving + gap to hindsight')+card('Opportunity captured',captureText(capture),'Complete days only',capture>=.7?'good':capture!=null&&capture<.4?'warn':'')+card('Remaining gap',sek(gap),'Gap to perfect hindsight',gap>0?'warn':'')+card('Plan coverage',pct(d.plan_action_coverage_fraction),'≥90% for complete day',d.plan_action_coverage_fraction>=.9?'good':'warn')+card('Battery throughput',rt.battery_throughput_kwh!=null?`${n(rt.battery_throughput_kwh)} kWh`:'—','Realized replay');renderDayGap(e.local_date);
+    const evalKpis=$('evalKpis');if(evalKpis)evalKpis.innerHTML=card('Saving',sek(saving),'vs zero-battery baseline',saving>0?'good':saving<0?'bad':'')+card('Available opportunity',sek(opp),'Saving + gap to hindsight')+card('Opportunity captured',captureText(capture),'Complete days only',capture>=.7?'good':capture!=null&&capture<.4?'warn':'')+card('Remaining gap',sek(gap),'Gap to perfect hindsight',gap>0?'warn':'')+card('Plan coverage',pct(d.plan_action_coverage_fraction),'≥90% for complete day',d.plan_action_coverage_fraction>=.9?'good':'warn')+card('Battery throughput',rt.battery_throughput_kwh!=null?`${n(rt.battery_throughput_kwh)} kWh`:'—','Realized replay');renderDayGap(e.local_date);
   };
 
-  $('reloadEvaluationPeriod').onclick=loadEvaluationPeriod;$('evalPeriod').onchange=()=>{expandedDate=null;loadEvaluationPeriod()};
-  $('evalTableFilter').onchange=()=>{if(lastPeriodData)renderEvaluationTable(lastPeriodData.days||[])};
-  $('evalPeriodTable').addEventListener('click',e=>{
+  const reloadBtn=$('reloadEvaluationPeriod'),periodSelect=$('evalPeriod'),filterSelect=$('evalTableFilter'),periodTable=$('evalPeriodTable');
+  if(reloadBtn)reloadBtn.onclick=loadEvaluationPeriod;
+  if(periodSelect)periodSelect.onchange=()=>{expandedDate=null;loadEvaluationPeriod()};
+  if(filterSelect)filterSelect.onchange=()=>{if(lastPeriodData)renderEvaluationTable(lastPeriodData.days||[])};
+  if(periodTable)periodTable.addEventListener('click',e=>{
     const link=e.target.closest?.('[data-eval-date]');
-    if(link){const localDate=link.dataset.evalDate;$('evalDate').value=localDate;renderDayGap(localDate);loadEval(localDate);dayToolbar.scrollIntoView({behavior:'smooth',block:'start'});return}
+    if(link){const localDate=link.dataset.evalDate;const evalDate=$('evalDate');if(evalDate)evalDate.value=localDate;renderDayGap(localDate);loadEval(localDate);if(dayToolbar)dayToolbar.scrollIntoView({behavior:'smooth',block:'start'});return}
     const exp=e.target.closest?.('[data-eval-expand]');
     if(exp){const localDate=String(exp.dataset.evalExpand);expandedDate=expandedDate===localDate?null:localDate;if(lastPeriodData)renderEvaluationTable(lastPeriodData.days||[])}
   });
-  $('tabs').addEventListener('click',e=>{const b=e.target.closest('.tab');if(b?.dataset?.view==='evaluation')loadEvaluationPeriod()});
+  const tabs=$('tabs');if(tabs)tabs.addEventListener('click',e=>{const b=e.target.closest('.tab');if(b?.dataset?.view==='evaluation')loadEvaluationPeriod()});
 })();
 </script>
 '''
