@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse
 from .collector import Collector
 from .component_registry import registry_status
 from .config import load_config
-from .db import get_prices, init_db, insert_llm, insert_pv_forecast, latest_pv_forecast, latest_rows, rebuild_recent_15m, upsert_prices
+from .db import get_prices, init_db, insert_llm, insert_pv_forecast, latest_pv_forecast, latest_rows, price_day_coverage, rebuild_recent_15m, upsert_prices
 from .flexible_loads import discover_flexible_load_entities, ev_state, sauna_state
 from .forecast import PVForecaster
 from .llm import LLMExplainer
@@ -25,15 +25,87 @@ from .training_routes import router as training_router
 
 cfg=load_config(); RUNTIME_VERSION=str(cfg.get("runtime_build") or "unknown")
 collector=Collector(cfg); explainer=LLMExplainer(cfg); pv_forecaster=PVForecaster(cfg,collector.ha); load_forecaster=LoadForecaster(cfg)
-collector_task=None; maintenance_task=None; PRICE_AREA="SE4"; PRICE_TZ=ZoneInfo("Europe/Stockholm")
+collector_task=None; maintenance_task=None; price_retry_task=None; PRICE_AREA="SE4"; PRICE_TZ=ZoneInfo("Europe/Stockholm")
+PRICE_RETRY_START_HOUR=13; PRICE_RETRY_SECONDS=600.0
+_PRICE_REFRESH_LOCK=asyncio.Lock()
+_PRICE_REFRESH_STATE={"policy":"coverage_gated_daily_retry_v1","retry_start_local":"13:00","retry_interval_seconds":PRICE_RETRY_SECONDS,"running":False,"attempt_count":0,"last_started_at":None,"last_completed_at":None,"last_result":None,"last_error":None,"next_retry_at":None}
 
-async def _refresh_price_horizon():
-    now=datetime.now(PRICE_TZ); result={"area":PRICE_AREA,"dates":{},"total_intervals":0}; fetched_at=datetime.now(timezone.utc).isoformat()
-    for day in [now.date(),now.date()+timedelta(days=1)]:
+def _price_status(): return {**_PRICE_REFRESH_STATE,"last_result":None if _PRICE_REFRESH_STATE.get("last_result") is None else dict(_PRICE_REFRESH_STATE["last_result"])}
+
+async def _coverage(day): return await asyncio.to_thread(price_day_coverage,PRICE_AREA,day.isoformat(),str(PRICE_TZ))
+
+async def _refresh_price_horizon(days=None):
+    now=datetime.now(PRICE_TZ); targets=sorted(set(days or [now.date(),now.date()+timedelta(days=1)])); fetched_at=datetime.now(timezone.utc).isoformat()
+    async with _PRICE_REFRESH_LOCK:
+        _PRICE_REFRESH_STATE.update({"running":True,"attempt_count":int(_PRICE_REFRESH_STATE.get("attempt_count") or 0)+1,"last_started_at":fetched_at,"last_error":None,"next_retry_at":None})
+        result={"area":PRICE_AREA,"dates":{},"total_intervals":0,"complete":False}
         try:
-            rows=await collector.ha.nordpool_prices_15m(day.isoformat(),PRICE_AREA,"SEK"); upsert_prices(PRICE_AREA,rows,fetched_at); result["dates"][day.isoformat()]={"ok":True,"intervals":len(rows)}; result["total_intervals"]+=len(rows)
-        except Exception as exc: result["dates"][day.isoformat()]={"ok":False,"error":repr(exc)}
-    return result
+            for day in targets:
+                key=day.isoformat()
+                try:
+                    rows=await collector.ha.nordpool_prices_15m(key,PRICE_AREA,"SEK")
+                    if not rows: raise RuntimeError("nordpool_returned_no_price_intervals")
+                    await asyncio.to_thread(upsert_prices,PRICE_AREA,rows,fetched_at)
+                    coverage=await _coverage(day)
+                    ok=bool(coverage.get("complete"))
+                    result["dates"][key]={"ok":ok,"fetched_intervals":len(rows),"coverage":coverage,"error":None if ok else "price_day_incomplete"}
+                    result["total_intervals"]+=len(rows)
+                except Exception as exc:
+                    try: coverage=await _coverage(day)
+                    except Exception as coverage_exc: coverage={"complete":False,"error":repr(coverage_exc)}
+                    result["dates"][key]={"ok":bool(coverage.get("complete")),"fetched_intervals":0,"coverage":coverage,"error":repr(exc)}
+            result["complete"]=bool(result["dates"]) and all(item.get("ok") for item in result["dates"].values())
+            _PRICE_REFRESH_STATE.update({"last_completed_at":datetime.now(timezone.utc).isoformat(),"last_result":result,"last_error":None if result["complete"] else "one_or_more_price_days_incomplete"})
+            return result
+        except Exception as exc:
+            _PRICE_REFRESH_STATE["last_error"]=repr(exc); raise
+        finally:
+            _PRICE_REFRESH_STATE["running"]=False
+
+def _seconds_until_price_window(now=None):
+    local=(now or datetime.now(PRICE_TZ)).astimezone(PRICE_TZ); target=datetime(local.year,local.month,local.day,PRICE_RETRY_START_HOUR,tzinfo=PRICE_TZ)
+    if target <= local:
+        next_day=local.date()+timedelta(days=1); target=datetime(next_day.year,next_day.month,next_day.day,PRICE_RETRY_START_HOUR,tzinfo=PRICE_TZ)
+    return max(1.0,(target-local).total_seconds())
+
+def _price_retry_backoff_remaining(now=None):
+    raw=_PRICE_REFRESH_STATE.get("last_completed_at") or _PRICE_REFRESH_STATE.get("last_started_at")
+    if not raw: return 0.0
+    try:
+        stamp=datetime.fromisoformat(str(raw).replace("Z","+00:00"))
+        if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
+        current=(now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        return max(0.0,PRICE_RETRY_SECONDS-(current-stamp.astimezone(timezone.utc)).total_seconds())
+    except Exception: return 0.0
+
+async def _missing_price_targets(now=None):
+    local=(now or datetime.now(PRICE_TZ)).astimezone(PRICE_TZ); targets=[]
+    today=local.date(); today_coverage=await _coverage(today)
+    if not today_coverage.get("complete"): targets.append(today)
+    if local.hour >= PRICE_RETRY_START_HOUR:
+        tomorrow=today+timedelta(days=1); tomorrow_coverage=await _coverage(tomorrow)
+        if not tomorrow_coverage.get("complete"): targets.append(tomorrow)
+    return targets
+
+async def _price_retry_loop():
+    while True:
+        try:
+            now=datetime.now(PRICE_TZ); targets=await _missing_price_targets(now)
+            if targets:
+                remaining=_price_retry_backoff_remaining()
+                if remaining > 0:
+                    _PRICE_REFRESH_STATE["next_retry_at"]=(datetime.now(timezone.utc)+timedelta(seconds=remaining)).isoformat()
+                    await asyncio.sleep(remaining)
+                    continue
+                result=await _refresh_price_horizon(targets)
+                delay=1.0 if result.get("complete") else PRICE_RETRY_SECONDS
+            else: delay=_seconds_until_price_window(now)
+            _PRICE_REFRESH_STATE["next_retry_at"]=(datetime.now(timezone.utc)+timedelta(seconds=delay)).isoformat()
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError: raise
+        except Exception as exc:
+            _PRICE_REFRESH_STATE.update({"last_error":repr(exc),"next_retry_at":(datetime.now(timezone.utc)+timedelta(seconds=PRICE_RETRY_SECONDS)).isoformat()})
+            await asyncio.sleep(PRICE_RETRY_SECONDS)
 
 async def _refresh_pv_forecast():
     forecast=await pv_forecaster.refresh(); insert_pv_forecast(forecast)
@@ -65,7 +137,7 @@ async def _forecast_maintenance_loop():
 
 @asynccontextmanager
 async def lifespan(app):
-    global collector_task,maintenance_task
+    global collector_task,maintenance_task,price_retry_task
     init_db()
     try: await collector.run_once(); rebuild_recent_15m(collector.poll_seconds,lookback_hours=48)
     except Exception as exc: collector.last_error=repr(exc)
@@ -75,9 +147,11 @@ async def lifespan(app):
     for fn in (evaluate_matured_forecasts,evaluate_matured_load_forecasts):
         try: await asyncio.to_thread(fn,7)
         except Exception: pass
-    collector_task=asyncio.create_task(collector.loop()); maintenance_task=asyncio.create_task(_forecast_maintenance_loop()); yield; collector.stop()
-    for task in (collector_task,maintenance_task):
+    collector_task=asyncio.create_task(collector.loop()); maintenance_task=asyncio.create_task(_forecast_maintenance_loop()); price_retry_task=asyncio.create_task(_price_retry_loop(),name="energy-ai-price-retry"); yield; collector.stop()
+    tasks=[task for task in (collector_task,maintenance_task,price_retry_task) if task]
+    for task in tasks:
         if task: task.cancel()
+    if tasks: await asyncio.gather(*tasks,return_exceptions=True)
     await collector.close()
 
 app=FastAPI(title="Energy AI",version=RUNTIME_VERSION,description="Read-only HA energy data, component-based forecasts, deterministic shadow planning, continuous evaluation and LLM analysis",lifespan=lifespan,docs_url=None,redoc_url=None)
@@ -180,7 +254,9 @@ async def discover_flexible():
 @app.get("/prices/refresh")
 async def prices_refresh(): return await _refresh_price_horizon()
 @app.get("/prices")
-async def prices(limit:int=Query(192,ge=1,le=500)): return {"area":PRICE_AREA,"unit":"öre/kWh","interval_minutes":15,"prices":get_prices(PRICE_AREA,limit)}
+async def prices(limit:int=Query(192,ge=1,le=500)): return {"area":PRICE_AREA,"unit":"öre/kWh","interval_minutes":15,"refresh":_price_status(),"prices":get_prices(PRICE_AREA,limit)}
+@app.get("/prices/status")
+async def prices_status(): return _price_status()
 @app.get("/ha-diagnostics")
 async def ha_diagnostics(): return await collector.ha.diagnostics()
 @app.get("/discover",response_class=HTMLResponse)
@@ -192,7 +268,7 @@ async def discover_json():
 @app.get("/health")
 async def health():
     plan=latest_plan(1)
-    return {"ok":collector.last_error is None,"runtime_build":RUNTIME_VERSION,"read_only":True,"collector_running":collector.running,"forecast_evaluation_running":maintenance_task is not None and not maintenance_task.done(),"ha_api_authenticated":collector.ha.authenticated,"last_error":collector.last_error,"component_count":len(registry_status(cfg)["active_ids"]),"optimizer_mode":"shadow_read_only","optimizer_latest_plan":plan.get("generated_at"),"openai_configured":explainer.client is not None,"llm_model":explainer.model}
+    return {"ok":collector.last_error is None,"runtime_build":RUNTIME_VERSION,"read_only":True,"collector_running":collector.running,"forecast_evaluation_running":maintenance_task is not None and not maintenance_task.done(),"price_retry_running":price_retry_task is not None and not price_retry_task.done(),"price_refresh":_price_status(),"ha_api_authenticated":collector.ha.authenticated,"last_error":collector.last_error,"component_count":len(registry_status(cfg)["active_ids"]),"optimizer_mode":"shadow_read_only","optimizer_latest_plan":plan.get("generated_at"),"openai_configured":explainer.client is not None,"llm_model":explainer.model}
 @app.get("/config")
 async def config(): return cfg
 @app.get("/state")

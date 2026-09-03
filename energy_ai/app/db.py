@@ -107,12 +107,33 @@ def rebuild_recent_15m(poll_seconds,lookback_hours=48):
 
 
 def upsert_prices(area,rows,fetched_at):
-    with sqlite3.connect(DB_PATH) as c: c.executemany('''INSERT INTO price_15m(area,start_utc,end_utc,price_ore_kwh,source_currency,source_price_per_mwh,fetched_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(area,start_utc) DO UPDATE SET end_utc=excluded.end_utc,price_ore_kwh=excluded.price_ore_kwh,source_currency=excluded.source_currency,source_price_per_mwh=excluded.source_price_per_mwh,fetched_at=excluded.fetched_at''',[(area,r['start'],r['end'],r['price_ore_kwh'],r['currency'],r['source_price_per_mwh'],fetched_at) for r in rows])
+    with connect_db() as c: c.executemany('''INSERT INTO price_15m(area,start_utc,end_utc,price_ore_kwh,source_currency,source_price_per_mwh,fetched_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(area,start_utc) DO UPDATE SET end_utc=excluded.end_utc,price_ore_kwh=excluded.price_ore_kwh,source_currency=excluded.source_currency,source_price_per_mwh=excluded.source_price_per_mwh,fetched_at=excluded.fetched_at''',[(area,r['start'],r['end'],r['price_ore_kwh'],r['currency'],r['source_price_per_mwh'],fetched_at) for r in rows])
+
+
+def price_day_coverage(area,local_date,timezone_name="Europe/Stockholm"):
+    tz=ZoneInfo(str(timezone_name)); day=datetime.fromisoformat(str(local_date)).date()
+    local_start=datetime(day.year,day.month,day.day,tzinfo=tz); next_day=day+timedelta(days=1)
+    local_end=datetime(next_day.year,next_day.month,next_day.day,tzinfo=tz)
+    utc_start=local_start.astimezone(timezone.utc); utc_end=local_end.astimezone(timezone.utc)
+    expected=int(round((utc_end-utc_start).total_seconds()/900.0))
+    with connect_db() as c:
+        raw=[row[0] for row in c.execute("SELECT start_utc FROM price_15m WHERE area=?",(str(area),)).fetchall()]
+    observed=set()
+    for value in raw:
+        try:
+            stamp=datetime.fromisoformat(str(value).replace("Z","+00:00"))
+            if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
+            stamp=stamp.astimezone(timezone.utc)
+            if utc_start <= stamp < utc_end: observed.add(stamp)
+        except Exception: pass
+    expected_starts={utc_start+timedelta(minutes=15*index) for index in range(expected)}
+    missing=expected_starts-observed; unexpected=observed-expected_starts; stored=len(observed)
+    return {"area":str(area),"date":day.isoformat(),"timezone":str(timezone_name),"expected_intervals":expected,"stored_intervals":stored,"missing_intervals":len(missing),"unexpected_intervals":len(unexpected),"complete":not missing}
 
 
 def get_prices(area,limit=192):
     limit=max(1,min(int(limit),500))
-    with sqlite3.connect(DB_PATH) as c:
+    with connect_db() as c:
         cur=c.execute("SELECT area,start_utc,end_utc,price_ore_kwh,source_currency,source_price_per_mwh,fetched_at FROM price_15m WHERE area=? ORDER BY start_utc ASC LIMIT ?",(area,limit)); names=[d[0] for d in cur.description]; return [dict(zip(names,row)) for row in cur.fetchall()]
 
 
