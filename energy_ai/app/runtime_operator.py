@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from . import engine_operator_selection as engine_operator_selection_module
+from .persistent_operating_mode import install_persistent_operating_mode, prepare_startup
+
+# Capture the persisted operator intent before runtime.py performs its mandatory
+# startup disarm. This ordering is critical: runtime.py intentionally stages the
+# physical actuator in Shadow on every new process.
+_STARTUP_MODE_STATE = prepare_startup()
+
 from . import runtime as base
+from . import operator_mode_control as operator_mode_control_module
 from . import ui_models as ui_models_module
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
@@ -115,6 +123,43 @@ try:
 except Exception:
     pass
 
+# Fault notifications use an existing Home Assistant notify service rather than
+# embedding SMTP credentials in Energy AI. The target may be an email address
+# when the configured notify service supports explicit targets.
+_NOTIFICATION_PARAMETERS = [
+    ui_parameters.parameter(
+        "Notifications",
+        "fault_notification_enabled",
+        "Fault email enabled",
+        "bool",
+        False,
+        "Send an email/notification when Energy AI enters PAUSED after an actuator or runtime fault.",
+        recommended="Enable after configuring and testing the Home Assistant notify service below.",
+    ),
+    ui_parameters.parameter(
+        "Notifications",
+        "fault_notification_service",
+        "Home Assistant notify service",
+        "str",
+        "",
+        "Existing Home Assistant notify service used for fault mail, for example notify.email_supervisor.",
+        physical="Use a notify.* service that is already configured and verified in Home Assistant.",
+    ),
+    ui_parameters.parameter(
+        "Notifications",
+        "fault_notification_target",
+        "Supervisor email / target",
+        "str",
+        "",
+        "Optional notify target. For an SMTP notify service this can be the supervisor email address; leave blank if the service has a fixed recipient.",
+    ),
+]
+for item in _NOTIFICATION_PARAMETERS:
+    key = str(item["key"])
+    if key not in ui_parameters.PARAM_BY_KEY:
+        ui_parameters.PARAMETERS.append(item)
+        ui_parameters.PARAM_BY_KEY[key] = item
+
 install_operator_mode_control(
     app=app,
     core=base.core,
@@ -123,6 +168,14 @@ install_operator_mode_control(
     timing_scheduler=base.ACTUATOR_TIMING,
     selector_module=base.selector,
     candidate_from_selection=base._candidate_from_selection,
+)
+
+PERSISTENT_OPERATING_MODE = install_persistent_operating_mode(
+    app=app,
+    actuator=base.ACTUATOR,
+    ha=base.core.collector.ha,
+    operator_module=operator_mode_control_module,
+    startup_state=_STARTUP_MODE_STATE,
 )
 
 
