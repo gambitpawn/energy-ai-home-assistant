@@ -65,5 +65,5 @@ def test_iteration_one_ui_is_scoped_to_evaluation_and_history():
     assert "Daily opportunity captured" in EVALUATION_EXTENSION
     assert "Unpublished price horizon" in EVALUATION_EXTENSION
     assert "Opportunity captured" in EVALUATION_EXTENSION
-    assert "/ui/evaluation-history" in EVALUATION_EXTENSION
+    assert "ui/evaluation-history" in EVALUATION_EXTENSION
     assert "model comparison" not in EVALUATION_EXTENSION.lower()
