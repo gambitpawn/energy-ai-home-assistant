@@ -40,16 +40,19 @@ def _set_parent_death_signal() -> None:
     """Ask Linux to terminate the maintenance worker if the uvicorn parent dies."""
     try:
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        # PR_SET_PDEATHSIG = 1. Best effort only; container shutdown still kills
-        # the process tree even if this kernel feature is unavailable.
-        libc.prctl(1, signal.SIGTERM)
+        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG = 1
     except Exception:
         pass
 
 
 def _worker_main(job_queue, result_queue) -> None:
     """Single long-lived low-priority process for CPU/SQLite-heavy jobs."""
+    parent_pid = os.getppid()
     _set_parent_death_signal()
+    # Close the small race where the parent could exit between fork() and prctl().
+    if os.getppid() != parent_pid or os.getppid() == 1:
+        return
+
     nice_value = None
     try:
         os.nice(10)
@@ -57,11 +60,11 @@ def _worker_main(job_queue, result_queue) -> None:
     except Exception:
         pass
 
-    # Reinforce the two-core native-library ceiling inside the child. The values
-    # are already exported by run.sh before Python starts; setdefault prevents a
-    # runtime worker from silently widening them if packaging changes later.
+    # run.sh sets these before NumPy/sklearn are imported, which is what actually
+    # constrains already-initialized native pools. Reassert the same ceiling in
+    # the child so subprocesses spawned by loky/joblib inherit the limit too.
     for key in ("LOKY_MAX_CPU_COUNT", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-        os.environ.setdefault(key, "2")
+        os.environ[key] = "2"
 
     result_queue.put({
         "kind": "ready",
@@ -232,9 +235,9 @@ async def _run_in_process(label: str, fn: Callable[..., Any], args: tuple[Any, .
             continue
         if not isinstance(message, dict) or message.get("kind") != "result":
             continue
-        # A cancelled prior await can leave its result in the queue. Jobs are
-        # still executed serially by the child; discard stale result envelopes.
         if message.get("job_id") != job_id:
+            # A cancelled prior await can leave its result in the queue. Jobs are
+            # still executed serially by the child; discard stale envelopes.
             continue
         if message.get("ok"):
             return message.get("value")
