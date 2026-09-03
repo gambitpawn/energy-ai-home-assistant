@@ -6,6 +6,7 @@ import multiprocessing as mp
 import os
 import queue
 import signal
+import threading
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -49,7 +50,6 @@ def _worker_main(job_queue, result_queue) -> None:
     """Single long-lived low-priority process for CPU/SQLite-heavy jobs."""
     parent_pid = os.getppid()
     _set_parent_death_signal()
-    # Close the small race where the parent could exit between fork() and prctl().
     if os.getppid() != parent_pid or os.getppid() == 1:
         return
 
@@ -124,6 +124,19 @@ def install_process_worker(*, app=None, startup_timeout_seconds: float = 10.0) -
         _STATE.update({
             "execution_mode": "thread_fallback_non_posix",
             "worker_error": "dedicated maintenance process requires POSIX fork",
+        })
+        return status()
+
+    # Fork only during the intentionally single-threaded import/startup phase.
+    # If some future dependency starts a Python thread during import, disabling
+    # heavy maintenance is safer than forking a live threaded control process.
+    if threading.active_count() != 1:
+        _PROCESS_REQUIRED = True
+        error = f"refusing maintenance fork with {threading.active_count()} active Python threads"
+        _STATE.update({
+            "execution_mode": "process_unavailable_fail_closed",
+            "worker_pid": None,
+            "worker_error": error,
         })
         return status()
 
@@ -236,8 +249,6 @@ async def _run_in_process(label: str, fn: Callable[..., Any], args: tuple[Any, .
         if not isinstance(message, dict) or message.get("kind") != "result":
             continue
         if message.get("job_id") != job_id:
-            # A cancelled prior await can leave its result in the queue. Jobs are
-            # still executed serially by the child; discard stale envelopes.
             continue
         if message.get("ok"):
             return message.get("value")
@@ -252,23 +263,13 @@ async def run_low_priority(
     *args: Any,
     **kwargs: Any,
 ) -> Any:
-    """Serialize heavy maintenance and isolate it from the control process.
-
-    Production runtime installs one forked, nice(+10) process before lifespan
-    tasks start. The single asyncio lock plus the single child means evaluation,
-    model training and selector backfills remain strictly one-at-a-time. Control
-    planning, actuator and watchdog neither acquire this lock nor execute inside
-    the maintenance process.
-    """
+    """Serialize heavy maintenance and isolate it from the control process."""
     async with _LOW_PRIORITY_LOCK:
         _STATE.update({"running": str(label), "started_at": _now(), "last_error": None})
         try:
             if _PROCESS_REQUIRED:
                 result = await _run_in_process(str(label), fn, tuple(args), dict(kwargs))
             else:
-                # Unit tests and non-POSIX development retain the previous safe
-                # behavior. Production POSIX runtime sets _PROCESS_REQUIRED at
-                # import/startup before any maintenance loop can run.
                 result = await asyncio.to_thread(fn, *args, **kwargs)
             _STATE.update({"last_completed": str(label), "last_completed_at": _now()})
             return result
