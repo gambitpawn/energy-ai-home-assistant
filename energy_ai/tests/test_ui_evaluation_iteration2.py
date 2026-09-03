@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Iteration 2 regression contract: persisted decomposition must stay off the UI/control path.
+
 from pathlib import Path
 
 from fastapi import FastAPI
