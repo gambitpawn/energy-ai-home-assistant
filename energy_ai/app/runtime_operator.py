@@ -9,7 +9,6 @@ from .persistent_operating_mode import install_persistent_operating_mode, prepar
 _STARTUP_MODE_STATE = prepare_startup()
 
 from . import runtime as base
-from . import operator_mode_control as operator_mode_control_module
 from . import ui_models as ui_models_module
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
@@ -174,7 +173,6 @@ PERSISTENT_OPERATING_MODE = install_persistent_operating_mode(
     app=app,
     actuator=base.ACTUATOR,
     ha=base.core.collector.ha,
-    operator_module=operator_mode_control_module,
     startup_state=_STARTUP_MODE_STATE,
 )
 
