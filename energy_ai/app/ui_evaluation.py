@@ -16,6 +16,20 @@ EVALUATION_EXTENSION = r'''
 .eval-day-heading{font-size:18px;font-weight:750;margin:22px 0 10px}.eval-section-gap{margin-top:12px}
 </style>
 <script>
+// Preserve the existing Overview "now" shading. It is independent of evaluation
+// data and was already part of the current UI before this consolidation.
+const drawOverviewBeforeUnifiedEvaluation=drawOverview;
+drawOverview=function(){
+  drawOverviewBeforeUnifiedEvaluation();
+  const el=$('overviewPlan'),actual=overviewRealized.rows||[],planned=pRows();
+  const stamps=[...actual.map(r=>Date.parse(r.start)),...planned.map(r=>Date.parse(r.start||r.start_utc))].filter(Number.isFinite);
+  const now=Date.parse(overviewRealized.now||new Date().toISOString());
+  if(stamps.length&&Number.isFinite(now)){
+    const lo=Math.min(...stamps),hi=Math.max(...stamps),pctNow=Math.max(0,Math.min(100,100*(now-lo)/Math.max(1,hi-lo)));
+    el.style.background=`linear-gradient(to right, transparent 0%, transparent ${pctNow}%, rgba(79,179,255,.045) ${pctNow}%, rgba(79,179,255,.045) 100%)`;
+  }
+};
+
 (()=>{
   const OPPORTUNITY_EPS_SEK=0.05;
 
@@ -88,24 +102,31 @@ EVALUATION_EXTENSION = r'''
     el.innerHTML=svg;
   }
 
-  function renderEvaluationPeriod(){
-    const h=state.history||{},days=h.days||[],m=periodEconomics(days),k=$('evalPeriodKpis'),table=$('evalPeriodTable');
+  function renderEvaluationPeriod(data){
+    const h=data||{},days=h.days||[],m=periodEconomics(days),k=$('evalPeriodKpis'),table=$('evalPeriodTable');
     if(k)k.innerHTML=card('Saving',sek(m.saving),'Comparable complete days only',m.saving>0?'good':m.saving<0?'bad':'')+card('Available opportunity',sek(m.opportunity),'Saving + remaining gap')+card('Opportunity captured',captureText(m.capture),'Share of available opportunity',m.capture>=.7?'good':m.capture!=null&&m.capture<.4?'warn':'')+card('Remaining gap',sek(m.gap),'Gap to perfect hindsight',m.gap>0?'warn':'')+card('Complete days',n(m.complete,0),`${n(m.partial,0)} partial / other`)+card('Data quality',`${n(m.comparable,0)}/${n(m.complete,0)}`,'Complete days with full economics');
     opportunityBars(days);
     if(table)table.innerHTML=days.length?`<table class="tbl"><thead><tr><th>Date</th><th>Status</th><th>Coverage</th><th>Saving SEK</th><th>Opportunity SEK</th><th>Captured</th><th>Load MAE kW</th><th>PV MAE kW</th></tr></thead><tbody>${days.map(x=>{const e=dayEconomics(x),complete=x.status==='ok';return `<tr><td><span class="eval-day-link" data-eval-date="${x.local_date}">${x.local_date}</span></td><td><span class="pill ${complete?'ok':'partial'}">${complete?'complete':x.status}</span></td><td>${pct(x.coverage)}</td><td>${n(e.saving)}</td><td>${n(e.opportunity)}</td><td>${complete?captureText(e.capture):'—'}</td><td>${n(x.load_mae_kw)}</td><td>${n(x.pv_mae_kw)}</td></tr>`}).join('')}</tbody></table>`:'<div class="empty">No evaluated days stored yet.</div>';
     const meta=$('evalPeriodMeta');if(meta)meta.textContent=`${n(days.length,0)} stored · ${n(m.complete,0)} complete`;
   }
 
+  let periodRequestId=0;
   async function loadEvaluationPeriod(){
-    const days=$('evalPeriod')?.value||'7',meta=$('evalPeriodMeta');
-    try{if(meta)meta.textContent='Loading…';state.history=await api(`ui/history?days=${days}`);renderEvaluationPeriod()}
-    catch(e){if(meta)meta.textContent=e.message;const table=$('evalPeriodTable');if(table)table.innerHTML=`<div class="empty">${e.message}</div>`}
+    const requestId=++periodRequestId,days=$('evalPeriod')?.value||'7',meta=$('evalPeriodMeta');
+    try{
+      if(meta)meta.textContent='Loading…';
+      const data=await api(`ui/history?days=${days}`);
+      if(requestId!==periodRequestId)return;
+      renderEvaluationPeriod(data);
+    }catch(e){
+      if(requestId!==periodRequestId)return;
+      if(meta)meta.textContent=e.message;
+      const table=$('evalPeriodTable');if(table)table.innerHTML=`<div class="empty">${e.message}</div>`;
+    }
   }
 
-  // The base dashboard already starts one lightweight /ui/history request during
-  // initialisation. Reuse that result instead of starting a second request.
-  renderHistory=function(){renderEvaluationPeriod()};
-
+  // Keep the base dashboard's history loader and renderer untouched. It can finish
+  // its startup request against the hidden History DOM without racing this view.
   const baseRenderEval=renderEval;
   renderEval=function(){
     baseRenderEval();
@@ -117,9 +138,6 @@ EVALUATION_EXTENSION = r'''
   $('reloadEvaluationPeriod').onclick=loadEvaluationPeriod;
   $('evalPeriod').onchange=loadEvaluationPeriod;
   $('evalPeriodTable').addEventListener('click',e=>{const link=e.target.closest?.('[data-eval-date]');if(!link)return;const localDate=link.dataset.evalDate;$('evalDate').value=localDate;loadEval(localDate);dayToolbar.scrollIntoView({behavior:'smooth',block:'start'})});
-
-  // Default to seven stored evaluation days once the base 30-day request has
-  // completed. A tab-open refresh is explicit and remains a DB read only.
   $('tabs').addEventListener('click',e=>{const b=e.target.closest('.tab');if(b?.dataset?.view==='evaluation')loadEvaluationPeriod()});
 })();
 </script>
