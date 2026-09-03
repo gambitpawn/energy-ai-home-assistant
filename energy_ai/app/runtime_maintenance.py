@@ -31,6 +31,14 @@ def _seconds_until_slot(*, minute: int, period_hours: int = 1, phase_hour: int =
     return max(0.0, (target - now).total_seconds())
 
 
+def _seconds_until_daily_utc(*, hour: int, minute: int) -> float:
+    now = datetime.now(timezone.utc)
+    target = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return max(0.0, (target - now).total_seconds())
+
+
 async def _neural_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=5))
@@ -80,23 +88,30 @@ async def _optimizer_day_loop(cfg) -> None:
 
 
 async def _evaluation_decomposition_loop(cfg) -> None:
-    """Backfill at most one detailed evaluation artifact per six-hour slot.
+    """Nightly detailed evaluation, including initial retroactive backfill.
 
-    The shared low-priority lock serializes this CPU/SQLite-heavy work with model
-    maintenance. Control planning, arming and the actuator watchdog never acquire
-    that lock, and the UI never invokes this function.
+    02:50 UTC sits halfway between the hourly gradient job at :35 and the next
+    neural job at :05, and it does not coincide with the six-hour PV job (03:50,
+    09:50, 15:50, 21:50 UTC). On the first night the loop can therefore backfill
+    the small existing history. Each day is a separate low-priority job with a
+    short pause between days, so other maintenance can interleave if necessary.
+    Control planning, arming and the watchdog never acquire the low-priority lock.
     """
     while True:
-        await asyncio.sleep(_seconds_until_slot(minute=47, period_hours=6, phase_hour=2))
-        try:
-            await run_low_priority(
-                "evaluation_decomposition",
-                run_pending_evaluation_decomposition,
-                cfg,
-                1,
-            )
-        except Exception:
-            pass
+        await asyncio.sleep(_seconds_until_daily_utc(hour=2, minute=50))
+        for _ in range(14):
+            try:
+                result = await run_low_priority(
+                    "evaluation_decomposition",
+                    run_pending_evaluation_decomposition,
+                    cfg,
+                    1,
+                )
+            except Exception:
+                break
+            if int(result.get("processed_count") or 0) == 0:
+                break
+            await asyncio.sleep(20)
 
 
 async def _selector_loop(cfg) -> None:
