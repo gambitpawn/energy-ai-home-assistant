@@ -17,15 +17,23 @@ def test_retired_learned_models_are_not_registered():
     assert "adaptive_deterministic_v1" in ids
 
 
-def test_runtime_does_not_install_retired_model_paths():
+def test_runtime_does_not_install_or_shim_retired_model_paths():
     root = Path(__file__).resolve().parents[1]
-    source = (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
-    assert "install_hybrid_runtime_patch" not in source
-    assert "install_gradient_runtime_patch" not in source
-    assert "install_qualification_candidate_runtime" not in source
-    assert "install_gradient_qualification_runtime" not in source
-    assert "install_gradient_selector_qualification" not in source
-    assert "base.neural_runtime_status = _retired_neural_runtime_status" in source
+    operator = (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
+    runtime = (root / "app" / "runtime.py").read_text(encoding="utf-8")
+    routes = (root / "app" / "runtime_routes.py").read_text(encoding="utf-8")
+    combined = operator + runtime + routes
+    for token in (
+        "install_hybrid_runtime_patch",
+        "install_gradient_runtime_patch",
+        "install_qualification_candidate_runtime",
+        "install_gradient_qualification_runtime",
+        "install_gradient_selector_qualification",
+        "NeuralV1Engine",
+        "neural_runtime_status",
+        "/engines/neural/",
+    ):
+        assert token not in combined
 
 
 def test_maintenance_has_no_retired_ml_training_loops():
