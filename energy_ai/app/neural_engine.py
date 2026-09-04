@@ -19,10 +19,17 @@ class NeuralV1Engine:
     def decide(self, engine_input: EngineInput) -> EngineDecision:
         model, meta = load_model()
         x = np.asarray([vectorize(engine_input)], dtype=float)
-        predicted = float(model.predict(x)[0])
+        raw_predicted = float(model.predict(x)[0])
+
+        constraints = engine_input.constraints or {}
+        optimizer = self.cfg.get("optimizer") or {}
+        max_charge_kw = float(constraints.get("battery_max_charge_kw", optimizer.get("battery_max_charge_kw", 8.0)))
+        max_discharge_kw = float(constraints.get("battery_max_discharge_kw", optimizer.get("battery_max_discharge_kw", 8.0)))
+        predicted = max(-max_charge_kw, min(max_discharge_kw, raw_predicted))
+
         confidence = None
         probabilities = None
-        if hasattr(model, "predict_proba"):
+        if hasattr(model, "predict_proba") and hasattr(model, "classes_"):
             raw = model.predict_proba(x)[0]
             confidence = float(max(raw)) if len(raw) else None
             classes = [float(v) for v in model.classes_]
@@ -32,10 +39,9 @@ class NeuralV1Engine:
             ]
 
         battery = (self.cfg.get("policy") or {}).get("battery") or {}
-        optimizer = self.cfg.get("optimizer") or {}
-        cap = float(battery.get("capacity_kwh", 19.6))
-        charge_eff = float(optimizer.get("battery_charge_efficiency", 0.95))
-        discharge_eff = float(optimizer.get("battery_discharge_efficiency", 0.95))
+        cap = float(battery.get("capacity_kwh", constraints.get("battery_capacity_kwh", 19.6)))
+        charge_eff = float(optimizer.get("battery_charge_efficiency", constraints.get("charge_efficiency", 0.95)))
+        discharge_eff = float(optimizer.get("battery_discharge_efficiency", constraints.get("discharge_efficiency", 0.95)))
         dt_h = float(engine_input.interval_minutes) / 60.0
         initial_energy = cap * float(engine_input.initial_soc_pct) / 100.0
         if predicted >= 0:
@@ -56,8 +62,10 @@ class NeuralV1Engine:
             status="ok",
             diagnostics={
                 "feature_schema": FEATURE_SCHEMA,
-                "classification_confidence": None if confidence is None else round(confidence, 6),
-                "top_action_probabilities": probabilities,
+                "raw_regression_action_kw": round(raw_predicted, 6),
+                "regression_action_clipped": abs(predicted - raw_predicted) > 1e-9,
+                "soft_action_confidence": None if confidence is None else round(confidence, 6),
+                "top_ordered_action_probabilities": probabilities,
                 "expected_soc_is_pre_safety": True,
             },
             model={
@@ -69,9 +77,12 @@ class NeuralV1Engine:
                 "training_trigger": meta.get("training_trigger"),
                 "training_samples": meta.get("samples"),
                 "label_source": meta.get("label_source"),
-                "validation_accuracy": meta.get("validation_accuracy"),
+                "target_kind": meta.get("target_kind"),
                 "validation_action_mae_kw": meta.get("validation_action_mae_kw"),
+                "validation_within_1kw": meta.get("validation_within_1kw"),
+                "validation_within_2kw": meta.get("validation_within_2kw"),
                 "validation_direction_accuracy": meta.get("validation_direction_accuracy"),
+                "validation_bias_kw": meta.get("validation_bias_kw"),
                 "shadow_ready": bool(meta.get("shadow_ready")),
                 "active_eligible": False,
             },
