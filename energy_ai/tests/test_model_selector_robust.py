@@ -15,6 +15,8 @@ install_selector_state_patch()
 install_selector_policy_patch()
 robust.install_robust_selector_patch()
 
+ACTIVE_GENERIC_CHALLENGER = "deterministic_refined_v1"
+
 
 def _cfg() -> dict:
     return {
@@ -105,11 +107,10 @@ def test_ten_days_and_seven_wins_are_required(selector_db):
     state = ms.ensure_selector_state(cfg)
     context = state["context_signature"]
     _set_epoch_start(selector_db, "2026-08-01")
-    challenger = "neural_v1"
-    challenger_key = "neural_v1:model-12"
+    challenger = ACTIVE_GENERIC_CHALLENGER
+    challenger_key = f"{challenger}:model-12"
     start = date(2026, 8, 1)
 
-    # Nine excellent days are still insufficient.
     for n in range(9):
         day = (start + timedelta(days=n)).isoformat()
         _insert_score(selector_db, context, day, ms.BASELINE_ENGINE_ID, robust.BASELINE_MODEL_KEY, 10.0, p90=12.0)
@@ -120,7 +121,6 @@ def test_ten_days_and_seven_wins_are_required(selector_db):
     assert gate["eligible"] is False
     assert gate["paired_days"] == 9
 
-    # Ten days with seven wins and robust aggregate improvement passes.
     day = (start + timedelta(days=9)).isoformat()
     _insert_score(selector_db, context, day, ms.BASELINE_ENGINE_ID, robust.BASELINE_MODEL_KEY, 10.0, p90=12.0)
     _insert_score(selector_db, context, day, challenger, challenger_key, 9.0, p90=10.0)
@@ -155,11 +155,11 @@ def test_six_wins_out_of_ten_cannot_promote(selector_db):
 def test_gross_invalid_output_trips_circuit_breaker_immediately(selector_db):
     cfg = _cfg()
     context = ms.ensure_selector_state(cfg)["context_signature"]
-    key = "neural_v1:model-12"
+    key = f"{ACTIVE_GENERIC_CHALLENGER}:model-12"
     robust._health_event(
         context,
         "2026-08-27T12:00:00+00:00",
-        "neural_v1",
+        ACTIVE_GENERIC_CHALLENGER,
         key,
         "fault",
         "gross_action_out_of_bounds",
@@ -167,7 +167,7 @@ def test_gross_invalid_output_trips_circuit_breaker_immediately(selector_db):
         {"requested_action_kw": 99.0},
     )
     breaker = robust._circuit_breaker_reason(
-        context, "neural_v1", key, "gross_action_out_of_bounds"
+        context, ACTIVE_GENERIC_CHALLENGER, key, "gross_action_out_of_bounds"
     )
     assert breaker is not None
     assert breaker["reason"] == "gross invalid model output"
@@ -193,35 +193,35 @@ def test_three_consecutive_faults_disqualify(selector_db):
     assert breaker["consecutive_faults"] == 3
 
 
-def test_new_neural_revision_does_not_inherit_old_revision_quarantine(selector_db):
+def test_new_model_revision_does_not_inherit_old_revision_quarantine(selector_db):
     cfg = _cfg()
     state = robust._ensure_robust_state(cfg)
     context = state["context_signature"]
-    old_key = "neural_v1:model-12"
-    new_key = "neural_v1:model-13"
+    old_key = f"{ACTIVE_GENERIC_CHALLENGER}:model-12"
+    new_key = f"{ACTIVE_GENERIC_CHALLENGER}:model-13"
     robust._disqualify_model(
         cfg,
-        "neural_v1",
+        ACTIVE_GENERIC_CHALLENGER,
         old_key,
         "test fault",
         {"fault_type": "gross_action_out_of_bounds"},
     )
-    old_status = robust._disqualification_status(context, "neural_v1", old_key)
-    new_status = robust._disqualification_status(context, "neural_v1", new_key)
+    old_status = robust._disqualification_status(context, ACTIVE_GENERIC_CHALLENGER, old_key)
+    new_status = robust._disqualification_status(context, ACTIVE_GENERIC_CHALLENGER, new_key)
     assert old_status["quarantine_active"] is True
     assert new_status["quarantine_active"] is False
     assert new_status["disqualified_before"] is False
 
 
-def test_model_key_changes_with_neural_revision(selector_db):
+def test_model_key_changes_with_model_revision(selector_db):
     a = robust._engine_model_key(
-        "neural_v1",
-        {"model": {"model_id": "n12", "model_revision": 12}},
+        ACTIVE_GENERIC_CHALLENGER,
+        {"model": {"model_id": "r12", "model_revision": 12}},
         "2026-08-27T12:00:00+00:00",
     )
     b = robust._engine_model_key(
-        "neural_v1",
-        {"model": {"model_id": "n13", "model_revision": 13}},
+        ACTIVE_GENERIC_CHALLENGER,
+        {"model": {"model_id": "r13", "model_revision": 13}},
         "2026-08-27T12:15:00+00:00",
     )
     assert a != b
