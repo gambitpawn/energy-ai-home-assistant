@@ -17,22 +17,12 @@ from .actuator_watchdog import install_actuator_watchdog_patch
 from .battery_health_routes import install_battery_health_routes
 from .deterministic_refined_runtime import refined_runtime_status, install_refined_runtime_patch
 from .engine_operator_selection import install_operator_engine_routing
-from .gradient_qualification import (
-    install_qualification_candidate_runtime as install_gradient_qualification_runtime,
-    qualification_status as gradient_qualification_status,
-)
-from .gradient_runtime import gradient_runtime_status, install_gradient_runtime_patch
-from .gradient_selector_qualification import install_gradient_selector_qualification
-from .hybrid_runtime import hybrid_runtime_status, install_hybrid_runtime_patch
 from .maintenance_coordination import install_process_worker
-from .neural_qualification import (
-    install_qualification_candidate_runtime,
-    qualification_status,
-)
 from .operator_mode_control import install_operator_mode_control
 from .pool import install_pool_routes
 from .pool_installation_profile import install_pool_installation_profile
 from .release_version import RELEASE_VERSION
+from .retired_ml_cleanup import cleanup_retired_ml
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_control_truth import decision_summary as control_truth_decision_summary
@@ -44,9 +34,36 @@ base.RUNTIME_BUILD = RELEASE_BUILD
 # any UI request; this prevents the UI from exposing stale base-runtime literals.
 base.core.cfg["runtime_build"] = RELEASE_BUILD
 app = base.app
+engine_operator_selection_module.DISPLAY_NAMES.pop("neural_v1", None)
+engine_operator_selection_module.DISPLAY_NAMES.pop("gradient_v1", None)
+engine_operator_selection_module.DISPLAY_NAMES.pop("hybrid_v1", None)
 engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
 engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
-engine_operator_selection_module.DISPLAY_NAMES["gradient_v1"] = "Gradient boost"
+
+# Retire the first learned-model architecture completely. This migration removes
+# its generated artifacts and comparison/qualification state before selector
+# routing is installed. The frozen deterministic baseline and adaptive learning
+# state are explicitly outside the cleanup scope.
+RETIRED_ML_CLEANUP = cleanup_retired_ml()
+
+# runtime.py still contains legacy neural compatibility code because older source
+# modules are retained temporarily for migration/test compatibility. Production
+# must never execute neural inference: the quarter-refresh path consults this
+# module-global status before constructing NeuralV1Engine, so replacing it here
+# makes that path permanently non-ready without touching deterministic_v35.
+def _retired_neural_runtime_status():
+    return {
+        "engine_id": "neural_v1",
+        "retired": True,
+        "retirement_reason": "v1 learned-model architecture retired",
+        "model_exists": False,
+        "samples": 0,
+        "shadow_ready": False,
+        "active_eligible": False,
+    }
+
+
+base.neural_runtime_status = _retired_neural_runtime_status
 
 # The production overview must describe the routed/actuated control path rather
 # than the frozen base optimizer plan. install_model_routes() has already created
@@ -67,46 +84,20 @@ install_arm_control_mode_patch()
 # watchdog implementation.
 install_actuator_watchdog_patch()
 
-# Continuous learned-model training and race qualification are separate. Neural
-# + hybrid share one frozen neural candidate; gradient_v1 has its own independently
-# frozen candidate and can retrain in the background without resetting robust10.
-QUALIFICATION_RUNTIME = install_qualification_candidate_runtime()
-GRADIENT_QUALIFICATION_RUNTIME = install_gradient_qualification_runtime()
-install_gradient_selector_qualification()
-_ORIGINAL_NEURAL_RUNTIME_STATUS = base.neural_runtime_status
-
-
-def _qualification_aware_neural_runtime_status():
-    status = _ORIGINAL_NEURAL_RUNTIME_STATUS()
-    candidate = qualification_status()
-    status["latest_model_shadow_ready"] = bool(status.get("shadow_ready"))
-    status["qualification_candidate"] = candidate
-    status["shadow_ready"] = bool(candidate.get("candidate_ready"))
-    return status
-
-
-base.neural_runtime_status = _qualification_aware_neural_runtime_status
-
 # Operator engine selection is a routing override only. Install it before the
-# challenger preparation wrappers so all challengers are written for the same
-# information vintage before either Auto or a manual engine is routed.
+# remaining deterministic challenger preparation wrappers so all active engines
+# are written for the same information vintage before Auto/manual routing.
 install_operator_engine_routing()
 
-# Challenger wrappers are stacked around the same selector gateway. Gradient is
-# installed last, so the call order is gradient -> refined deterministic ->
-# stochastic -> hybrid -> operator routing -> robust selector. All decisions
-# still share one information vintage.
-install_hybrid_runtime_patch(base.core.cfg)
+# Only deterministic challengers remain in the production comparison runtime.
+# neural_v1, gradient_v1 and hybrid_v1 are intentionally not installed.
 install_stochastic_runtime_patch(base.core.cfg)
 install_refined_runtime_patch(base.core.cfg)
-install_gradient_runtime_patch(base.core.cfg)
 
-# Fork the single maintenance process only after every model/selector runtime
-# patch above is installed, but before FastAPI lifespan tasks or worker threads
-# start. This lets the child inherit the exact patched maintenance implementation
-# without forking an already-threaded uvicorn process. Its lifespan wrapper is
-# intentionally installed before persistent operating-mode handling so shutdown
-# terminates heavy CPU work before the clean-shutdown marker is written.
+# Fork the single maintenance process only after every active model/selector
+# runtime patch above is installed, but before FastAPI lifespan tasks or worker
+# threads start. Retired learned-model training loops are absent from the combined
+# maintenance coordinator.
 MAINTENANCE_PROCESS = install_process_worker(app=app)
 
 # Pool integration starts read-only. Apply mappings verified on the installed
@@ -199,29 +190,9 @@ def _remove_route(path: str) -> None:
     ]
 
 
-@app.get("/engines/neural/qualification", tags=["engines"])
-async def neural_qualification_status():
-    return {"runtime_build": RELEASE_BUILD, **qualification_status()}
-
-
-@app.get("/engines/gradient/qualification", tags=["engines"])
-async def gradient_qualification_status_route():
-    return {"runtime_build": RELEASE_BUILD, **gradient_qualification_status()}
-
-
-@app.get("/engines/gradient/status", tags=["engines"])
-async def gradient_status():
-    return {"runtime_build": RELEASE_BUILD, **gradient_runtime_status()}
-
-
 @app.get("/engines/refined-deterministic/status", tags=["engines"])
 async def refined_deterministic_status():
     return {"runtime_build": RELEASE_BUILD, **refined_runtime_status()}
-
-
-@app.get("/engines/hybrid/status", tags=["engines"])
-async def hybrid_status():
-    return {"runtime_build": RELEASE_BUILD, **hybrid_runtime_status()}
 
 
 @app.get("/engines/stochastic/status", tags=["engines"])
