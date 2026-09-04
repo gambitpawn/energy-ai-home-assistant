@@ -7,7 +7,6 @@ from typing import Any
 
 from . import model_selector as ms
 from . import model_selector_robust as robust
-from .neural_qualification import LEARNED_ENGINE_IDS, rotate_qualification_candidate
 
 _ORIGINAL_DISQUALIFY = robust._disqualify_model
 
@@ -22,18 +21,7 @@ def _disqualify_model(
     enriched = dict(details or {})
     if str(engine_id) == robust.ADAPTIVE_ENGINE_ID:
         enriched["adaptive_state_id_at_disqualification"] = robust._latest_adaptive_state_id()
-    result = _ORIGINAL_DISQUALIFY(cfg, engine_id, model_key, reason, enriched)
-    if str(engine_id) in LEARNED_ENGINE_IDS:
-        rotation = rotate_qualification_candidate(
-            "selected_learned_candidate_disqualified",
-            {
-                "engine_id": str(engine_id),
-                "model_key": str(model_key),
-                "disqualification_reason": str(reason),
-            },
-        )
-        result["qualification_candidate_rotation"] = rotation
-    return result
+    return _ORIGINAL_DISQUALIFY(cfg, engine_id, model_key, reason, enriched)
 
 
 def _maybe_advance_adaptive_generation(context: str | None) -> dict[str, Any]:
@@ -110,61 +98,6 @@ def _cooldown_active(base_state: dict[str, Any]) -> bool:
         return False
 
 
-def _learned_candidate_rotation_ready(assessments: list[dict[str, Any]]) -> bool:
-    learned = [
-        item for item in assessments
-        if str(item.get("challenger_engine_id")) in LEARNED_ENGINE_IDS
-    ]
-    if not learned or any(bool(item.get("eligible")) for item in learned):
-        return False
-    return all(
-        int(item.get("paired_days") or 0) >= int(robust.QUALIFICATION_DAYS)
-        for item in learned
-    )
-
-
-def _maybe_rotate_failed_learned_candidate(
-    context: str,
-    selected_engine: str,
-    assessments: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    if str(selected_engine) in LEARNED_ENGINE_IDS:
-        return {
-            "rotated": False,
-            "status": "selected_learned_incumbent_is_frozen",
-            "selected_engine_id": str(selected_engine),
-        }
-    if not _learned_candidate_rotation_ready(assessments):
-        return None
-
-    compact = [
-        {
-            "engine_id": item.get("challenger_engine_id"),
-            "model_key": item.get("challenger_model_key"),
-            "paired_days": item.get("paired_days"),
-            "eligible": item.get("eligible"),
-            "gates": item.get("gates"),
-            "reason": item.get("reason"),
-        }
-        for item in assessments
-        if str(item.get("challenger_engine_id")) in LEARNED_ENGINE_IDS
-    ]
-    rotation = rotate_qualification_candidate(
-        "completed_robust10_without_promotion",
-        {"context_signature": context, "assessments": compact},
-    )
-    if rotation.get("rotated"):
-        ms._event(
-            "learned_qualification_candidate_rotated",
-            context,
-            "Neural/hybrid frozen candidate completed robust10 without promotion; snapshot latest trained neural model.",
-            from_engine_id="neural_v1",
-            to_engine_id="neural_v1",
-            payload=rotation,
-        )
-    return rotation
-
-
 def run_selection_policy(cfg: dict[str, Any]) -> dict[str, Any]:
     robust_state = robust._ensure_robust_state(cfg)
     base_state = ms.ensure_selector_state(cfg)
@@ -235,7 +168,6 @@ def run_selection_policy(cfg: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-    candidate_rotation = _maybe_rotate_failed_learned_candidate(context, selected_engine, assessments)
     eligible = [item for item in assessments if item.get("eligible")]
     if not eligible:
         return {
@@ -244,7 +176,6 @@ def run_selection_policy(cfg: dict[str, Any]) -> dict[str, Any]:
             "state": {**base_state, **robust_state},
             "rollback_gate": rollback,
             "challengers": assessments,
-            "qualification_candidate_rotation": candidate_rotation,
         }
 
     winner = max(
@@ -267,7 +198,6 @@ def run_selection_policy(cfg: dict[str, Any]) -> dict[str, Any]:
         "winner": winner,
         "state": state,
         "challengers": assessments,
-        "qualification_candidate_rotation": candidate_rotation,
         "physical_writes_enabled": False,
     }
 
