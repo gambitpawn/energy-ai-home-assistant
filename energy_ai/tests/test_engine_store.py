@@ -30,11 +30,10 @@ class EngineStoreTests(unittest.TestCase):
         )
 
     def _decision(self, engine_input, engine_id="deterministic_v35"):
-        family = "deterministic" if engine_id == "deterministic_v35" else "neural"
         return EngineDecision(
             engine_id=engine_id,
             engine_version="3.5" if engine_id == "deterministic_v35" else "1",
-            family=family,
+            family="deterministic",
             information_vintage_id=engine_input.information_vintage_id,
             generated_at=engine_input.generated_at,
             decision_start=engine_input.decision_start,
@@ -49,19 +48,22 @@ class EngineStoreTests(unittest.TestCase):
                 engine_input = self._input()
                 decisions = [
                     self._decision(engine_input, "deterministic_v35"),
-                    self._decision(engine_input, "neural_v1"),
+                    self._decision(engine_input, "deterministic_refined_v1"),
                 ]
                 self.assertEqual(insert_engine_run(engine_input, decisions), 2)
                 latest = latest_engine_decisions(1)
                 self.assertIn("deterministic_v35", latest)
-                self.assertIn("neural_v1", latest)
+                self.assertIn("deterministic_refined_v1", latest)
                 rows = competition_rows(
                     "2026-08-27T08:00:00+00:00",
                     "2026-08-27T08:15:00+00:00",
                 )
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["information_vintage_id"], engine_input.information_vintage_id)
-                self.assertEqual(set(rows[0]["decisions"]), {"deterministic_v35", "neural_v1"})
+                self.assertEqual(
+                    set(rows[0]["decisions"]),
+                    {"deterministic_v35", "deterministic_refined_v1"},
+                )
 
     def test_store_rejects_mismatched_information_vintage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,9 +71,9 @@ class EngineStoreTests(unittest.TestCase):
             with patch("app.engine_store.DB_PATH", db):
                 engine_input = self._input()
                 bad = EngineDecision(
-                    engine_id="neural_v1",
+                    engine_id="deterministic_refined_v1",
                     engine_version="1",
-                    family="neural",
+                    family="deterministic",
                     information_vintage_id="different-vintage",
                     generated_at=engine_input.generated_at,
                     decision_start=engine_input.decision_start,
