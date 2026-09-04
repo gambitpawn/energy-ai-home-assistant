@@ -66,12 +66,17 @@ def test_worker_remains_single_and_jobs_are_serialized_by_existing_lock():
     assert "ProcessPoolExecutor" not in source
 
 
-def test_worker_is_forked_after_model_patches_but_before_persistent_lifecycle_wrapper():
+def test_worker_is_forked_after_active_model_patches_but_before_persistent_lifecycle_wrapper():
     source = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
     worker = source.index("MAINTENANCE_PROCESS = install_process_worker(app=app)")
-    last_model_patch = source.index("install_gradient_runtime_patch(base.core.cfg)")
+    stochastic_patch = source.index("install_stochastic_runtime_patch(base.core.cfg)")
+    refined_patch = source.index("install_refined_runtime_patch(base.core.cfg)")
     persistent = source.index("PERSISTENT_OPERATING_MODE = install_persistent_operating_mode(")
-    assert last_model_patch < worker < persistent
+
+    assert stochastic_patch < worker
+    assert refined_patch < worker < persistent
+    assert "install_gradient_runtime_patch(base.core.cfg)" not in source
+    assert "install_hybrid_runtime_patch(base.core.cfg)" not in source
 
 
 def test_worker_shutdown_is_inside_persistent_clean_shutdown_order():

@@ -13,14 +13,19 @@ def test_operator_selection_defaults_to_auto_and_persists_manual_choice(tmp_path
     monkeypatch.setattr(
         eos,
         "registered_engine_ids",
-        lambda: ["deterministic_v35", "adaptive_deterministic_v1", "neural_v1", "hybrid_v1"],
+        lambda: [
+            "deterministic_v35",
+            "adaptive_deterministic_v1",
+            "deterministic_refined_v1",
+            "stochastic_deterministic_v1",
+        ],
     )
 
     assert eos.operator_preference()["selection"] == "auto"
-    saved = eos.set_operator_preference("hybrid_v1")
+    saved = eos.set_operator_preference("adaptive_deterministic_v1")
     assert saved["mode"] == "manual"
-    assert saved["manual_engine_id"] == "hybrid_v1"
-    assert eos.operator_preference()["selection"] == "hybrid_v1"
+    assert saved["manual_engine_id"] == "adaptive_deterministic_v1"
+    assert eos.operator_preference()["selection"] == "adaptive_deterministic_v1"
 
     auto = eos.set_operator_preference("auto")
     assert auto["mode"] == "auto"
@@ -45,7 +50,7 @@ def test_manual_routing_is_a_wrapper_and_auto_delegates_unchanged(monkeypatch):
         monkeypatch.setattr(
             eos,
             "operator_preference",
-            lambda: {"mode": "manual", "manual_engine_id": "neural_v1"},
+            lambda: {"mode": "manual", "manual_engine_id": "adaptive_deterministic_v1"},
         )
         monkeypatch.setattr(
             eos,
@@ -57,7 +62,11 @@ def test_manual_routing_is_a_wrapper_and_auto_delegates_unchanged(monkeypatch):
             },
         )
         routed = eos.selector.route_selected_decision({}, "v2", "t2")
-        assert routed == {"path": "manual", "engine": "neural_v1", "vintage": "v2"}
+        assert routed == {
+            "path": "manual",
+            "engine": "adaptive_deterministic_v1",
+            "vintage": "v2",
+        }
     finally:
         eos.selector.route_selected_decision = original
         eos._INSTALLED = False
@@ -68,7 +77,11 @@ def test_ranking_orders_current_performance_but_keeps_qualification_status(monke
     monkeypatch.setattr(
         eos,
         "registered_engine_ids",
-        lambda: ["deterministic_v35", "adaptive_deterministic_v1", "neural_v1"],
+        lambda: [
+            "deterministic_v35",
+            "adaptive_deterministic_v1",
+            "deterministic_refined_v1",
+        ],
     )
     monkeypatch.setattr(
         eos.robust,
@@ -81,13 +94,16 @@ def test_ranking_orders_current_performance_but_keeps_qualification_status(monke
     )
     keys = {
         "adaptive_deterministic_v1": "adaptive:g1",
-        "neural_v1": "neural:r1",
+        "deterministic_refined_v1": "refined:v1",
     }
     monkeypatch.setattr(eos.robust, "_current_model_key", lambda engine: keys.get(engine))
     monkeypatch.setattr(
         eos.robust,
         "_disqualification_status",
-        lambda context, engine, key: {"quarantine_active": False, "qualification_not_before": None},
+        lambda context, engine, key: {
+            "quarantine_active": False,
+            "qualification_not_before": None,
+        },
     )
 
     def pairs(context, challenger, challenger_key, incumbent, incumbent_key, *, limit, not_before=None):
@@ -105,32 +121,46 @@ def test_ranking_orders_current_performance_but_keeps_qualification_status(monke
     monkeypatch.setattr(
         eos.robust,
         "_robust_promotion_gate",
-        lambda *args, **kwargs: {"eligible": False, "reason": "insufficient complete qualification days"},
+        lambda *args, **kwargs: {
+            "eligible": False,
+            "reason": "insufficient complete qualification days",
+        },
     )
 
     ranking = eos.race_ranking({})["rows"]
     assert [row["engine_id"] for row in ranking] == [
         "adaptive_deterministic_v1",
         "deterministic_v35",
-        "neural_v1",
+        "deterministic_refined_v1",
     ]
     assert ranking[0]["relative_improvement_fraction"] > 0
     assert ranking[0]["qualification_state"] == "evaluating"
     assert ranking[2]["relative_improvement_fraction"] < 0
 
 
-def test_models_extension_uses_named_series_and_leaves_overview_outside_extension():
-    source = (ROOT / "app" / "ui_model_control.py").read_text(encoding="utf-8")
-    assert "label:modelDisplayName(id)" in source
-    assert "name:id" not in source
-    assert "Control engine" in source
-    assert "Current model ranking" in source
-    assert "Manual engine selection does not change this Auto ranking" in source
-    assert "overviewPlan" not in source
+def test_models_ui_uses_registry_names_and_keeps_control_ranking_separate():
+    models_source = (ROOT / "app" / "ui_models.py").read_text(encoding="utf-8")
+    control_source = (ROOT / "app" / "ui_model_control.py").read_text(encoding="utf-8")
+
+    assert "function modelsName(m){return m.display_name||m.engine_id||'—'}" in models_source
+    assert "${modelsName(m)}" in models_source
+    assert "registry_status()" in models_source
+    assert "Control engine" in control_source
+    assert "Current model ranking" in control_source
+    assert "Manual engine selection does not change this Auto ranking" in control_source
+    assert "renderModels=function" not in control_source
+    assert "overviewPlan" not in control_source
 
 
-def test_runtime_installs_operator_routing_before_hybrid_wrapper():
+def test_runtime_installs_operator_routing_without_retired_ml_wrappers():
     source = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
     operator_pos = source.index("install_operator_engine_routing()")
-    hybrid_pos = source.index("install_hybrid_runtime_patch(base.core.cfg)")
-    assert operator_pos < hybrid_pos
+    stochastic_pos = source.index("install_stochastic_runtime_patch(base.core.cfg)")
+    refined_pos = source.index("install_refined_runtime_patch(base.core.cfg)")
+
+    assert operator_pos < stochastic_pos
+    assert operator_pos < refined_pos
+    assert "install_hybrid_runtime_patch(base.core.cfg)" not in source
+    assert "install_gradient_runtime_patch(base.core.cfg)" not in source
+    assert "install_qualification_candidate_runtime()" not in source
+    assert "install_gradient_qualification_runtime()" not in source

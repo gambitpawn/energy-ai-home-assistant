@@ -18,8 +18,10 @@ MODELS_CONTROL_EXTENSION = r'''
 @media(max-width:850px){.ranking-row{grid-template-columns:38px 1fr 1fr}.ranking-row .ranking-extra{grid-column:2/-1}.model-control-card{align-items:flex-start}}
 </style>
 <script>
-const MODEL_LABELS={deterministic_v35:'Deterministic v3.5',adaptive_deterministic_v1:'Adaptive deterministic',neural_v1:'Neural v1',hybrid_v1:'Hybrid v1'};
-function modelDisplayName(id){return MODEL_LABELS[id]||id||'—'}
+function modelDisplayName(id){
+  const model=(modelsData?.models||[]).find(x=>x.engine_id===id);
+  return model?.display_name||id||'—';
+}
 function installModelControlUi(){
   const section=$('models');if(!section||$('modelControlCard'))return;
   section.insertAdjacentHTML('afterbegin',`<div id="modelControlCard" class="card model-control-card"><div class="model-control-main"><span class="model-control-label">Control engine</span><select id="modelControlSelect" class="model-control-select"><option value="auto">Auto</option></select><span id="modelControlCurrent" class="model-current"></span></div><div id="modelControlNote" class="model-control-note">Loading engine control…</div></div><div id="modelRankingCard" class="card ranking-card"><div class="ranking-head"><div><h2 style="margin:0">Current model ranking</h2><div class="ranking-sub">Auto selector race · lower oracle regret is better</div></div><div id="rankingPolicy" class="ranking-sub"></div></div><div id="modelRanking" class="ranking-list"><div class="empty" style="height:90px">Loading ranking…</div></div><div id="rankingNote" class="model-note"></div></div>`);
@@ -34,7 +36,7 @@ function installModelControlUi(){
 function renderModelControl(d){
   if(!d)return;const sel=$('modelControlSelect');if(!sel)return;
   const choices=d.choices||[];
-  sel.innerHTML=choices.map(x=>`<option value="${esc(x.value)}" ${x.available===false?'':' '}>${esc(x.label)}${x.available===false?' · unavailable':''}</option>`).join('');
+  sel.innerHTML=choices.map(x=>`<option value="${esc(x.value)}">${esc(x.label)}${x.available===false?' · unavailable':''}</option>`).join('');
   sel.value=d.selection||'auto';
   if(d.mode==='auto'){
     $('modelControlCurrent').innerHTML=`Current: <strong>${esc(d.auto_selected_engine_label||modelDisplayName(d.auto_selected_engine_id))}</strong>`;
@@ -61,24 +63,9 @@ function renderModelRanking(d){
   }).join('');
 }
 async function loadModelRanking(){try{renderModelRanking(await api('ui/model-ranking'))}catch(e){if($('modelRanking'))$('modelRanking').innerHTML=`<div class="empty" style="height:90px">Ranking unavailable: ${esc(e.message)}</div>`}}
-
-// Models-only renderer: use semantic labels so chart tooltips never fall back to
-// "Series 1", "Series 2", etc. Overview rendering is deliberately untouched.
-renderModels=function(){
-  if(!modelData)return;
-  if(modelMode==='economic'){
-    const ids=Object.keys(modelData.economics||{}).filter(id=>modelEnabled[id]),allDates=[...new Set(ids.flatMap(id=>(modelData.economics[id]||[]).map(r=>r.date)))].sort(),palette=[C.load,C.pv,C.battery,C.price,C.gridImport];
-    const series=ids.map((id,ix)=>{const map=Object.fromEntries((modelData.economics[id]||[]).map(r=>[r.date,r.cumulative_oracle_regret_sek]));let last=0;return {label:modelDisplayName(id),kind:id,axis:'power',color:palette[ix%palette.length],on:true,values:allDates.map(d=>{if(map[d]!=null)last=Number(map[d]);return last}),width:2.4}});
-    $('modelChartTitle').textContent='Cumulative realized oracle regret';$('modelNote').textContent='SEK relative to the perfect-information oracle on the latest mature scored days. Lower is better.';lineChart($('modelChart'),series,allDates.map(d=>`${d}T12:00:00Z`));return;
-  }
-  const ids=Object.keys(modelData.behaviour||{}).filter(id=>modelEnabled[id]),all=[...new Set(ids.flatMap(id=>(modelData.behaviour[id]||[]).map(r=>r.start)))].sort(),palette=[C.load,C.pv,C.battery,C.price,C.gridImport],isSoc=modelBehaviourMetric==='soc',field=isSoc?'expected_soc_pct':'requested_action_kw';
-  const series=ids.map((id,ix)=>{const map=Object.fromEntries((modelData.behaviour[id]||[]).map(r=>[r.start,r[field]]));return {label:modelDisplayName(id),kind:id,axis:isSoc?'soc':'power',color:palette[ix%palette.length],on:true,values:all.map(t=>map[t]??null),width:2.1}});
-  $('modelChartTitle').textContent=isSoc?'Expected SOC by model':'Battery action by model';$('modelNote').textContent=isSoc?'Expected battery SOC after each model decision on the same stored information vintages.':'Positive = discharge, negative = charge. Decisions share the same stored information vintages.';lineChart($('modelChart'),series,all);
-};
-
 installModelControlUi();
-const loadModelsBeforeControl=loadModels;
-loadModels=async function(){await loadModelsBeforeControl();await Promise.all([loadModelControl(),loadModelRanking()])};
+const loadModelsWithControl=loadModels;
+loadModels=async function(){await loadModelsWithControl();await Promise.all([loadModelControl(),loadModelRanking()])};
 $('tabs')?.addEventListener('click',e=>{if(e.target.closest('.tab')?.dataset.view==='models'){loadModelControl();loadModelRanking()}});
 </script>
 '''

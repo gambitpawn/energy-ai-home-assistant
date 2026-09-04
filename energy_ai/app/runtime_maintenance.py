@@ -8,9 +8,7 @@ from . import model_selector as selector
 from .adaptive_auto import automatic_maintenance_once as adaptive_maintenance_once
 from .adaptive_learning import active_run
 from .evaluation_decomposition import run_pending_evaluation_decomposition
-from .gradient_training import automatic_maintenance_once as gradient_maintenance_once
 from .maintenance_coordination import run_low_priority
-from .neural_auto import automatic_maintenance_once as neural_maintenance_once
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .pv_auto import automatic_pv_retraining_once
 
@@ -39,31 +37,11 @@ def _seconds_until_daily_utc(*, hour: int, minute: int) -> float:
     return max(0.0, (target - now).total_seconds())
 
 
-async def _neural_loop(cfg) -> None:
-    while True:
-        await asyncio.sleep(_seconds_until_slot(minute=5))
-        try:
-            await run_low_priority("neural_maintenance", neural_maintenance_once, cfg)
-        except Exception:
-            pass
-
-
 async def _adaptive_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=20))
         try:
             await run_low_priority("adaptive_maintenance", adaptive_maintenance_once, cfg)
-        except Exception:
-            pass
-
-
-async def _gradient_loop(cfg) -> None:
-    # Neural sample collection runs first. Gradient training consumes the same
-    # current-schema teacher samples but maintains its own model revisions.
-    while True:
-        await asyncio.sleep(_seconds_until_slot(minute=35))
-        try:
-            await run_low_priority("gradient_maintenance", gradient_maintenance_once, cfg)
         except Exception:
             pass
 
@@ -90,10 +68,11 @@ async def _optimizer_day_loop(cfg) -> None:
 async def _evaluation_decomposition_loop(cfg) -> None:
     """Nightly detailed evaluation, including initial retroactive backfill.
 
-    01:50 UTC is 15 minutes after the hourly gradient job at :35 and 15 minutes
-    before the next neural job at :05. It also avoids the six-hour PV job at
-    03:50/09:50/15:50/21:50 UTC and the optimizer/selector maintenance slots.
-    In Sweden this is 02:50 CET / 03:50 CEST, safely inside the night window.
+    01:50 UTC avoids the active periodic maintenance slots while keeping detailed
+    hindsight work outside normal control-planning load. It also avoids the
+    six-hour PV retraining slots at 03:50/09:50/15:50/21:50 UTC and the
+    optimizer/selector maintenance slots. In Sweden this is
+    02:50 CET / 03:50 CEST, safely inside the night window.
 
     On the first night up to 14 historical complete days are backfilled. Each day
     is a separate low-priority job with a short pause, allowing other low-priority
@@ -157,9 +136,7 @@ async def combined_maintenance_loop(
 ) -> None:
     await asyncio.gather(
         base_loop(),
-        _neural_loop(cfg),
         _adaptive_loop(cfg),
-        _gradient_loop(cfg),
         _pv_loop(cfg),
         _optimizer_day_loop(cfg),
         _evaluation_decomposition_loop(cfg),
