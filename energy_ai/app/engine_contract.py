@@ -12,8 +12,6 @@ ENGINE_DECISION_SCHEMA = "energy_ai_engine_decision_v1"
 ENGINE_FAMILIES = {
     "deterministic",
     "adaptive_deterministic",
-    "neural",
-    "hybrid",
 }
 
 # Only ex-ante information belongs in a shared horizon. Engine outputs such as
