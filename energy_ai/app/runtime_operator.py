@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from . import engine_operator_selection as engine_operator_selection_module
 from .persistent_operating_mode import install_persistent_operating_mode, prepare_startup
 
 # Capture the persisted operator intent before runtime.py performs its mandatory
@@ -34,36 +33,11 @@ base.RUNTIME_BUILD = RELEASE_BUILD
 # any UI request; this prevents the UI from exposing stale base-runtime literals.
 base.core.cfg["runtime_build"] = RELEASE_BUILD
 app = base.app
-engine_operator_selection_module.DISPLAY_NAMES.pop("neural_v1", None)
-engine_operator_selection_module.DISPLAY_NAMES.pop("gradient_v1", None)
-engine_operator_selection_module.DISPLAY_NAMES.pop("hybrid_v1", None)
-engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
-engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
 
-# Retire the first learned-model architecture completely. This migration removes
-# its generated artifacts and comparison/qualification state before selector
-# routing is installed. The frozen deterministic baseline and adaptive learning
-# state are explicitly outside the cleanup scope.
+# Remove artifacts and selector state left by the retired learned-model
+# architecture before selector routing is installed. The frozen deterministic
+# baseline and adaptive learning state are explicitly outside the cleanup scope.
 RETIRED_ML_CLEANUP = cleanup_retired_ml()
-
-# runtime.py still contains legacy neural compatibility code because older source
-# modules are retained temporarily for migration/test compatibility. Production
-# must never execute neural inference: the quarter-refresh path consults this
-# module-global status before constructing NeuralV1Engine, so replacing it here
-# makes that path permanently non-ready without touching deterministic_v35.
-def _retired_neural_runtime_status():
-    return {
-        "engine_id": "neural_v1",
-        "retired": True,
-        "retirement_reason": "v1 learned-model architecture retired",
-        "model_exists": False,
-        "samples": 0,
-        "shadow_ready": False,
-        "active_eligible": False,
-    }
-
-
-base.neural_runtime_status = _retired_neural_runtime_status
 
 # The production overview must describe the routed/actuated control path rather
 # than the frozen base optimizer plan. install_model_routes() has already created
@@ -89,15 +63,12 @@ install_actuator_watchdog_patch()
 # are written for the same information vintage before Auto/manual routing.
 install_operator_engine_routing()
 
-# Only deterministic challengers remain in the production comparison runtime.
-# neural_v1, gradient_v1 and hybrid_v1 are intentionally not installed.
 install_stochastic_runtime_patch(base.core.cfg)
 install_refined_runtime_patch(base.core.cfg)
 
 # Fork the single maintenance process only after every active model/selector
 # runtime patch above is installed, but before FastAPI lifespan tasks or worker
-# threads start. Retired learned-model training loops are absent from the combined
-# maintenance coordinator.
+# threads start.
 MAINTENANCE_PROCESS = install_process_worker(app=app)
 
 # Pool integration starts read-only. Apply mappings verified on the installed
