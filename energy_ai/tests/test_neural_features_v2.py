@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from app.engine_contract import EngineInput
-from app.neural_features import FEATURE_NAMES, FEATURE_SCHEMA, vectorize
+from app.neural_features import FEATURE_NAMES, FEATURE_SCHEMA, feature_metadata, vectorize
 from app.neural_teacher_v2 import perfect_information_teacher_v2
 
 
-class NeuralFeaturesV2Tests(unittest.TestCase):
-    def _input(self):
+class NeuralFeaturesV3Tests(unittest.TestCase):
+    def _input(self, row_count: int = 8, varying_load: bool = False):
         rows = []
-        for i in range(8):
+        start = datetime(2026, 11, 3, 8, 0, tzinfo=timezone.utc)
+        for i in range(row_count):
             rows.append({
-                "start": f"2026-11-03T08:{i*15:02d}:00+00:00" if i < 4 else f"2026-11-03T09:{(i-4)*15:02d}:00+00:00",
-                "load_kw": 3.0,
+                "start": (start + timedelta(minutes=15 * i)).isoformat(),
+                "load_kw": float(i) if varying_load else 3.0,
                 "pv_kw": 1.0,
                 "load_uncertainty_kw": 0.3,
                 "pv_uncertainty_kw": 0.2,
@@ -93,7 +95,7 @@ class NeuralFeaturesV2Tests(unittest.TestCase):
         )
 
     def test_generalized_feature_schema_contains_installation_and_tariff(self):
-        self.assertEqual(FEATURE_SCHEMA, "neural_v1_features_v2")
+        self.assertEqual(FEATURE_SCHEMA, "neural_v1_features_v3")
         x = vectorize(self._input())
         self.assertEqual(len(x), len(FEATURE_NAMES))
         values = dict(zip(FEATURE_NAMES, x))
@@ -103,7 +105,20 @@ class NeuralFeaturesV2Tests(unittest.TestCase):
         self.assertEqual(values["consumption_demand_enabled"], 1.0)
         self.assertEqual(values["consumption_historical_peak1_kw"], 9.0)
         self.assertEqual(values["consumption_historical_peak3_kw"], 7.0)
-        self.assertEqual(values["b00_consumption_tariff_active_fraction"], 1.0)
+        self.assertEqual(values["q00_consumption_tariff_active_fraction"], 1.0)
+
+    def test_multiresolution_horizon_preserves_near_term_structure(self):
+        x = vectorize(self._input(row_count=144, varying_load=True))
+        values = dict(zip(FEATURE_NAMES, x))
+        self.assertEqual(values["q00_load_mean_kw"], 0.0)
+        self.assertEqual(values["q23_load_mean_kw"], 23.0)
+        self.assertEqual(values["h00_load_mean_kw"], 25.5)
+        self.assertEqual(values["h11_load_mean_kw"], 69.5)
+        self.assertEqual(values["b00_load_mean_kw"], 75.5)
+        self.assertEqual(values["b08_load_mean_kw"], 139.5)
+        meta = feature_metadata()
+        self.assertEqual(meta["maximum_horizon_hours"], 36.0)
+        self.assertEqual([item["block_hours"] for item in meta["horizon_layout"]], [0.25, 1.0, 2.0])
 
     @patch("app.neural_teacher_v2._solve_rows")
     @patch("app.neural_teacher_v2._actual_rows")
