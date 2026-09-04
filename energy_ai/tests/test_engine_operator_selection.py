@@ -138,14 +138,18 @@ def test_ranking_orders_current_performance_but_keeps_qualification_status(monke
     assert ranking[2]["relative_improvement_fraction"] < 0
 
 
-def test_models_extension_uses_named_series_and_leaves_overview_outside_extension():
-    source = (ROOT / "app" / "ui_model_control.py").read_text(encoding="utf-8")
-    assert "label:modelDisplayName(id)" in source
-    assert "name:id" not in source
-    assert "Control engine" in source
-    assert "Current model ranking" in source
-    assert "Manual engine selection does not change this Auto ranking" in source
-    assert "overviewPlan" not in source
+def test_models_ui_uses_registry_names_and_keeps_control_ranking_separate():
+    models_source = (ROOT / "app" / "ui_models.py").read_text(encoding="utf-8")
+    control_source = (ROOT / "app" / "ui_model_control.py").read_text(encoding="utf-8")
+
+    assert "function modelsName(m){return m.display_name||m.engine_id||'—'}" in models_source
+    assert "${modelsName(m)}" in models_source
+    assert "registry_status()" in models_source
+    assert "Control engine" in control_source
+    assert "Current model ranking" in control_source
+    assert "Manual engine selection does not change this Auto ranking" in control_source
+    assert "renderModels=function" not in control_source
+    assert "overviewPlan" not in control_source
 
 
 def test_runtime_installs_operator_routing_without_retired_ml_wrappers():
