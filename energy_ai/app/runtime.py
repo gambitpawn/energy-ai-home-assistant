@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,10 +10,6 @@ from . import flexible_loads as flexible_loads_module
 from . import load_forecast as load_forecast_module
 from . import main as core
 from . import model_selector as selector
-from . import neural_auto
-from . import neural_features as neural_features_module
-from . import neural_training as neural_training_module
-from . import neural_training_v2
 from .actuator_config import install_actuator_config
 from .actuator_diagnostics_v188 import install_actuator_diagnostics_patch
 from .actuator_physical_cap_v190 import install_physical_command_cap_patch
@@ -23,7 +17,6 @@ from .actuator_release_state import TrackedSolintegCommandAdapter, mark_release_
 from .actuator_timing_v194 import install_decision_start_scheduler
 from .adaptive_deterministic import AdaptiveDeterministicV1
 from .adaptive_learning import current_parameters, mark_orphaned_running_runs
-from .db import DB_PATH
 from .deterministic_actuator import DeterministicActuator
 from .engine_input_v2 import input_from_optimizer_plan_v2
 from .engine_registry import baseline_decision_from_plan
@@ -33,15 +26,11 @@ from .model_selector_policy import install_selector_policy_patch
 from .model_selector_robust import install_robust_selector_patch
 from .model_selector_robust_hardening import install_robust_selector_hardening
 from .model_selector_state import install_selector_state_patch
-from .neural_engine import NeuralV1Engine, neural_runtime_status
-from .neural_features import FEATURE_SCHEMA
-from .neural_teacher_v2 import LABEL_SOURCE_V2, perfect_information_teacher_v2
 from .optimizer_contract_v189 import install_optimizer_interval_contract_patch
 from .optimizer_store import insert_plan, latest_plan
 from .optimizer_v36_live import build_live_plan
 from .price_economics import install_current_economics, register_current_economics
 from .price_economics_compat import install_compatibility_patches
-from .price_economics_neural_compat import install_neural_teacher_economics
 from .price_economics_runtime import install_economics_patches
 from .production_state import mark_actuator_ready, set_mode, status as production_status
 from .replanning_config import install_replanning_config
@@ -49,7 +38,6 @@ from .runtime_maintenance import combined_maintenance_loop
 from .runtime_ui import install_runtime_ui
 from .soc_replanning import replanning_snapshot
 from .tariff_entry import app
-from .tariff_scenarios import LOCAL_TZ as TARIFF_LOCAL_TZ, _calendar_active
 from .user_override_forecast import build_override_aware_forecast
 
 RUNTIME_BUILD = "1.0.94"
@@ -59,7 +47,6 @@ CURRENT_ECONOMICS_CONFIG = install_current_economics(core.cfg)
 ECONOMICS_VERSION = register_current_economics(core.cfg)
 ECONOMICS_PATCH_STATUS = install_economics_patches(core.cfg)
 ECONOMICS_COMPAT_STATUS = install_compatibility_patches(core.cfg)
-ECONOMICS_NEURAL_STATUS = install_neural_teacher_economics(core.cfg)
 REPLANNING_CONFIG = install_replanning_config(core.cfg)
 ACTUATOR_CONFIG = install_actuator_config(core.cfg)
 ORPHANED_ADAPTIVE_RUNS_ON_STARTUP = mark_orphaned_running_runs()
@@ -70,63 +57,6 @@ install_robust_selector_patch()
 install_robust_selector_hardening()
 OPTIMIZER_INTERVAL_CONTRACT = install_optimizer_interval_contract_patch()
 
-neural_training_v2.install_into_v1_module()
-neural_training_module._perfect_information_teacher = perfect_information_teacher_v2
-neural_training_module.LABEL_SOURCE = LABEL_SOURCE_V2
-neural_auto.build_training_samples = neural_training_v2.build_training_samples
-neural_auto.sample_count = neural_training_v2.sample_count
-neural_auto.train_model = neural_training_module.train_model
-neural_auto.model_status = neural_training_module.model_status
-
-try:
-    if neural_training_module.MODEL_META_PATH.exists():
-        meta = json.loads(neural_training_module.MODEL_META_PATH.read_text(encoding="utf-8"))
-        if meta.get("feature_schema") != FEATURE_SCHEMA:
-            if neural_training_module.MODEL_PATH.exists():
-                neural_training_module.MODEL_PATH.unlink()
-            neural_training_module.MODEL_META_PATH.unlink()
-except Exception:
-    pass
-
-
-def _latest_completed_actual_start():
-    now = datetime.now(timezone.utc)
-    current_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
-    latest_allowed = current_start - timedelta(minutes=15)
-    try:
-        with sqlite3.connect(DB_PATH) as c:
-            row = c.execute(
-                "SELECT MAX(bucket_start) FROM state_15m WHERE bucket_start<=?",
-                (latest_allowed.isoformat(),),
-            ).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    if not row or not row[0]:
-        return None
-    try:
-        return neural_training_module._utc(str(row[0]))
-    except Exception:
-        return None
-
-
-neural_training_module._latest_actual_start = _latest_completed_actual_start
-
-
-def _tariff_active_fraction_local(chunk, tariff, enabled):
-    if not enabled or not chunk:
-        return 0.0
-    active = 0
-    for row in chunk:
-        try:
-            local = datetime.fromisoformat(str(row["start"]).replace("Z", "+00:00")).astimezone(TARIFF_LOCAL_TZ)
-            if _calendar_active(local, tariff, False):
-                active += 1
-        except Exception:
-            continue
-    return active / float(len(chunk))
-
-
-neural_features_module._tariff_active_fraction = _tariff_active_fraction_local
 load_forecast_module.flexible_load_forecast = build_override_aware_forecast(
     flexible_loads_module.flexible_load_forecast
 )
@@ -217,27 +147,6 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
             engine_input = input_from_optimizer_plan_v2(plan, core.cfg)
         except Exception as exc:
             return {**result, "model_selector": {"status": "failed", "error": repr(exc)}}
-
-    neural = await asyncio.to_thread(neural_runtime_status)
-    if neural.get("shadow_ready"):
-        try:
-            decision = await asyncio.to_thread(NeuralV1Engine(core.cfg).decide, engine_input)
-            await asyncio.to_thread(insert_engine_run, engine_input, [decision])
-            result["neural_v1"] = {
-                "shadow_decision": True,
-                "information_vintage_id": engine_input.information_vintage_id,
-                "decision_id": decision.decision_id,
-                "requested_action_kw": decision.requested_action_kw,
-                "confidence": decision.diagnostics.get("classification_confidence"),
-            }
-        except Exception as exc:
-            result["neural_v1"] = {"shadow_decision": False, "status": "failed", "error": repr(exc)}
-    else:
-        result["neural_v1"] = {
-            "shadow_decision": False,
-            "status": "model_not_ready",
-            "samples": neural.get("samples"),
-        }
 
     try:
         params = await asyncio.to_thread(current_parameters, "candidate")
@@ -507,7 +416,6 @@ install_runtime_routes(
     economics_version=ECONOMICS_VERSION,
     economics_patch_status=ECONOMICS_PATCH_STATUS,
     economics_compat_status=ECONOMICS_COMPAT_STATUS,
-    economics_neural_status=ECONOMICS_NEURAL_STATUS,
 )
 
 app.servers = [{"url": ".", "description": "Current Home Assistant Ingress path"}]
