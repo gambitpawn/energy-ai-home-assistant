@@ -69,9 +69,10 @@ async def _evaluation_decomposition_loop(cfg) -> None:
     """Nightly detailed evaluation, including initial retroactive backfill.
 
     01:50 UTC avoids the active periodic maintenance slots while keeping detailed
-    hindsight work outside normal control-planning load. The retired neural,
-    gradient and hybrid model families no longer schedule any sample collection,
-    training or qualification work.
+    hindsight work outside normal control-planning load. It also avoids the
+    six-hour PV retraining slots at 03:50/09:50/15:50/21:50 UTC and the
+    optimizer/selector maintenance slots. In Sweden this is
+    02:50 CET / 03:50 CEST, safely inside the night window.
 
     On the first night up to 14 historical complete days are backfilled. Each day
     is a separate low-priority job with a short pause, allowing other low-priority
