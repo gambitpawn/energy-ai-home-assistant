@@ -23,7 +23,6 @@ LIVE_SAFETY_REJECTS_IN_FIVE = 3
 ENVELOPE_TOLERANCE_KW = 0.25
 GROSS_ACTION_MULTIPLE = 2.0
 ADAPTIVE_ENGINE_ID = "adaptive_deterministic_v1"
-NEURAL_ENGINE_ID = "neural_v1"
 BASELINE_MODEL_KEY = "deterministic_v35:3.5"
 
 _INSTALLED = False
@@ -229,14 +228,6 @@ def _engine_model_key(engine_id: str, decision: dict[str, Any] | None, decision_
         return f"{ADAPTIVE_ENGINE_ID}:generation-{generation}"
     payload = decision or {}
     model = payload.get("model") or {}
-    if engine_id == NEURAL_ENGINE_ID:
-        identity = (
-            model.get("model_id")
-            or model.get("model_revision")
-            or model.get("trained_at")
-            or "unknown"
-        )
-        return f"{NEURAL_ENGINE_ID}:{identity}"
     identity = (
         model.get("model_id")
         or model.get("model_revision")
@@ -1241,9 +1232,11 @@ def selector_status(cfg: dict[str, Any]) -> dict[str, Any]:
                    FROM engine_model_generation ORDER BY engine_id,generation DESC LIMIT 20'''
             ).fetchall()
         ]
+    from .engine_registry import registry_status
     current_keys = {
-        engine_id: _current_model_key(engine_id)
-        for engine_id in (ADAPTIVE_ENGINE_ID, NEURAL_ENGINE_ID)
+        str(item["engine_id"]): _current_model_key(str(item["engine_id"]))
+        for item in registry_status().get("engines") or []
+        if item.get("engine_id") and str(item["engine_id"]) != ms.BASELINE_ENGINE_ID
     }
     return {
         **base,
