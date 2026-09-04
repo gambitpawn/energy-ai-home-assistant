@@ -35,7 +35,6 @@ def test_consolidated_runtime_imports_without_versioned_entry_chain(tmp_path):
         "/actuator/timing/status",
         "/engines",
         "/engines/selector/status",
-        "/engines/neural/status",
         "/engines/adaptive/status",
         "/optimizer/replanning/status",
         "/optimizer/contract/status",
@@ -43,3 +42,6 @@ def test_consolidated_runtime_imports_without_versioned_entry_chain(tmp_path):
         "/settings/status",
     }:
         assert required in paths
+
+    retired_paths = {path for path in paths if isinstance(path, str) and path.startswith("/engines/neural")}
+    assert retired_paths == set()
