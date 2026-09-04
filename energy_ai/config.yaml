@@ -1,5 +1,5 @@
 name: "Energy AI"
-version: "1.0.128"
+version: "1.0.129"
 slug: "energy_ai"
 description: "Energy AI forecasts, optimization, model selection and explicitly armed deterministic Solinteg actuation for Home Assistant."
 stage: experimental
@@ -232,7 +232,7 @@ schema:
   tariff_production_rate_sek_per_kw: "float(0,10000)"
   tariff_production_start_hour: "int(0,23)"
   tariff_production_end_hour: "int(1,24)"
-  tariff_production_active_months: str
+  tariff_production_active_months: "4,5,6,7,8"
   tariff_production_day_rule: str
 
   llm_enabled: bool
