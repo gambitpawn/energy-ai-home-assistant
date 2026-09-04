@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import sqlite3
 from pathlib import Path
 
@@ -8,7 +9,34 @@ from app import retired_ml_cleanup
 
 
 RETIRED = {"neural_v1", "gradient_v1", "hybrid_v1"}
-RETIRED_CODE_TOKENS = RETIRED | {"neural_", "gradient_", "hybrid_"}
+RETIRED_MODULES = {
+    "neural_auto",
+    "neural_engine",
+    "neural_features",
+    "neural_qualification",
+    "neural_teacher_v2",
+    "neural_training",
+    "neural_training_v2",
+    "gradient_engine",
+    "gradient_qualification",
+    "gradient_runtime",
+    "gradient_selector_qualification",
+    "gradient_training",
+    "hybrid_engine",
+    "hybrid_runtime",
+    "price_economics_neural_compat",
+    "ui_gradient",
+}
+RETIRED_RUNTIME_SYMBOLS = {
+    "install_hybrid_runtime_patch",
+    "install_gradient_runtime_patch",
+    "install_qualification_candidate_runtime",
+    "install_gradient_qualification_runtime",
+    "install_gradient_selector_qualification",
+    "NeuralV1Engine",
+    "neural_runtime_status",
+    "/engines/neural/",
+}
 
 
 def test_retired_learned_models_are_not_registered():
@@ -18,49 +46,55 @@ def test_retired_learned_models_are_not_registered():
     assert "adaptive_deterministic_v1" in ids
 
 
-def test_repository_has_no_retired_engine_references_outside_cleanup_contract():
+def _retired_imports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                leaf = alias.name.rsplit(".", 1)[-1]
+                if leaf in RETIRED_MODULES:
+                    found.add(leaf)
+        elif isinstance(node, ast.ImportFrom):
+            module_leaf = (node.module or "").rsplit(".", 1)[-1]
+            if module_leaf in RETIRED_MODULES:
+                found.add(module_leaf)
+            for alias in node.names:
+                if alias.name in RETIRED_MODULES:
+                    found.add(alias.name)
+    return sorted(found)
+
+
+def test_repository_has_no_retired_engine_or_module_references_outside_cleanup_contract():
     root = Path(__file__).resolve().parents[1]
     violations: list[str] = []
 
-    for path in sorted((root / "app").glob("*.py")):
-        if path.name == "retired_ml_cleanup.py":
+    paths = [*sorted((root / "app").glob("*.py")), *sorted((root / "tests").glob("test_*.py"))]
+    for path in paths:
+        if path == Path(__file__) or path.name == "retired_ml_cleanup.py":
             continue
         source = path.read_text(encoding="utf-8")
-        found = sorted(token for token in RETIRED_CODE_TOKENS if token in source)
-        if found:
-            violations.append(f"app/{path.name}: {', '.join(found)}")
+        rel = path.relative_to(root)
 
-    for path in sorted((root / "tests").glob("test_*.py")):
-        if path.name == Path(__file__).name:
-            continue
-        source = path.read_text(encoding="utf-8")
-        found = sorted(token for token in RETIRED_CODE_TOKENS if token in source)
-        if found:
-            violations.append(f"tests/{path.name}: {', '.join(found)}")
+        retired_ids = sorted(token for token in RETIRED if token in source)
+        if retired_ids:
+            violations.append(f"{rel}: retired engine ids: {', '.join(retired_ids)}")
 
-    assert violations == [], "Retired ML code references remain:\n" + "\n".join(violations)
+        retired_imports = _retired_imports(path)
+        if retired_imports:
+            violations.append(f"{rel}: retired module imports: {', '.join(retired_imports)}")
+
+        if path.parent.name == "app":
+            retired_symbols = sorted(token for token in RETIRED_RUNTIME_SYMBOLS if token in source)
+            if retired_symbols:
+                violations.append(f"{rel}: retired runtime symbols: {', '.join(retired_symbols)}")
+
+    assert violations == [], "Retired ML references remain:\n" + "\n".join(violations)
 
 
 def test_retired_source_modules_are_physically_absent():
     root = Path(__file__).resolve().parents[1] / "app"
-    retired_module_files = {
-        "neural_auto.py",
-        "neural_engine.py",
-        "neural_features.py",
-        "neural_qualification.py",
-        "neural_teacher_v2.py",
-        "neural_training.py",
-        "neural_training_v2.py",
-        "gradient_engine.py",
-        "gradient_qualification.py",
-        "gradient_runtime.py",
-        "gradient_selector_qualification.py",
-        "gradient_training.py",
-        "hybrid_engine.py",
-        "hybrid_runtime.py",
-        "price_economics_neural_compat.py",
-        "ui_gradient.py",
-    }
+    retired_module_files = {f"{name}.py" for name in RETIRED_MODULES}
     present = sorted(path.name for path in root.iterdir() if path.name in retired_module_files)
     assert present == []
 
@@ -71,16 +105,7 @@ def test_runtime_does_not_install_or_shim_retired_model_paths():
     runtime = (root / "app" / "runtime.py").read_text(encoding="utf-8")
     routes = (root / "app" / "runtime_routes.py").read_text(encoding="utf-8")
     combined = operator + runtime + routes
-    for token in (
-        "install_hybrid_runtime_patch",
-        "install_gradient_runtime_patch",
-        "install_qualification_candidate_runtime",
-        "install_gradient_qualification_runtime",
-        "install_gradient_selector_qualification",
-        "NeuralV1Engine",
-        "neural_runtime_status",
-        "/engines/neural/",
-    ):
+    for token in RETIRED_RUNTIME_SYMBOLS:
         assert token not in combined
 
 
