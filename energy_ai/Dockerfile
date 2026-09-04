@@ -26,6 +26,9 @@ RUN python3 -m venv --system-site-packages /opt/energy-ai/venv \
     && /opt/energy-ai/venv/bin/pip install --no-cache-dir -r /opt/energy-ai/requirements.txt \
     && /opt/energy-ai/venv/bin/python -c "import numpy, scipy, sklearn; print('ML stack:', numpy.__version__, scipy.__version__, sklearn.__version__)"
 
+# Keep the Home Assistant app manifest available at runtime as the canonical
+# fallback release source when BUILD_VERSION is not injected by the builder.
+COPY config.yaml /opt/energy-ai/config.yaml
 COPY app /opt/energy-ai/app
 COPY run.sh /run.sh
 
