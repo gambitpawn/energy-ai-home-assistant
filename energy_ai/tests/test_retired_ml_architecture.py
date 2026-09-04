@@ -17,6 +17,53 @@ def test_retired_learned_models_are_not_registered():
     assert "adaptive_deterministic_v1" in ids
 
 
+def test_repository_has_no_retired_engine_references_outside_cleanup_contract():
+    root = Path(__file__).resolve().parents[1]
+    violations: list[str] = []
+
+    for path in sorted((root / "app").glob("*.py")):
+        if path.name == "retired_ml_cleanup.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        found = sorted(token for token in RETIRED if token in source)
+        if found:
+            violations.append(f"app/{path.name}: {', '.join(found)}")
+
+    for path in sorted((root / "tests").glob("test_*.py")):
+        if path.name == Path(__file__).name:
+            continue
+        source = path.read_text(encoding="utf-8")
+        found = sorted(token for token in RETIRED if token in source)
+        if found:
+            violations.append(f"tests/{path.name}: {', '.join(found)}")
+
+    assert violations == [], "Retired engine references remain:\n" + "\n".join(violations)
+
+
+def test_retired_source_modules_are_physically_absent():
+    root = Path(__file__).resolve().parents[1] / "app"
+    retired_module_files = {
+        "neural_auto.py",
+        "neural_engine.py",
+        "neural_features.py",
+        "neural_qualification.py",
+        "neural_teacher_v2.py",
+        "neural_training.py",
+        "neural_training_v2.py",
+        "gradient_engine.py",
+        "gradient_qualification.py",
+        "gradient_runtime.py",
+        "gradient_selector_qualification.py",
+        "gradient_training.py",
+        "hybrid_engine.py",
+        "hybrid_runtime.py",
+        "price_economics_neural_compat.py",
+        "ui_gradient.py",
+    }
+    present = sorted(path.name for path in root.iterdir() if path.name in retired_module_files)
+    assert present == []
+
+
 def test_runtime_does_not_install_or_shim_retired_model_paths():
     root = Path(__file__).resolve().parents[1]
     operator = (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
