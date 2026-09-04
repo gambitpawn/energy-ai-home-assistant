@@ -15,17 +15,10 @@ from .adaptive_learning import active_run, current_parameters, latest_learning_s
 from .adaptive_replay import build_daily_evaluator
 from .app_comparison_v2 import compare_app_vs_planner
 from .engine_contract import ENGINE_DECISION_SCHEMA, ENGINE_INPUT_SCHEMA
-from .engine_input_v2 import input_from_optimizer_plan_v2
 from .engine_registry import BASELINE_ENGINE_ID, baseline_decision_from_plan, registry_status
 from .engine_store import latest_engine_decisions
 from .historical_closed_loop import replay_regression
 from .historical_closed_loop_v2 import compare_closed_loop
-from .neural_auto import automatic_maintenance_once as neural_maintenance_once, automatic_status as neural_auto_status
-from .neural_engine import neural_runtime_status
-from .neural_features import feature_metadata
-from .neural_teacher_v2 import LABEL_SOURCE_V2
-from .neural_training import build_training_samples, model_history, train_model
-from .neural_training_v2 import training_maturity_status
 from .optimizer_contract_v189 import contract_status
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .optimizer_store import latest_plan
@@ -70,7 +63,6 @@ def install_runtime_routes(
     economics_version: Any,
     economics_patch_status: Any,
     economics_compat_status: Any,
-    economics_neural_status: Any,
 ) -> None:
     # ---- Optimizer evaluation / diagnostics ---------------------------------
     @app.get("/optimizer/evaluation/evaluate-now", tags=["optimizer-evaluation"], summary="Evaluate matured optimizer days")
@@ -156,13 +148,8 @@ def install_runtime_routes(
     async def engines_registry():
         data = registry_status()
         selection = await asyncio.to_thread(selector.selector_status, core.cfg)
-        neural = await asyncio.to_thread(neural_runtime_status)
         selected_engine = (selection.get("state") or {}).get("selected_engine_id")
         for item in data.get("engines") or []:
-            if item.get("engine_id") == "neural_v1":
-                item["available"] = bool(neural.get("shadow_ready"))
-                item["learning_enabled"] = bool(neural.get("model_exists"))
-                item["runtime_status"] = neural
             item["logical_control_selected"] = item.get("engine_id") == selected_engine
         data["selection"] = {"logical_control_selection_enabled": True, "selected_engine_id": selected_engine, "selected_model_key": selection.get("selected_model_key"), "fallback_engine_id": BASELINE_ENGINE_ID, "selection_mode": "robust_10_day_promotion_with_live_disqualification", "requires_downstream_deterministic_safety": True}
         return data
@@ -183,46 +170,6 @@ def install_runtime_routes(
     @app.get("/engines/history", tags=["engines"])
     async def engines_history(limit_per_engine: int = Query(1, ge=1, le=100)):
         return {"baseline_engine_id": BASELINE_ENGINE_ID, "decisions": await asyncio.to_thread(latest_engine_decisions, limit_per_engine)}
-
-    @app.get("/engines/neural/status", tags=["engines-neural"])
-    async def neural_status(): return await asyncio.to_thread(neural_runtime_status)
-
-    @app.get("/engines/neural/maturity", tags=["engines-neural"])
-    async def neural_maturity(candidate_limit: int = Query(2000, ge=10, le=10000)):
-        return await asyncio.to_thread(training_maturity_status, core.cfg, candidate_limit)
-
-    @app.get("/engines/neural/features", tags=["engines-neural"])
-    async def neural_features(): return {**feature_metadata(), "label_source": LABEL_SOURCE_V2, "installation_profile_included": True, "demand_tariff_state_included": True}
-
-    @app.get("/engines/neural/input/latest", tags=["engines-neural"])
-    async def neural_input_latest(include_horizon: bool = False):
-        plan = await asyncio.to_thread(latest_plan, 500)
-        return input_from_optimizer_plan_v2(plan, core.cfg).as_dict(include_horizon=include_horizon)
-
-    @app.post("/engines/neural/build-samples", tags=["engines-neural"])
-    async def neural_build_samples(max_new: int = Query(32, ge=1, le=256), candidate_limit: int = Query(1500, ge=10, le=10000)):
-        return await asyncio.to_thread(build_training_samples, core.cfg, max_new, candidate_limit)
-
-    @app.post("/engines/neural/train", tags=["engines-neural"])
-    async def neural_train(): return await asyncio.to_thread(train_model)
-
-    @app.post("/engines/neural/bootstrap", tags=["engines-neural"])
-    async def neural_bootstrap(max_new: int = Query(64, ge=1, le=256), candidate_limit: int = Query(2000, ge=10, le=10000)):
-        samples = await asyncio.to_thread(build_training_samples, core.cfg, max_new, candidate_limit); training = await asyncio.to_thread(train_model)
-        return {"samples": samples, "training": training, "status": await asyncio.to_thread(neural_runtime_status)}
-
-    @app.get("/engines/neural/latest", tags=["engines-neural"])
-    async def neural_latest(limit: int = Query(5, ge=1, le=100)):
-        decisions = await asyncio.to_thread(latest_engine_decisions, limit); return {"engine_id": "neural_v1", "decisions": decisions.get("neural_v1") or []}
-
-    @app.get("/engines/neural/auto/status", tags=["engines-neural"])
-    async def neural_auto_status_route(): return await asyncio.to_thread(neural_auto_status)
-
-    @app.post("/engines/neural/auto/run", tags=["engines-neural"])
-    async def neural_auto_run(): return await asyncio.to_thread(neural_maintenance_once, core.cfg)
-
-    @app.get("/engines/neural/models", tags=["engines-neural"])
-    async def neural_models(limit: int = Query(20, ge=1, le=100)): return {"engine_id": "neural_v1", "models": await asyncio.to_thread(model_history, limit)}
 
     @app.get("/engines/adaptive/status", tags=["engines-adaptive"])
     async def adaptive_status(): return await asyncio.to_thread(adaptive_auto_status)
@@ -267,7 +214,7 @@ def install_runtime_routes(
 
     @app.get("/economics/status", tags=["economics"])
     async def economics_status_route():
-        return {"ok": True, "runtime_build": runtime_build, "default_replay_mode": CURRENT_ECONOMICS, "historical_replay_mode": HISTORICAL_ECONOMICS, "current": economics_payload(core.cfg), "signature": economics_signature(core.cfg), "registered_version": economics_version, "runtime_patches": economics_patch_status, "compatibility_patches": economics_compat_status, "neural_teacher_patches": economics_neural_status}
+        return {"ok": True, "runtime_build": runtime_build, "default_replay_mode": CURRENT_ECONOMICS, "historical_replay_mode": HISTORICAL_ECONOMICS, "current": economics_payload(core.cfg), "signature": economics_signature(core.cfg), "registered_version": economics_version, "runtime_patches": economics_patch_status, "compatibility_patches": economics_compat_status}
 
     @app.get("/economics/versions", tags=["economics"])
     async def economics_version_history(limit: int = Query(50, ge=1, le=500)): return {"versions": economics_versions(limit), "default_training_mode": CURRENT_ECONOMICS}
