@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from app.release_version import RELEASE_VERSION
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -37,8 +39,11 @@ def test_runtime_operator_persistent_mode_call_matches_function_signature():
 def test_runtime_and_addon_versions_match_without_hardcoding_release():
     runtime = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
     config = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    release_line = next(line for line in runtime.splitlines() if line.startswith("RELEASE_BUILD = "))
-    release = release_line.split("=", 1)[1].strip().strip('"')
     version_line = next(line for line in config.splitlines() if line.startswith("version: "))
     version = version_line.split(":", 1)[1].strip().strip('"')
-    assert release == version
+
+    assert RELEASE_VERSION == version
+    assert "from .release_version import RELEASE_VERSION" in runtime
+    assert "RELEASE_BUILD = RELEASE_VERSION" in runtime
+    assert 'base.core.cfg["runtime_build"] = RELEASE_BUILD' in runtime
+    assert 'RELEASE_BUILD = "' not in runtime
