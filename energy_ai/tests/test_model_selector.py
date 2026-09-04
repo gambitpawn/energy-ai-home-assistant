@@ -108,7 +108,6 @@ def test_tail_regression_blocks_promotion(selector_db):
     for n in range(ms.MIN_PROMOTION_DAYS):
         day = (start + timedelta(days=n)).isoformat()
         _insert_score(selector_db, context, day, ms.BASELINE_ENGINE_ID, 10.0, p90=10.0)
-        # Strong average on most days but severe bad-day tail.
         challenger = 4.0 if n < ms.MIN_PROMOTION_DAYS - 2 else 30.0
         _insert_score(selector_db, context, day, "adaptive_deterministic_v1", challenger, p90=challenger)
 
@@ -156,11 +155,12 @@ def test_context_change_resets_selection_without_sqlite_lock(selector_db):
 
 def test_missing_selected_decision_routes_to_baseline(selector_db):
     cfg = _cfg()
+    selected = "deterministic_refined_v1"
     ms.ensure_selector_state(cfg)
     with sqlite3.connect(selector_db) as c:
         c.execute(
             "UPDATE engine_selector_state SET selected_engine_id=? WHERE singleton=1",
-            ("neural_v1",),
+            (selected,),
         )
         c.execute(
             '''CREATE TABLE engine_decision(
@@ -180,7 +180,7 @@ def test_missing_selected_decision_routes_to_baseline(selector_db):
             ),
         )
     routed = ms.route_selected_decision(cfg, "v1", "2026-08-27T12:00:00+00:00")
-    assert routed["configured_selected_engine_id"] == "neural_v1"
+    assert routed["configured_selected_engine_id"] == selected
     assert routed["routed_engine_id"] == ms.BASELINE_ENGINE_ID
     assert routed["fallback_used"] is True
 
