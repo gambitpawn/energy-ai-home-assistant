@@ -16,8 +16,8 @@ AUTO_SELECTION = "auto"
 DISPLAY_NAMES = {
     "deterministic_v35": "Deterministic v3.5",
     "adaptive_deterministic_v1": "Adaptive deterministic",
-    "neural_v1": "Neural v1",
-    "hybrid_v1": "Hybrid v1",
+    "deterministic_refined_v1": "Refined deterministic",
+    "stochastic_deterministic_v1": "Stochastic deterministic",
 }
 
 _INSTALLED = False
