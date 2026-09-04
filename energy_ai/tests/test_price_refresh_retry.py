@@ -10,6 +10,7 @@ import pytest
 from app import db
 from app import main as core
 from app.ha import HomeAssistantClient
+from app.release_version import RELEASE_VERSION
 
 
 LOCAL_TZ = ZoneInfo("Europe/Stockholm")
@@ -262,7 +263,9 @@ def test_release_version_is_current():
     config = (root / "config.yaml").read_text(encoding="utf-8")
     runtime = (root / "app" / "runtime_operator.py").read_text(encoding="utf-8")
     config_match = re.search(r'^version:\s*"([^"]+)"', config, re.MULTILINE)
-    runtime_match = re.search(r'^RELEASE_BUILD\s*=\s*"([^"]+)"', runtime, re.MULTILINE)
     assert config_match is not None
-    assert runtime_match is not None
-    assert config_match.group(1) == runtime_match.group(1)
+    assert RELEASE_VERSION == config_match.group(1)
+    assert "from .release_version import RELEASE_VERSION" in runtime
+    assert "RELEASE_BUILD = RELEASE_VERSION" in runtime
+    assert 'base.core.cfg["runtime_build"] = RELEASE_BUILD' in runtime
+    assert re.search(r'^RELEASE_BUILD\s*=\s*"', runtime, re.MULTILINE) is None

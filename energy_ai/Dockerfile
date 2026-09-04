@@ -2,6 +2,10 @@ ARG BUILD_VERSION
 ARG BUILD_ARCH
 FROM ghcr.io/home-assistant/base:3.22
 
+ARG BUILD_VERSION
+ARG BUILD_ARCH
+ENV ENERGY_AI_VERSION="${BUILD_VERSION}"
+
 LABEL \
   io.hass.version="${BUILD_VERSION}" \
   io.hass.type="app" \

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import app.persistent_operating_mode as pom
 import app.production_state as production_state
+from app.release_version import RELEASE_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -119,9 +120,13 @@ def test_manual_mode_intent_is_persisted_only_after_successful_transition():
 def test_notification_parameters_and_release_metadata_remain_consistent():
     source = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
     config = (ROOT / "config.yaml").read_text(encoding="utf-8")
-    runtime_version = re.search(r'RELEASE_BUILD = "([^"]+)"', source).group(1)
-    config_version = re.search(r'^version: "([^"]+)"', config, re.MULTILINE).group(1)
-    assert runtime_version == config_version
+    config_match = re.search(r'^version: "([^"]+)"', config, re.MULTILINE)
+    assert config_match is not None
+    assert RELEASE_VERSION == config_match.group(1)
+    assert "from .release_version import RELEASE_VERSION" in source
+    assert "RELEASE_BUILD = RELEASE_VERSION" in source
+    assert 'base.core.cfg["runtime_build"] = RELEASE_BUILD' in source
+    assert 'RELEASE_BUILD = "' not in source
     assert '"fault_notification_enabled"' in source
     assert '"fault_notification_service"' in source
     assert '"fault_notification_target"' in source
