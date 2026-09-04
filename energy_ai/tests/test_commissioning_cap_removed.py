@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app import actuator_config
 from app.actuator_physical_cap_v190 import apply_physical_command_cap, install_physical_command_cap_patch
+from app.release_version import RELEASE_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,10 +15,9 @@ def _release_versions() -> tuple[str, str]:
     config = (ROOT / "config.yaml").read_text(encoding="utf-8")
     runtime = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
     config_match = re.search(r'^version:\s*"([^"]+)"', config, re.MULTILINE)
-    runtime_match = re.search(r'^RELEASE_BUILD\s*=\s*"([^"]+)"', runtime, re.MULTILINE)
     assert config_match is not None
-    assert runtime_match is not None
-    return config_match.group(1), runtime_match.group(1)
+    assert "RELEASE_BUILD = RELEASE_VERSION" in runtime
+    return config_match.group(1), RELEASE_VERSION
 
 
 def test_retired_cap_is_a_noop_even_if_legacy_value_is_two_kw():
