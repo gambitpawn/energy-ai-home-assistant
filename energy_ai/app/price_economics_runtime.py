@@ -465,16 +465,7 @@ def _reset_learning_epoch_if_needed(cfg: dict[str, Any]) -> dict[str, Any]:
         try: old=json.loads(ECONOMICS_EPOCH_PATH.read_text(encoding="utf-8"))
         except Exception: old={}
     if old.get("signature")==sig: return {"changed":False,"signature":sig,"previous_signature":old.get("signature")}
-    neural_samples=adaptive_runs=0
-    try:
-        from . import neural_training as nt
-        nt._init_tables()
-        with sqlite3.connect(nt.DB_PATH) as c:
-            neural_samples=int(c.execute("SELECT COUNT(*) FROM neural_training_sample").fetchone()[0]); c.execute("DELETE FROM neural_training_sample")
-        for path in (nt.MODEL_PATH,nt.MODEL_META_PATH):
-            try: path.unlink(missing_ok=True)
-            except Exception: pass
-    except Exception: pass
+    adaptive_runs=0
     try:
         from . import adaptive_learning as al
         al.init_adaptive_learning_store()
@@ -482,24 +473,9 @@ def _reset_learning_epoch_if_needed(cfg: dict[str, Any]) -> dict[str, Any]:
             adaptive_runs=int(c.execute("SELECT COUNT(*) FROM adaptive_learning_run WHERE status='complete'").fetchone()[0]); c.execute("UPDATE adaptive_learning_run SET status='superseded_economics' WHERE status='complete'")
         al.persist_parameters(al.DEFAULT_PARAMETERS,"candidate",score_ore=None,source_run_id=None)
     except Exception: pass
-    state={"signature":sig,"previous_signature":old.get("signature"),"changed_at":datetime.now(timezone.utc).isoformat(),"neural_samples_invalidated":neural_samples,"adaptive_complete_runs_superseded":adaptive_runs,"semantics":"historical physical/forecast/spot data retained; learned labels/parameters are rebuilt under current economics"}
+    state={"signature":sig,"previous_signature":old.get("signature"),"changed_at":datetime.now(timezone.utc).isoformat(),"adaptive_complete_runs_superseded":adaptive_runs,"semantics":"historical physical/forecast/spot data retained; adaptive learned parameters are rebuilt under current economics"}
     ECONOMICS_EPOCH_PATH.parent.mkdir(parents=True,exist_ok=True); ECONOMICS_EPOCH_PATH.write_text(json.dumps(state,indent=2),encoding="utf-8")
     return {"changed":True,**state}
-
-
-def _patch_neural_candidates(cfg: dict[str, Any]):
-    from . import neural_training as nt
-    from .engine_contract import EngineInput
-    from .engine_input_v2 import enriched_common_objective
-    original=nt._candidate_inputs
-    def wrapped(local_cfg: dict[str, Any], limit: int = 1000):
-        candidates,diag=original(local_cfg,limit); out=[]
-        for item in candidates:
-            objective=enriched_common_objective(local_cfg,item.decision_start,item.generated_at)
-            out.append(EngineInput(generated_at=item.generated_at,decision_start=item.decision_start,initial_soc_pct=item.initial_soc_pct,interval_minutes=item.interval_minutes,horizon_rows=item.horizon_rows,constraints=item.constraints,objective=objective,source={**item.source,"economics_repriced":CURRENT_ECONOMICS}))
-        diag={**diag,"economics_repricing":CURRENT_ECONOMICS,"economics_signature":economics_signature(local_cfg)}
-        return out,diag
-    nt._candidate_inputs=wrapped
 
 
 def install_economics_patches(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -539,6 +515,5 @@ def install_economics_patches(cfg: dict[str, Any]) -> dict[str, Any]:
         self.reference_price_ore_kwh=float(median([_price(r,self.cfg)["effective_import_price_ore_kwh"] for r in self.rows]))
     ar.DailyReplayEvaluator.__post_init__=replay_post
 
-    _patch_neural_candidates(cfg)
     epoch=_reset_learning_epoch_if_needed(cfg)
-    return {"installed":True,"pricing_model":economics_payload(cfg).get("pricing_model"),"economics_signature":economics_signature(cfg),"learning_epoch":epoch,"patched_paths":["optimizer","optimizer_v35_replay","adaptive_deterministic","adaptive_replay","optimizer_evaluation","historical_closed_loop","tariff_scenarios","monthly_replay","app_comparison","engine_contract","engine_input_v2","neural_training"]}
+    return {"installed":True,"pricing_model":economics_payload(cfg).get("pricing_model"),"economics_signature":economics_signature(cfg),"learning_epoch":epoch,"patched_paths":["optimizer","optimizer_v35_replay","adaptive_deterministic","adaptive_replay","optimizer_evaluation","historical_closed_loop","tariff_scenarios","monthly_replay","app_comparison","engine_contract","engine_input_v2"]}
