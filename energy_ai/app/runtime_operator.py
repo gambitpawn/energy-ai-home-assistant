@@ -32,12 +32,17 @@ from .neural_qualification import (
 from .operator_mode_control import install_operator_mode_control
 from .pool import install_pool_routes
 from .pool_installation_profile import install_pool_installation_profile
+from .release_version import RELEASE_VERSION
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_control_truth import decision_summary as control_truth_decision_summary
 
-RELEASE_BUILD = "1.0.126"
+RELEASE_BUILD = RELEASE_VERSION
 base.RUNTIME_BUILD = RELEASE_BUILD
+# dashboard.py renders state.config.runtime_build from the already-loaded core
+# configuration. Synchronize it with the canonical add-on build before serving
+# any UI request; this prevents the UI from exposing stale base-runtime literals.
+base.core.cfg["runtime_build"] = RELEASE_BUILD
 app = base.app
 engine_operator_selection_module.DISPLAY_NAMES["deterministic_refined_v1"] = "Refined deterministic"
 engine_operator_selection_module.DISPLAY_NAMES["stochastic_deterministic_v1"] = "Stochastic deterministic"
