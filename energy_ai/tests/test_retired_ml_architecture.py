@@ -8,6 +8,7 @@ from app import retired_ml_cleanup
 
 
 RETIRED = {"neural_v1", "gradient_v1", "hybrid_v1"}
+RETIRED_CODE_TOKENS = RETIRED | {"neural_", "gradient_", "hybrid_"}
 
 
 def test_retired_learned_models_are_not_registered():
@@ -25,7 +26,7 @@ def test_repository_has_no_retired_engine_references_outside_cleanup_contract():
         if path.name == "retired_ml_cleanup.py":
             continue
         source = path.read_text(encoding="utf-8")
-        found = sorted(token for token in RETIRED if token in source)
+        found = sorted(token for token in RETIRED_CODE_TOKENS if token in source)
         if found:
             violations.append(f"app/{path.name}: {', '.join(found)}")
 
@@ -33,11 +34,11 @@ def test_repository_has_no_retired_engine_references_outside_cleanup_contract():
         if path.name == Path(__file__).name:
             continue
         source = path.read_text(encoding="utf-8")
-        found = sorted(token for token in RETIRED if token in source)
+        found = sorted(token for token in RETIRED_CODE_TOKENS if token in source)
         if found:
             violations.append(f"tests/{path.name}: {', '.join(found)}")
 
-    assert violations == [], "Retired engine references remain:\n" + "\n".join(violations)
+    assert violations == [], "Retired ML code references remain:\n" + "\n".join(violations)
 
 
 def test_retired_source_modules_are_physically_absent():
