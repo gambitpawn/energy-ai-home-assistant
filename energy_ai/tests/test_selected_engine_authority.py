@@ -81,8 +81,7 @@ def test_control_plan_falls_back_explicitly_when_routed_horizon_missing() -> Non
     assert result["rows"][0]["battery_action_kw"] == 0.0
 
 
-@pytest.mark.asyncio
-async def test_soc_replan_uses_selected_engine_pipeline_instead_of_legacy_v36(monkeypatch) -> None:
+def test_soc_replan_uses_selected_engine_pipeline_instead_of_legacy_v36(monkeypatch) -> None:
     calls = {"pipeline": 0, "legacy": 0}
 
     async def legacy(reason: str):
@@ -116,7 +115,7 @@ async def test_soc_replan_uses_selected_engine_pipeline_instead_of_legacy_v36(mo
     monkeypatch.setattr(sea, "latest_plan", lambda limit=500: _base_plan())
 
     sea.install_selected_engine_authority(app=FastAPI(), base=fake_base, runtime_ui_module=ui)
-    result = await fake_base.run_live_replan("soc_deviation")
+    result = asyncio.run(fake_base.run_live_replan("soc_deviation"))
 
     assert calls["legacy"] == 0
     assert calls["pipeline"] == 1
