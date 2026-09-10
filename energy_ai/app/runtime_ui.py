@@ -8,15 +8,19 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from .dashboard import DASHBOARD_HTML, install_dashboard
 from .overview_extension import OVERVIEW_EXTENSION, _history_rows
+from .pool_parameters import register_pool_parameters
 from .ui_charts import CHARTS_EXTENSION
 from .ui_evaluation import EVALUATION_EXTENSION, install_evaluation_routes
 from .ui_gradient import GRADIENT_UI_EXTENSION
 from .ui_live import LIVE_EXTENSION, install_live_routes
 from .ui_model_control import MODELS_CONTROL_EXTENSION, install_model_control_routes
 from .ui_models import MODELS_EXTENSION, install_model_routes
+from . import ui_parameters as ui_parameters_module
 from .ui_parameters import PARAMETERS_EXTENSION, install_parameter_routes
 from .ui_stochastic import STOCHASTIC_UI_EXTENSION
 
+
+POOL_PARAMETER_REGISTRATION = register_pool_parameters(ui_parameters_module)
 
 CURRENT_UI_EXTENSION = (
     OVERVIEW_EXTENSION
