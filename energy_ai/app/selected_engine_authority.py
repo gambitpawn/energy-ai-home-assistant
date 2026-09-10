@@ -22,6 +22,9 @@ loadPlan=async function(){
   try{state.plan=await api('ui/control-plan?limit=144');renderPlan()}
   catch(e){$('planMeta').textContent=e.message}
 };
+// dashboard.init() starts before extensions are appended, so replace any baseline
+// plan fetched during initialisation as soon as this authority extension loads.
+loadPlan();
 </script>
 '''
 
