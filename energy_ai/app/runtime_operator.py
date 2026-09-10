@@ -10,6 +10,7 @@ _STARTUP_MODE_STATE = prepare_startup()
 
 from . import runtime as base
 from . import operator_mode_control as operator_mode_control_module
+from . import runtime_ui as runtime_ui_module
 from . import ui_models as ui_models_module
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
@@ -34,6 +35,7 @@ from .pool import install_pool_routes
 from .pool_installation_profile import install_pool_installation_profile
 from .pv_surplus_runtime import install_pv_surplus_capture
 from .release_version import RELEASE_VERSION
+from .selected_engine_authority import install_selected_engine_authority
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_control_truth import decision_summary as control_truth_decision_summary
@@ -93,6 +95,15 @@ base.neural_runtime_status = _qualification_aware_neural_runtime_status
 # information vintage before either Auto or a manual engine is routed.
 install_operator_engine_routing()
 
+# The routed engine is the single normal control authority. This also replaces
+# the old v36-only SOC replan path, which could otherwise overwrite a manually or
+# automatically selected engine with a deterministic_v36_live command.
+SELECTED_ENGINE_AUTHORITY = install_selected_engine_authority(
+    app=app,
+    base=base,
+    runtime_ui_module=runtime_ui_module,
+)
+
 # Challenger wrappers are stacked around the same selector gateway. Gradient is
 # installed last, so the call order is gradient -> refined deterministic ->
 # stochastic -> hybrid -> operator routing -> robust selector. All decisions
@@ -104,8 +115,8 @@ install_gradient_runtime_patch(base.core.cfg)
 
 # Cheap real-time residual control runs in the existing lightweight SOC loop.
 # It preserves the selected engine's intended export and only diverts export
-# above that level into the battery. Accumulated SOC deviation still triggers the
-# normal full live replan rather than running the optimizer on every PV fluctuation.
+# above that level into the battery. Accumulated SOC deviation now triggers the
+# same selected-engine pipeline rather than a competing deterministic v36 plan.
 PV_SURPLUS_CAPTURE_RUNTIME = install_pv_surplus_capture(base)
 
 # Fork the single maintenance process only after every model/selector runtime
