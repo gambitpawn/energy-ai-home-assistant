@@ -79,7 +79,7 @@ def rebuild_15m_bucket(bucket_start,bucket_end,expected_samples=None):
     if not rows: return None
     parsed=[(ts,json.loads(pj)) for ts,pj in rows]; usable=[(ts,p) for ts,p in parsed if _usable_core_sample(p)]
     if not usable: return None
-    avg_keys=["pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","spot_price_ore_kwh","ev_power_kw"]
+    avg_keys=["pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","spot_price_ore_kwh","ev_power_kw","pool_power_kw","pool_temperature_c"]
     means={}; mins={}; maxs={}; counts={}
     for key in avg_keys:
         values=[v for _,p in usable if (v:=_numeric_state(p,key)) is not None]

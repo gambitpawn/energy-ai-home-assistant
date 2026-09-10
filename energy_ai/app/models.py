@@ -28,6 +28,8 @@ class EnergyState(BaseModel):
     ev_target_soc_pct: StateValue
     ev_ready_by: StateValue
     ev_power_kw: StateValue
+    pool_power_kw: StateValue = Field(default_factory=StateValue)
+    pool_temperature_c: StateValue = Field(default_factory=StateValue)
     load_components: dict[str, StateValue] = Field(default_factory=dict)
     demand_tariff_enabled: StateValue
     import_power_target_kw: StateValue

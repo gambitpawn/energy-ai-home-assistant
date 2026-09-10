@@ -38,6 +38,7 @@ def _normalize_value(raw: Any, source_unit: str | None, target_unit: str | None)
         if unit == "w": return value / 1000.0
         if unit == "kw": return value
     if target_unit == "%": return value
+    if target_unit == "°C": return value
     if target_unit == "öre/kWh":
         if unit in {"sek/kwh", "kr/kwh"}: return value * 100.0
         if unit in {"öre/kwh", "ore/kwh"}: return value
@@ -142,7 +143,7 @@ class HomeAssistantClient:
             return StateValue(entity_id=entity_id,available=False,normalized_unit=target_unit)
 
     async def snapshot(self) -> EnergyState:
-        keys={"pv_power_kw":("pv_power","kW"),"house_load_kw":("house_load","kW"),"grid_power_kw":("grid_power","kW"),"battery_power_kw":("battery_power","kW"),"battery_soc_pct":("battery_soc","%"),"spot_price_ore_kwh":("spot_price","öre/kWh"),"sauna_reserve":("sauna_reserve",None),"sauna_reserve_until":("sauna_reserve_until",None),"ev_mode":("ev_mode",None),"ev_connected":("ev_connected",None),"ev_soc_pct":("ev_soc","%"),"ev_target_soc_pct":("ev_target_soc","%"),"ev_ready_by":("ev_ready_by",None),"ev_power_kw":("ev_power","kW"),"demand_tariff_enabled":("demand_tariff_enabled",None),"import_power_target_kw":("import_power_target_kw","kW"),"export_power_target_kw":("export_power_target_kw","kW")}
+        keys={"pv_power_kw":("pv_power","kW"),"house_load_kw":("house_load","kW"),"grid_power_kw":("grid_power","kW"),"battery_power_kw":("battery_power","kW"),"battery_soc_pct":("battery_soc","%"),"spot_price_ore_kwh":("spot_price","öre/kWh"),"sauna_reserve":("sauna_reserve",None),"sauna_reserve_until":("sauna_reserve_until",None),"ev_mode":("ev_mode",None),"ev_connected":("ev_connected",None),"ev_soc_pct":("ev_soc","%"),"ev_target_soc_pct":("ev_target_soc","%"),"ev_ready_by":("ev_ready_by",None),"ev_power_kw":("ev_power","kW"),"pool_power_kw":("pool_heat_pump_power","kW"),"pool_temperature_c":("pool_temperature","°C"),"demand_tariff_enabled":("demand_tariff_enabled",None),"import_power_target_kw":("import_power_target_kw","kW"),"export_power_target_kw":("export_power_target_kw","kW")}
         async with httpx.AsyncClient() as client:
             values={output_key:await self._get_entity(client,self.entities.get(config_key),target_unit) for output_key,(config_key,target_unit) in keys.items()}
             component_values={cid:await self._get_entity(client,entity_id,"kW") for cid,entity_id in component_power_entities(self.cfg).items()}
