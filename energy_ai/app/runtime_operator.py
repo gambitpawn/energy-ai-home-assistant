@@ -32,6 +32,7 @@ from .neural_qualification import (
 from .operator_mode_control import install_operator_mode_control
 from .pool import install_pool_routes
 from .pool_installation_profile import install_pool_installation_profile
+from .pv_surplus_runtime import install_pv_surplus_capture
 from .release_version import RELEASE_VERSION
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
@@ -100,6 +101,12 @@ install_hybrid_runtime_patch(base.core.cfg)
 install_stochastic_runtime_patch(base.core.cfg)
 install_refined_runtime_patch(base.core.cfg)
 install_gradient_runtime_patch(base.core.cfg)
+
+# Cheap real-time residual control runs in the existing lightweight SOC loop.
+# It preserves the selected engine's intended export and only diverts export
+# above that level into the battery. Accumulated SOC deviation still triggers the
+# normal full live replan rather than running the optimizer on every PV fluctuation.
+PV_SURPLUS_CAPTURE_RUNTIME = install_pv_surplus_capture(base)
 
 # Fork the single maintenance process only after every model/selector runtime
 # patch above is installed, but before FastAPI lifespan tasks or worker threads
