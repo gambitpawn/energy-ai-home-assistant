@@ -14,6 +14,7 @@ from . import runtime_ui as runtime_ui_module
 from . import ui_models as ui_models_module
 from . import ui_parameters
 from .actuator_arm_control_mode import install_arm_control_mode_patch
+from .actuator_mode_recovery import install_actuator_mode_recovery_patch
 from .actuator_watchdog import install_actuator_watchdog_patch
 from .battery_health_routes import install_battery_health_routes
 from .deterministic_refined_runtime import refined_runtime_status, install_refined_runtime_patch
@@ -69,6 +70,11 @@ install_arm_control_mode_patch()
 # install here documents the operator runtime dependency without layering a second
 # watchdog implementation.
 install_actuator_watchdog_patch()
+
+# A freshly rebooted inverter can briefly accept EMS BattCtrl and then return to
+# its normal General mode while completing startup. Recover exactly one such drift
+# at verified zero power during the first 15 minutes after a successful arm.
+install_actuator_mode_recovery_patch()
 
 # Continuous learned-model training and race qualification are separate. Neural
 # + hybrid share one frozen neural candidate; gradient_v1 has its own independently
