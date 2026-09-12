@@ -176,3 +176,11 @@ def install_actuator_mode_recovery_patch() -> None:
     da.DeterministicActuator.mode_recovery_status = recovery_status
     wd._fail_safe = recover_startup_mode_drift_or_fail
     _INSTALLED = True
+
+    # Install after this wrapper so safe-return capture becomes the outer arm
+    # wrapper and can observe the inverter mode before the zero handshake enters
+    # EMS BattCtrl. The safe-release patch also applies to the tracked subclass
+    # through its existing super().safe_release() call.
+    from .actuator_safe_return_mode import install_actuator_safe_return_mode_patch
+
+    install_actuator_safe_return_mode_patch()
