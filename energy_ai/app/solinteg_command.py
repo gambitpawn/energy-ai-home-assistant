@@ -62,11 +62,28 @@ def _rank(entity: dict[str, Any], kind: str) -> int:
     return score
 
 
+def _is_grid_import_limit_entity(entity: dict[str, Any]) -> bool:
+    """Match the generic Solinteg Import Limit, never the EMS BattCtrl limit."""
+    entity_id = str(entity.get("entity_id") or "").lower()
+    attrs = entity.get("attributes") or {}
+    friendly = str(attrs.get("friendly_name") or "").strip().lower()
+    if not entity_id.startswith("number."):
+        return False
+    if "ems battctrl" in friendly or "ems_battctrl" in entity_id:
+        return False
+    exact_id = entity_id.endswith("_import_limit")
+    exact_name = friendly.endswith(" import limit") and "max grid import" not in friendly
+    unit = str(attrs.get("unit_of_measurement") or "").lower()
+    return (exact_id or exact_name) and unit in ("kw", "")
+
+
 class SolintegCommandAdapter:
     """Solinteg EMS command path through Home Assistant's entity services.
 
-    The SolaX Modbus Solinteg plugin owns register encoding. Energy AI only uses
-    select.select_option and number.set_value against the exposed entities.
+    The SolaX Modbus Solinteg plugin owns register encoding. Energy AI uses
+    Home Assistant entities for both the EMS battery target and the generic
+    inverter grid-import limit. The configured optimizer physical grid-import
+    limit is the authoritative value while Energy AI owns control.
     """
 
     def __init__(self, cfg: dict[str, Any], ha: HomeAssistantClient):
@@ -74,6 +91,7 @@ class SolintegCommandAdapter:
         self.ha = ha
         self.timeout = float((cfg.get("actuator") or {}).get("ack_timeout_seconds", 8.0))
         self.ack_tolerance_kw = float((cfg.get("actuator") or {}).get("ack_tolerance_kw", 0.10))
+        self._grid_import_limit_entity: str | None = None
 
     async def _state(self, entity_id: str) -> dict[str, Any]:
         if not self.ha.token:
@@ -140,6 +158,86 @@ class SolintegCommandAdapter:
             target = str(tied[0]["entity_id"])
         return SolintegEntities(working, target, "discovered")
 
+    async def resolve_grid_import_limit_entity(self) -> str:
+        if self._grid_import_limit_entity:
+            await self._state(self._grid_import_limit_entity)
+            return self._grid_import_limit_entity
+
+        states = await self.ha.all_states()
+        candidates = [e for e in states if _is_grid_import_limit_entity(e)]
+        if not candidates:
+            raise RuntimeError("No generic Solinteg Import Limit number entity could be discovered")
+        if len(candidates) != 1:
+            names = sorted(str(e.get("entity_id") or "") for e in candidates)
+            raise RuntimeError(f"Multiple Solinteg Import Limit entities found; refusing ambiguous write: {names}")
+        entity_id = str(candidates[0].get("entity_id") or "")
+        await self._state(entity_id)
+        self._grid_import_limit_entity = entity_id
+        return entity_id
+
+    def configured_grid_import_limit_kw(self) -> float:
+        return max(0.0, float((self.cfg.get("optimizer") or {}).get("physical_grid_import_limit_kw", 13.8)))
+
+    async def read_grid_import_limit(self) -> dict[str, Any]:
+        entity_id = await self.resolve_grid_import_limit_entity()
+        state = await self._state(entity_id)
+        raw = state.get("state")
+        if raw in (None, "unknown", "unavailable", ""):
+            raise RuntimeError(f"Solinteg Import Limit state is unavailable: {entity_id}")
+        value = float(raw)
+        attrs = state.get("attributes") or {}
+        return {
+            "entity_id": entity_id,
+            "grid_import_limit_kw": value,
+            "min_kw": attrs.get("min"),
+            "max_kw": attrs.get("max"),
+            "step_kw": attrs.get("step"),
+        }
+
+    async def ensure_grid_import_limit(self) -> dict[str, Any]:
+        desired = self.configured_grid_import_limit_kw()
+        current = await self.read_grid_import_limit()
+        minimum = current.get("min_kw")
+        maximum = current.get("max_kw")
+        if minimum is not None and desired < float(minimum) - 1e-9:
+            raise RuntimeError(f"Configured grid import limit {desired} kW is below inverter minimum {minimum} kW")
+        if maximum is not None and desired > float(maximum) + 1e-9:
+            raise RuntimeError(f"Configured grid import limit {desired} kW exceeds inverter maximum {maximum} kW")
+
+        entity_id = str(current["entity_id"])
+        before = float(current["grid_import_limit_kw"])
+        tolerance = max(0.01, min(self.ack_tolerance_kw, 0.10))
+        if abs(before - desired) <= tolerance:
+            return {
+                **current,
+                "configured_grid_import_limit_kw": desired,
+                "changed": False,
+                "acknowledged": True,
+            }
+
+        await self._service(
+            "number",
+            "set_value",
+            {"entity_id": entity_id, "value": round(desired, 2)},
+        )
+        deadline = asyncio.get_running_loop().time() + self.timeout
+        last = current
+        while asyncio.get_running_loop().time() < deadline:
+            last = await self.read_grid_import_limit()
+            actual = float(last["grid_import_limit_kw"])
+            if abs(actual - desired) <= tolerance:
+                return {
+                    **last,
+                    "configured_grid_import_limit_kw": desired,
+                    "previous_grid_import_limit_kw": before,
+                    "changed": True,
+                    "acknowledged": True,
+                }
+            await asyncio.sleep(0.5)
+        raise RuntimeError(
+            f"Solinteg Import Limit acknowledgement timeout; expected={desired!r} kW, last={last!r}"
+        )
+
     async def discovery_report(self) -> dict[str, Any]:
         states = await self.ha.all_states()
         def rows(kind: str) -> list[dict[str, Any]]:
@@ -155,13 +253,16 @@ class SolintegCommandAdapter:
                 if score > 0
             ]
         resolved = None
+        grid_import_limit = None
         error = None
         try:
             resolved = (await self.resolve_entities()).as_dict()
+            grid_import_limit = await self.read_grid_import_limit()
         except Exception as exc:
             error = repr(exc)
         return {
             "resolved": resolved,
+            "grid_import_limit": grid_import_limit,
             "error": error,
             "working_mode_candidates": rows("working_mode"),
             "battery_power_target_candidates": rows("battery_power_target"),
@@ -230,25 +331,32 @@ class SolintegCommandAdapter:
     async def enter_control_mode_zero(self) -> dict[str, Any]:
         entities = await self.resolve_entities()
         control_mode = str((self.cfg.get("actuator") or {}).get("control_working_mode") or CONTROL_MODE_DEFAULT)
+        # The configured physical grid-import limit must be active before EMS
+        # battery control can create any non-zero power flow.
+        grid_limit = await self.ensure_grid_import_limit()
         # Zero first, then enter EMS BattCtrl. This avoids a stale non-zero target
         # becoming active during the mode transition.
         await self.set_power_target(0.0, entities)
         await self.wait_for_ack(expected_target_kw=0.0, entities=entities)
         await self.set_working_mode(control_mode, entities)
-        return await self.wait_for_ack(expected_mode=control_mode, expected_target_kw=0.0, entities=entities)
+        result = await self.wait_for_ack(expected_mode=control_mode, expected_target_kw=0.0, entities=entities)
+        return {**result, "grid_import_limit": grid_limit}
 
     async def dispatch(self, target_kw: float) -> dict[str, Any]:
         entities = await self.resolve_entities()
         control_mode = str((self.cfg.get("actuator") or {}).get("control_working_mode") or CONTROL_MODE_DEFAULT)
+        grid_limit = await self.ensure_grid_import_limit()
         before = await self.readback(entities)
         if str(before.get("working_mode")) != control_mode:
-            await self.enter_control_mode_zero()
+            entered = await self.enter_control_mode_zero()
+            grid_limit = entered.get("grid_import_limit") or grid_limit
         await self.set_power_target(float(target_kw), entities)
-        return await self.wait_for_ack(
+        result = await self.wait_for_ack(
             expected_mode=control_mode,
             expected_target_kw=float(target_kw),
             entities=entities,
         )
+        return {**result, "grid_import_limit": grid_limit}
 
     async def safe_release(self) -> dict[str, Any]:
         entities = await self.resolve_entities()
