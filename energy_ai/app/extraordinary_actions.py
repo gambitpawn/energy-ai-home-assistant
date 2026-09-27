@@ -333,7 +333,8 @@ def required_start_energy(
         params["hard_min_soc_pct"] + params["guard_pct"],
     )
     hard_floor = cap * hard_floor_pct / 100.0
-    max_energy = cap * params["hard_max_soc_pct"] / 100.0
+    usable_max_soc_pct = max(hard_floor_pct, params["hard_max_soc_pct"] - params["guard_pct"])
+    max_energy = cap * usable_max_soc_pct / 100.0
     start = _parse(action["starts_at"])
     end = _parse(action["ends_at"])
     rows = [r for r in _plan_rows(plan) if _overlaps(r, start, end)]
@@ -346,6 +347,8 @@ def required_start_energy(
             "coverage_fraction": 0.0,
             "power_feasible": None,
             "energy_feasible": None,
+            "fallback_target_energy_kwh": round(max_energy, 4),
+            "fallback_target_soc_pct": round(usable_max_soc_pct, 2),
         }
 
     covered = 0.0
@@ -392,6 +395,9 @@ def required_start_energy(
         "energy_feasible": energy_feasible,
         "max_pessimistic_deficit_kw": round(max_pessimistic_deficit_kw, 4),
         "hard_floor_soc_pct": round(hard_floor_pct, 2),
+        "usable_max_soc_pct": round(usable_max_soc_pct, 2),
+        "fallback_target_energy_kwh": round(max_energy, 4),
+        "fallback_target_soc_pct": round(usable_max_soc_pct, 2),
         "uncertainty_policy": "load_plus_uncertainty_pv_minus_uncertainty",
     }
 
@@ -415,7 +421,9 @@ def reserve_overlay(
 ) -> dict[str, Any]:
     """Clamp a selected-engine decision only as much as outage readiness requires."""
     requirement = required_start_energy(action, plan, cfg)
-    if not requirement.get("available"):
+    params = _battery_params(cfg)
+    fallback_target = requirement.get("fallback_target_energy_kwh")
+    if not requirement.get("available") and fallback_target is None:
         return {
             "candidate": dict(candidate),
             "changed": False,
@@ -423,7 +431,6 @@ def reserve_overlay(
             "reason": requirement.get("reason"),
         }
 
-    params = _battery_params(cfg)
     cap = params["capacity_kwh"]
     current_soc = actual.get("soc_pct")
     if current_soc is None:
@@ -456,7 +463,7 @@ def reserve_overlay(
             continue
         future_gain += _max_charge_gain(row, cfg)
 
-    target = float(requirement["required_start_energy_kwh"])
+    target = float(requirement.get("required_start_energy_kwh") if requirement.get("available") else fallback_target)
     hard_floor = cap * min(
         params["hard_max_soc_pct"],
         params["hard_min_soc_pct"] + params["guard_pct"],
@@ -519,7 +526,7 @@ def reserve_overlay(
             "original_requested_action_kw": round(requested, 4),
             "overlay_requested_action_kw": round(adjusted, 4),
         },
-        "reason": "outage_reserve_constraint" if changed else "selected_engine_within_outage_reserve_constraint",
+        "reason": ("outage_reserve_constraint" if requirement.get("available") else "conservative_full_charge_until_outage_forecast_complete") if changed else "selected_engine_within_outage_reserve_constraint",
     }
 
 
@@ -735,8 +742,14 @@ class ExtraordinaryActionController:
             )
             return {"ok": False, "reason": "production_paused"}
 
+        runtime = action.get("runtime") or {}
+        if not runtime.get("restore_operator_mode"):
+            restore_mode = "active" if prod.get("operating_mode") == "active" and prod.get("physical_writes_enabled") else "shadow"
+            action = update_runtime(action["action_id"], restore_operator_mode=restore_mode)
+            runtime = action.get("runtime") or {}
+
         if prod.get("operating_mode") == "active" and prod.get("physical_writes_enabled") and prod.get("actuator_ready"):
-            return {"ok": True, "already_active": True}
+            return {"ok": True, "already_active": True, "restore_operator_mode": runtime.get("restore_operator_mode")}
 
         release = None
         if release_status().get("release_pending"):
@@ -830,7 +843,7 @@ class ExtraordinaryActionController:
                     "required": _GRID_CONFIRMATIONS_REQUIRED,
                 }
 
-        restore = str((action.get("payload") or {}).get("restore_operator_mode") or "shadow")
+        restore = str((action.get("runtime") or {}).get("restore_operator_mode") or (action.get("payload") or {}).get("restore_operator_mode") or "shadow")
         if restore == "active":
             entered = await self.adapter.enter_control_mode_zero()
             mark_status(
@@ -903,7 +916,7 @@ class ExtraordinaryActionController:
             cancelled = cancel_action(action_id)
             runtime = cancelled.get("runtime") or {}
             if runtime.get("auto_activated"):
-                restore = str((cancelled.get("payload") or {}).get("restore_operator_mode") or "shadow")
+                restore = str((cancelled.get("runtime") or {}).get("restore_operator_mode") or (cancelled.get("payload") or {}).get("restore_operator_mode") or "shadow")
                 if restore == "shadow":
                     await self.actuator.disarm("extraordinary_action_cancelled")
                 else:
@@ -949,9 +962,13 @@ class ExtraordinaryActionController:
                 control = await self._ensure_prep_control(action)
                 if not control.get("ok"):
                     return {"status": "preparing_blocked", "action_id": action_id, "control": control}
-                # A fresh optimizer pipeline immediately applies the reserve overlay,
-                # avoiding a wait until the next quarter when preparation begins.
-                refresh = await self.base.refresh_optimizer_plan()
+                runtime = get_action(action_id).get("runtime") or {}
+                refresh = None
+                if not runtime.get("prep_refresh_at") or not control.get("already_active"):
+                    # Exactly one immediate refresh when action preparation gains
+                    # control. Normal quarter planning handles subsequent updates.
+                    refresh = await self.base.refresh_optimizer_plan()
+                    update_runtime(action_id, prep_refresh_at=_iso(_now()))
                 return {
                     "status": "preparing",
                     "action_id": action_id,
@@ -964,7 +981,27 @@ class ExtraordinaryActionController:
                 if not runtime.get("offgrid_entered_at"):
                     result = await self._enter_offgrid(action)
                     return {"status": "active_transition", "action_id": action_id, "result": result}
-                return {"status": "active", "action_id": action_id}
+                try:
+                    readback = await self.adapter.readback()
+                except Exception as exc:
+                    update_runtime(
+                        action_id,
+                        phase="active",
+                        last_error=f"active_mode_readback_unavailable:{exc!r}",
+                    )
+                    return {
+                        "status": "active_degraded_hold_mode",
+                        "action_id": action_id,
+                        "error": repr(exc),
+                    }
+                if str(readback.get("working_mode")) != OFFGRID_MODE:
+                    result = await self._enter_offgrid(action)
+                    return {
+                        "status": "active_reentered_offgrid",
+                        "action_id": action_id,
+                        "result": result,
+                    }
+                return {"status": "active", "action_id": action_id, "readback": readback}
 
             if phase == "ending":
                 result = await self._restore_after_action(action, force=False)
