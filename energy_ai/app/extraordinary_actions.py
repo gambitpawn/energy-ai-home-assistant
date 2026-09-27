@@ -636,15 +636,42 @@ class ExtraordinaryActionController:
         except Exception:
             return {}
 
-    def decorated_action(self, action: dict[str, Any]) -> dict[str, Any]:
+    def decorated_action(
+        self,
+        action: dict[str, Any],
+        *,
+        plan: dict[str, Any] | None = None,
+        actual: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status = str(action.get("status") or "")
+        runtime = action.get("runtime") or {}
+        if status in {"cancelled", "completed"}:
+            assessment = runtime.get("assessment") or {
+                "available": False,
+                "reason": status,
+                "phase": status,
+            }
+        else:
+            assessment = action_assessment(
+                action,
+                self.cfg,
+                plan if plan is not None else self.plan(),
+                actual if actual is not None else self.actual(),
+            )
         return {
             **action,
             "phase": action_phase(action),
-            "assessment": action_assessment(action, self.cfg, self.plan(), self.actual()),
+            "assessment": assessment,
         }
 
     def status_payload(self) -> dict[str, Any]:
-        actions = [self.decorated_action(a) for a in list_actions(include_terminal=True)]
+        raw_actions = list_actions(include_terminal=True)
+        plan = self.plan()
+        actual = self.actual()
+        actions = [
+            self.decorated_action(action, plan=plan, actual=actual)
+            for action in raw_actions
+        ]
         authority = control_authority_status()
         return {
             "ok": True,
@@ -949,27 +976,44 @@ class ExtraordinaryActionController:
 
     async def cancel(self, action_id: int) -> dict[str, Any]:
         async with self._transition_lock:
-            action = get_action(action_id)
+            action = await asyncio.to_thread(get_action, action_id)
             phase = action_phase(action)
             if action["status"] != "scheduled":
                 return self.decorated_action(action)
             if phase in {"active", "ending"}:
                 # Cancellation of an active outage is an end request; grid return
                 # must still be confirmed unless the explicit force-end API is used.
-                runtime = update_runtime(
-                    action_id,
-                    cancellation_requested=True,
-                    scheduled_end_overridden_at=_iso(_now()),
-                    last_transition_at=_iso(_now()),
-                )
-                with connect_db(timeout=30.0) as c:
-                    c.execute(
-                        "UPDATE extraordinary_action SET ends_at=?,updated_at=? WHERE action_id=?",
-                        (_iso(_now()), _iso(_now()), int(action_id)),
-                    )
-                return self.decorated_action(get_action(action_id))
+                now_iso = _iso(_now())
 
-            cancelled = cancel_action(action_id)
+                def request_end(conn):
+                    row = conn.execute(
+                        "SELECT runtime_json FROM extraordinary_action WHERE action_id=?",
+                        (int(action_id),),
+                    ).fetchone()
+                    if row is None:
+                        raise KeyError(int(action_id))
+                    runtime = _decode(row[0])
+                    runtime.update({
+                        "cancellation_requested": True,
+                        "scheduled_end_overridden_at": now_iso,
+                        "last_transition_at": now_iso,
+                        "last_error": None,
+                    })
+                    conn.execute(
+                        "UPDATE extraordinary_action SET ends_at=?,runtime_json=?,updated_at=? WHERE action_id=?",
+                        (
+                            now_iso,
+                            json.dumps(runtime, ensure_ascii=False, sort_keys=True, default=str),
+                            now_iso,
+                            int(action_id),
+                        ),
+                    )
+
+                await asyncio.to_thread(_write_action_transaction, request_end)
+                current = await asyncio.to_thread(get_action, action_id)
+                return self.decorated_action(current)
+
+            cancelled = await asyncio.to_thread(cancel_action, action_id)
             runtime = cancelled.get("runtime") or {}
             if runtime.get("auto_activated"):
                 restore = str((cancelled.get("runtime") or {}).get("restore_operator_mode") or (cancelled.get("payload") or {}).get("restore_operator_mode") or "shadow")
