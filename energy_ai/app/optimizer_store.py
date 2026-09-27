@@ -2,38 +2,48 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from threading import RLock
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .db import DB_PATH
+from .db import DB_PATH, connect_db
+
+_TABLES_LOCK = RLock()
+_TABLES_INITIALIZED_PATH: str | None = None
 
 
 def _init_tables() -> None:
-    with sqlite3.connect(DB_PATH) as c:
-        c.executescript('''
-        CREATE TABLE IF NOT EXISTS optimizer_plan(
-            generated_at TEXT NOT NULL,
-            start_utc TEXT NOT NULL,
-            planner TEXT NOT NULL,
-            battery_action_kw REAL NOT NULL,
-            expected_soc_pct REAL NOT NULL,
-            grid_import_kw REAL NOT NULL,
-            grid_export_kw REAL NOT NULL,
-            curtailed_kw REAL NOT NULL,
-            interval_cost_ore REAL NOT NULL,
-            payload_json TEXT NOT NULL,
-            PRIMARY KEY(generated_at,start_utc)
-        );
-        CREATE TABLE IF NOT EXISTS optimizer_plan_summary(
-            generated_at TEXT PRIMARY KEY,
-            planner TEXT NOT NULL,
-            horizon_hours INTEGER NOT NULL,
-            expected_cost_ore REAL NOT NULL,
-            baseline_cost_ore REAL NOT NULL,
-            expected_saving_ore REAL NOT NULL,
-            payload_json TEXT NOT NULL
-        );
-        ''')
+    global _TABLES_INITIALIZED_PATH
+    path = str(DB_PATH)
+    with _TABLES_LOCK:
+        if _TABLES_INITIALIZED_PATH == path:
+            return
+        with connect_db(timeout=30.0) as c:
+            c.executescript('''
+            CREATE TABLE IF NOT EXISTS optimizer_plan(
+                generated_at TEXT NOT NULL,
+                start_utc TEXT NOT NULL,
+                planner TEXT NOT NULL,
+                battery_action_kw REAL NOT NULL,
+                expected_soc_pct REAL NOT NULL,
+                grid_import_kw REAL NOT NULL,
+                grid_export_kw REAL NOT NULL,
+                curtailed_kw REAL NOT NULL,
+                interval_cost_ore REAL NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY(generated_at,start_utc)
+            );
+            CREATE TABLE IF NOT EXISTS optimizer_plan_summary(
+                generated_at TEXT PRIMARY KEY,
+                planner TEXT NOT NULL,
+                horizon_hours INTEGER NOT NULL,
+                expected_cost_ore REAL NOT NULL,
+                baseline_cost_ore REAL NOT NULL,
+                expected_saving_ore REAL NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            ''')
+        _TABLES_INITIALIZED_PATH = path
 
 
 def insert_plan(plan: dict[str, Any]) -> int:
@@ -41,7 +51,7 @@ def insert_plan(plan: dict[str, Any]) -> int:
     generated = str(plan["generated_at"])
     planner = str(plan.get("planner") or "unknown")
     rows = plan.get("rows") or []
-    with sqlite3.connect(DB_PATH) as c:
+    with connect_db(timeout=30.0) as c:
         c.executemany(
             '''INSERT OR REPLACE INTO optimizer_plan(
                generated_at,start_utc,planner,battery_action_kw,expected_soc_pct,
@@ -84,7 +94,7 @@ def insert_plan(plan: dict[str, Any]) -> int:
 def latest_plan(limit: int = 144) -> dict[str, Any]:
     _init_tables()
     limit = max(1, min(int(limit), 500))
-    with sqlite3.connect(DB_PATH) as c:
+    with connect_db(timeout=30.0) as c:
         row = c.execute("SELECT generated_at,payload_json FROM optimizer_plan_summary ORDER BY generated_at DESC LIMIT 1").fetchone()
         if not row:
             return {"generated_at": None, "rows": []}
@@ -100,7 +110,7 @@ def latest_plan(limit: int = 144) -> dict[str, Any]:
 def plan_history(limit: int = 20) -> list[dict[str, Any]]:
     _init_tables()
     limit = max(1, min(int(limit), 100))
-    with sqlite3.connect(DB_PATH) as c:
+    with connect_db(timeout=30.0) as c:
         rows = c.execute(
             "SELECT generated_at,planner,horizon_hours,expected_cost_ore,baseline_cost_ore,expected_saving_ore FROM optimizer_plan_summary ORDER BY generated_at DESC LIMIT ?",
             (limit,),
