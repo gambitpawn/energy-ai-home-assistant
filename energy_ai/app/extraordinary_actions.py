@@ -404,7 +404,9 @@ def required_start_energy(
 
 def _max_charge_gain(row: dict[str, Any], cfg: dict[str, Any]) -> float:
     params = _battery_params(cfg)
-    net = float(row.get("load_kw") or 0.0) - float(row.get("pv_kw") or 0.0)
+    load = float(row.get("load_kw") or 0.0) + max(0.0, float(row.get("load_uncertainty_kw") or 0.0))
+    pv = max(0.0, float(row.get("pv_kw") or 0.0) - max(0.0, float(row.get("pv_uncertainty_kw") or 0.0)))
+    net = load - pv
     max_ac_charge = min(
         params["max_charge_kw"],
         max(0.0, params["grid_import_limit_kw"] - net),
@@ -1034,7 +1036,7 @@ class ExtraordinaryActionController:
             except Exception:
                 pass
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=10.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 pass
 
@@ -1085,6 +1087,21 @@ def install_extraordinary_actions(*, app: FastAPI, base, runtime_ui_module, ui_e
         ends_at = str((body or {}).get("ends_at") or "").strip()
         if not starts_at or not ends_at:
             raise HTTPException(400, "starts_at and ends_at are required")
+        try:
+            readback = await controller.adapter.readback()
+        except Exception as exc:
+            raise HTTPException(503, {"error": "offgrid_capability_check_failed", "detail": repr(exc)})
+        options = [str(item) for item in (readback.get("working_mode_options") or [])]
+        if OFFGRID_MODE not in options:
+            raise HTTPException(
+                409,
+                {
+                    "error": "offgrid_mode_not_supported",
+                    "required_mode": OFFGRID_MODE,
+                    "working_mode_options": options,
+                },
+            )
+
         prod = production_status()
         restore_mode = "active" if prod.get("operating_mode") == "active" and prod.get("physical_writes_enabled") else "shadow"
         try:
