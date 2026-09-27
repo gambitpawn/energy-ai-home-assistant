@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,6 +61,24 @@ def _rank(entity: dict[str, Any], kind: str) -> int:
     if entity.get("state") in (None, "unknown", "unavailable", ""):
         score -= 5
     return score
+
+
+def _is_grid_voltage_entity(entity: dict[str, Any]) -> bool:
+    entity_id = str(entity.get("entity_id") or "").lower()
+    attrs = entity.get("attributes") or {}
+    friendly = str(attrs.get("friendly_name") or "").lower()
+    unit = str(attrs.get("unit_of_measurement") or "").lower()
+    device_class = str(attrs.get("device_class") or "").lower()
+    text = f"{entity_id} {friendly}"
+    if not entity_id.startswith("sensor."):
+        return False
+    if unit not in {"v", "volt", "volts"} and device_class != "voltage":
+        return False
+    if "pv" in text or "battery" in text:
+        return False
+    phase = any(token in text for token in ("voltage l1", "voltage_l1", "voltage l2", "voltage_l2", "voltage l3", "voltage_l3"))
+    inverter = "solinteg" in text or "inverter" in text
+    return phase and inverter
 
 
 def _is_grid_import_limit_entity(entity: dict[str, Any]) -> bool:
@@ -327,6 +346,63 @@ class SolintegCommandAdapter:
             f"Solinteg command acknowledgement timeout; expected mode={expected_mode!r}, "
             f"target={expected_target_kw!r}, last={last!r}"
         )
+
+    async def enter_offgrid_mode(self, mode: str = "EMS Off-Grid") -> dict[str, Any]:
+        """Enter Solinteg EMS off-grid control with a verified zero EMS target.
+
+        The target is cleared before changing mode so a stale EMS BattCtrl target
+        cannot become active during either side of the transition.
+        """
+        entities = await self.resolve_entities()
+        await self.set_power_target(0.0, entities)
+        await self.wait_for_ack(expected_target_kw=0.0, entities=entities)
+        await self.set_working_mode(str(mode), entities)
+        return await self.wait_for_ack(
+            expected_mode=str(mode),
+            expected_target_kw=0.0,
+            entities=entities,
+        )
+
+    async def grid_availability(self) -> dict[str, Any]:
+        """Confirm grid return from inverter phase-voltage telemetry.
+
+        Grid power near zero is not proof that the grid exists, so restoration
+        from a planned outage never uses the power sensor as a presence signal.
+        """
+        states = await self.ha.all_states()
+        candidates = [item for item in states if _is_grid_voltage_entity(item)]
+        values: list[dict[str, Any]] = []
+        for item in candidates:
+            raw = item.get("state")
+            try:
+                voltage = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(voltage):
+                continue
+            values.append({
+                "entity_id": str(item.get("entity_id") or ""),
+                "voltage_v": voltage,
+            })
+        values.sort(key=lambda item: item["entity_id"])
+        if not values:
+            return {
+                "measurable": False,
+                "available": False,
+                "reason": "no_grid_voltage_entities",
+                "voltages": [],
+            }
+
+        present = [item for item in values if 180.0 <= float(item["voltage_v"]) <= 275.0]
+        required = 2 if len(values) >= 3 else 1
+        return {
+            "measurable": True,
+            "available": len(present) >= required,
+            "reason": "grid_voltage_confirmed" if len(present) >= required else "grid_voltage_not_present",
+            "required_phases": required,
+            "present_phases": len(present),
+            "voltages": values,
+        }
 
     async def enter_control_mode_zero(self) -> dict[str, Any]:
         entities = await self.resolve_entities()
