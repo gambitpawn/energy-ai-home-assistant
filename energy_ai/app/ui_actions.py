@@ -47,7 +47,18 @@ function renderActions(d){
   });
   $('actionsList').innerHTML='<table class="tbl"><thead><tr><th>Window</th><th>Phase</th><th>Readiness</th><th>Control</th></tr></thead><tbody>'+body+'</tbody></table>';
 }
-async function loadActions(){try{renderActions(await api('actions'))}catch(e){if($('actionsList'))$('actionsList').innerHTML='<div class="empty action-error">Could not load actions: '+e.message+'</div>'}}
+function paintActionPlanNotice(d){
+  const plan=$('plan');if(!plan)return;
+  let notice=$('actionPlanNotice');
+  const authority=d.authority||{};
+  if(!authority.blocking){if(notice)notice.remove();return}
+  if(!notice){
+    plan.insertAdjacentHTML('afterbegin','<div id="actionPlanNotice" class="notice action-warning" style="margin-bottom:12px"></div>');
+    notice=$('actionPlanNotice');
+  }
+  notice.innerHTML='<strong>Extraordinary action has control priority.</strong> The normal Plan remains a model view; battery commands may be reserve-constrained during preparation and are suppressed while EMS Off-Grid is active. See Actions for the authoritative outage state.';
+}
+async function loadActions(){try{const d=await api('actions');renderActions(d);paintActionPlanNotice(d)}catch(e){if($('actionsList'))$('actionsList').innerHTML='<div class="empty action-error">Could not load actions: '+e.message+'</div>'}}
 async function scheduleSelfSufficiency(){
   const status=$('actionFormStatus'),start=actionLocalIso($('actionStart').value),end=actionLocalIso($('actionEnd').value);
   if(!start||!end){status.textContent='Enter a valid start and end time.';status.className='action-status-line action-error';return}
