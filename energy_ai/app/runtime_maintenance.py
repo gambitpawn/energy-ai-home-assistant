@@ -9,7 +9,7 @@ from .adaptive_auto import automatic_maintenance_once as adaptive_maintenance_on
 from .adaptive_learning import active_run
 from .evaluation_decomposition import run_pending_evaluation_decomposition
 from .gradient_training import automatic_maintenance_once as gradient_maintenance_once
-from .maintenance_coordination import run_low_priority
+from .maintenance_coordination import LANE_EVALUATION, LANE_HEAVY, run_low_priority
 from .neural_auto import automatic_maintenance_once as neural_maintenance_once
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .pv_auto import automatic_pv_retraining_once
@@ -43,7 +43,13 @@ async def _neural_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=5))
         try:
-            await run_low_priority("neural_maintenance", neural_maintenance_once, cfg)
+            await run_low_priority(
+                "neural_maintenance",
+                neural_maintenance_once,
+                cfg,
+                lane=LANE_HEAVY,
+                timeout_seconds=1800,
+            )
         except Exception:
             pass
 
@@ -52,7 +58,13 @@ async def _adaptive_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=20))
         try:
-            await run_low_priority("adaptive_maintenance", adaptive_maintenance_once, cfg)
+            await run_low_priority(
+                "adaptive_maintenance",
+                adaptive_maintenance_once,
+                cfg,
+                lane=LANE_HEAVY,
+                timeout_seconds=1800,
+            )
         except Exception:
             pass
 
@@ -63,7 +75,13 @@ async def _gradient_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=35))
         try:
-            await run_low_priority("gradient_maintenance", gradient_maintenance_once, cfg)
+            await run_low_priority(
+                "gradient_maintenance",
+                gradient_maintenance_once,
+                cfg,
+                lane=LANE_HEAVY,
+                timeout_seconds=1800,
+            )
         except Exception:
             pass
 
@@ -73,16 +91,29 @@ async def _pv_loop(cfg) -> None:
         await asyncio.sleep(_seconds_until_slot(minute=50, period_hours=6, phase_hour=3))
         try:
             if await asyncio.to_thread(active_run) is None:
-                await run_low_priority("pv_retraining", automatic_pv_retraining_once)
+                await run_low_priority(
+                    "pv_retraining",
+                    automatic_pv_retraining_once,
+                    lane=LANE_HEAVY,
+                    timeout_seconds=1800,
+                )
         except Exception:
             pass
 
 
 async def _optimizer_day_loop(cfg) -> None:
+    """Keep core day evaluation independent of heavyweight hindsight/model work."""
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=8, period_hours=6, phase_hour=1))
         try:
-            await run_low_priority("optimizer_day_evaluation", evaluate_matured_optimizer_days, cfg, 14)
+            await run_low_priority(
+                "optimizer_day_evaluation",
+                evaluate_matured_optimizer_days,
+                cfg,
+                14,
+                lane=LANE_EVALUATION,
+                timeout_seconds=600,
+            )
         except Exception:
             pass
 
@@ -96,9 +127,9 @@ async def _evaluation_decomposition_loop(cfg) -> None:
     In Sweden this is 02:50 CET / 03:50 CEST, safely inside the night window.
 
     On the first night up to 14 historical complete days are backfilled. Each day
-    is a separate low-priority job with a short pause, allowing other low-priority
-    work to interleave. Control planning, arming and the watchdog never acquire
-    the low-priority lock.
+    is a separate bounded heavy-lane job with a short pause, allowing other
+    heavy maintenance to interleave. Core optimizer-day evaluation has a separate
+    lane and cannot be blocked by a stuck hindsight decomposition.
     """
     while True:
         await asyncio.sleep(_seconds_until_daily_utc(hour=1, minute=50))
@@ -109,6 +140,8 @@ async def _evaluation_decomposition_loop(cfg) -> None:
                     run_pending_evaluation_decomposition,
                     cfg,
                     1,
+                    lane=LANE_HEAVY,
+                    timeout_seconds=1200,
                 )
             except Exception:
                 break
@@ -131,6 +164,8 @@ async def _selector_loop(cfg) -> None:
                 cfg,
                 (today - timedelta(days=age_days)).isoformat(),
                 force=True,
+                lane=LANE_HEAVY,
+                timeout_seconds=1200,
             )
         except Exception:
             pass
@@ -143,6 +178,8 @@ async def _selector_loop(cfg) -> None:
                     "selector_maintenance",
                     selector.automatic_selector_maintenance_once,
                     cfg,
+                    lane=LANE_HEAVY,
+                    timeout_seconds=1200,
                 )
         except Exception:
             pass

@@ -20,6 +20,7 @@ from .engine_registry import BASELINE_ENGINE_ID, baseline_decision_from_plan, re
 from .engine_store import latest_engine_decisions
 from .historical_closed_loop import replay_regression
 from .historical_closed_loop_v2 import compare_closed_loop
+from .maintenance_coordination import status as maintenance_status
 from .neural_auto import automatic_maintenance_once as neural_maintenance_once, automatic_status as neural_auto_status
 from .neural_engine import neural_runtime_status
 from .neural_features import feature_metadata
@@ -72,6 +73,10 @@ def install_runtime_routes(
     economics_compat_status: Any,
     economics_neural_status: Any,
 ) -> None:
+    @app.get("/maintenance/status", tags=["maintenance"], summary="Maintenance worker status")
+    async def maintenance_status_route():
+        return {"runtime_build": runtime_build, **maintenance_status()}
+
     # ---- Optimizer evaluation / diagnostics ---------------------------------
     @app.get("/optimizer/evaluation/evaluate-now", tags=["optimizer-evaluation"], summary="Evaluate matured optimizer days")
     async def optimizer_evaluation_now_get(lookback_days: int = Query(7, ge=1, le=90)):
