@@ -19,6 +19,7 @@ from .actuator_watchdog import install_actuator_watchdog_patch
 from .battery_health_routes import install_battery_health_routes
 from .deterministic_refined_runtime import refined_runtime_status, install_refined_runtime_patch
 from .engine_operator_selection import install_operator_engine_routing
+from .extraordinary_actions import install_extraordinary_actions
 from .gradient_qualification import (
     install_qualification_candidate_runtime as install_gradient_qualification_runtime,
     qualification_status as gradient_qualification_status,
@@ -39,6 +40,7 @@ from .release_version import RELEASE_VERSION
 from .selected_engine_authority import install_selected_engine_authority
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
+from .ui_actions import ACTIONS_EXTENSION
 from .ui_control_truth import decision_summary as control_truth_decision_summary
 
 RELEASE_BUILD = RELEASE_VERSION
@@ -124,6 +126,17 @@ install_gradient_runtime_patch(base.core.cfg)
 # above that level into the battery. Accumulated SOC deviation now triggers the
 # same selected-engine pipeline rather than a competing deterministic v36 plan.
 PV_SURPLUS_CAPTURE_RUNTIME = install_pv_surplus_capture(base)
+
+# Extraordinary actions sit above normal model routing and residual control.
+# The first action type is a bounded planned-outage/self-sufficiency window:
+# normal candidates are reserve-constrained during preparation and suppressed
+# while Solinteg runs in verified EMS Off-Grid mode.
+EXTRAORDINARY_ACTIONS_RUNTIME = install_extraordinary_actions(
+    app=app,
+    base=base,
+    runtime_ui_module=runtime_ui_module,
+    ui_extension=ACTIONS_EXTENSION,
+)
 
 # Fork the single maintenance process only after every model/selector runtime
 # patch above is installed, but before FastAPI lifespan tasks or worker threads
