@@ -159,3 +159,44 @@ def test_prepare_reconcile_has_single_immediate_refresh_not_ten_second_heavy_loo
     assert 'if not runtime.get("prep_refresh_at") or not control.get("already_active")' in source
     assert "timeout=5.0" in source
     assert OFFGRID_MODE == "EMS Off-Grid"
+
+
+def test_action_state_writes_are_atomic_and_retry_transient_writer_contention():
+    source = (ROOT / "app" / "extraordinary_actions.py").read_text(encoding="utf-8")
+    assert "def _write_action_transaction" in source
+    assert 'conn.execute("BEGIN IMMEDIATE")' in source
+    assert "attempts: int = 6" in source
+    update_block = source[source.index("def update_runtime"):source.index("def mark_status")]
+    assert 'SELECT runtime_json FROM extraordinary_action WHERE action_id=?' in update_block
+    assert "_write_action_transaction(write)" in update_block
+
+
+def test_cancel_clears_stale_action_error_and_serializes_with_reconcile():
+    source = (ROOT / "app" / "extraordinary_actions.py").read_text(encoding="utf-8")
+    cancel_fn = source[source.index("def cancel_action"):source.index("def current_scheduled_action")]
+    assert "last_error=None" in cancel_fn
+    reconcile = source[source.index("async def reconcile_once"):source.index("async def run")]
+    assert "async with self._transition_lock" in reconcile
+    assert "_reconcile_once_locked" in reconcile
+
+
+def test_actions_status_reads_optimizer_plan_once_for_all_rows():
+    source = (ROOT / "app" / "extraordinary_actions.py").read_text(encoding="utf-8")
+    status = source[source.index("def status_payload"):source.index("async def process_candidate")]
+    assert "plan = self.plan()" in status
+    assert "actual = self.actual()" in status
+    assert "for action in raw_actions" in status
+
+
+def test_optimizer_store_initializes_schema_once_per_database_path():
+    source = (ROOT / "app" / "optimizer_store.py").read_text(encoding="utf-8")
+    assert "_TABLES_INITIALIZED_PATH" in source
+    assert "_TABLES_LOCK = RLock()" in source
+    assert "if _TABLES_INITIALIZED_PATH == path:" in source
+    assert "with connect_db(timeout=30.0)" in source
+
+
+def test_cancelled_actions_do_not_render_stale_database_errors():
+    source = (ROOT / "app" / "ui_actions.py").read_text(encoding="utf-8")
+    assert "if(a.status==='cancelled')" in source
+    assert "a.status!=='cancelled'" in source

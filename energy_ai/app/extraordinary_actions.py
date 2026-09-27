@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from .actuator_release_state import release_status
-from .db import DB_PATH
+from .db import DB_PATH, connect_db
 from .optimizer_store import latest_plan
 from .production_state import (
     mark_actuator_ready,
@@ -31,6 +31,32 @@ _GRID_CONFIRMATIONS_REQUIRED = 3
 _LOCK = RLock()
 _INITIALIZED_PATH: str | None = None
 _RUNTIME_CONTROLLER: "ExtraordinaryActionController | None" = None
+
+
+def _is_locked_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+def _write_action_transaction(fn, *, attempts: int = 6):
+    """Run one short action-state write transaction with bounded lock retry."""
+    import time
+    delay = 0.05
+    last_error: BaseException | None = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            with connect_db(timeout=5.0) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                result = fn(conn)
+                conn.commit()
+                return result
+        except BaseException as exc:
+            last_error = exc
+            if not _is_locked_error(exc) or attempt + 1 >= attempts:
+                raise
+            time.sleep(delay)
+            delay = min(0.8, delay * 2.0)
+    assert last_error is not None
+    raise last_error
 
 
 def _now() -> datetime:
@@ -57,7 +83,7 @@ def _init() -> None:
     with _LOCK:
         if _INITIALIZED_PATH == path:
             return
-        with sqlite3.connect(DB_PATH, timeout=30) as c:
+        with connect_db(timeout=30.0) as c:
             c.execute("PRAGMA busy_timeout=30000")
             c.executescript(
                 """
@@ -105,7 +131,7 @@ def _row_to_action(row) -> dict[str, Any]:
 
 def get_action(action_id: int) -> dict[str, Any]:
     _init()
-    with sqlite3.connect(DB_PATH, timeout=20) as c:
+    with connect_db(timeout=20.0) as c:
         row = c.execute(
             """SELECT action_id,kind,status,starts_at,ends_at,authorized,payload_json,
                       runtime_json,created_at,updated_at
@@ -126,14 +152,14 @@ def list_actions(*, include_terminal: bool = True) -> list[dict[str, Any]]:
     if not include_terminal:
         query += " WHERE status='scheduled'"
     query += " ORDER BY starts_at ASC, action_id ASC"
-    with sqlite3.connect(DB_PATH, timeout=20) as c:
+    with connect_db(timeout=20.0) as c:
         rows = c.execute(query, args).fetchall()
     return [_row_to_action(row) for row in rows]
 
 
 def _overlap_exists(start: datetime, end: datetime) -> bool:
     _init()
-    with sqlite3.connect(DB_PATH, timeout=20) as c:
+    with connect_db(timeout=20.0) as c:
         row = c.execute(
             """SELECT action_id FROM extraordinary_action
                WHERE status='scheduled'
@@ -182,7 +208,7 @@ def create_self_sufficiency_action(
         "grid_confirmations": 0,
         "last_error": None,
     }
-    with sqlite3.connect(DB_PATH, timeout=30) as c:
+    with connect_db(timeout=30.0) as c:
         cur = c.execute(
             """INSERT INTO extraordinary_action(
                    kind,status,starts_at,ends_at,authorized,payload_json,runtime_json,created_at,updated_at
@@ -204,27 +230,46 @@ def create_self_sufficiency_action(
 
 def update_runtime(action_id: int, **updates: Any) -> dict[str, Any]:
     _init()
-    action = get_action(action_id)
-    runtime = dict(action.get("runtime") or {})
-    runtime.update(updates)
     stamp = _iso(_now())
-    with sqlite3.connect(DB_PATH, timeout=30) as c:
-        c.execute(
+
+    def write(conn):
+        row = conn.execute(
+            "SELECT runtime_json FROM extraordinary_action WHERE action_id=?",
+            (int(action_id),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(int(action_id))
+        runtime = _decode(row[0])
+        runtime.update(updates)
+        conn.execute(
             "UPDATE extraordinary_action SET runtime_json=?,updated_at=? WHERE action_id=?",
-            (json.dumps(runtime, ensure_ascii=False, sort_keys=True, default=str), stamp, int(action_id)),
+            (
+                json.dumps(runtime, ensure_ascii=False, sort_keys=True, default=str),
+                stamp,
+                int(action_id),
+            ),
         )
+
+    _write_action_transaction(write)
     return get_action(action_id)
 
 
 def mark_status(action_id: int, status: str, **runtime_updates: Any) -> dict[str, Any]:
     if status not in {"scheduled", "cancelled", "completed", "failed"}:
         raise ValueError(f"Unsupported action status {status!r}")
-    action = get_action(action_id)
-    runtime = dict(action.get("runtime") or {})
-    runtime.update(runtime_updates)
+    _init()
     stamp = _iso(_now())
-    with sqlite3.connect(DB_PATH, timeout=30) as c:
-        c.execute(
+
+    def write(conn):
+        row = conn.execute(
+            "SELECT runtime_json FROM extraordinary_action WHERE action_id=?",
+            (int(action_id),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(int(action_id))
+        runtime = _decode(row[0])
+        runtime.update(runtime_updates)
+        conn.execute(
             "UPDATE extraordinary_action SET status=?,runtime_json=?,updated_at=? WHERE action_id=?",
             (
                 status,
@@ -233,6 +278,8 @@ def mark_status(action_id: int, status: str, **runtime_updates: Any) -> dict[str
                 int(action_id),
             ),
         )
+
+    _write_action_transaction(write)
     return get_action(action_id)
 
 
@@ -246,6 +293,7 @@ def cancel_action(action_id: int) -> dict[str, Any]:
         phase="cancelled",
         cancelled_at=_iso(_now()),
         last_transition_at=_iso(_now()),
+        last_error=None,
     )
 
 
@@ -588,15 +636,42 @@ class ExtraordinaryActionController:
         except Exception:
             return {}
 
-    def decorated_action(self, action: dict[str, Any]) -> dict[str, Any]:
+    def decorated_action(
+        self,
+        action: dict[str, Any],
+        *,
+        plan: dict[str, Any] | None = None,
+        actual: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status = str(action.get("status") or "")
+        runtime = action.get("runtime") or {}
+        if status in {"cancelled", "completed"}:
+            assessment = runtime.get("assessment") or {
+                "available": False,
+                "reason": status,
+                "phase": status,
+            }
+        else:
+            assessment = action_assessment(
+                action,
+                self.cfg,
+                plan if plan is not None else self.plan(),
+                actual if actual is not None else self.actual(),
+            )
         return {
             **action,
             "phase": action_phase(action),
-            "assessment": action_assessment(action, self.cfg, self.plan(), self.actual()),
+            "assessment": assessment,
         }
 
     def status_payload(self) -> dict[str, Any]:
-        actions = [self.decorated_action(a) for a in list_actions(include_terminal=True)]
+        raw_actions = list_actions(include_terminal=True)
+        plan = self.plan()
+        actual = self.actual()
+        actions = [
+            self.decorated_action(action, plan=plan, actual=actual)
+            for action in raw_actions
+        ]
         authority = control_authority_status()
         return {
             "ok": True,
@@ -901,27 +976,44 @@ class ExtraordinaryActionController:
 
     async def cancel(self, action_id: int) -> dict[str, Any]:
         async with self._transition_lock:
-            action = get_action(action_id)
+            action = await asyncio.to_thread(get_action, action_id)
             phase = action_phase(action)
             if action["status"] != "scheduled":
                 return self.decorated_action(action)
             if phase in {"active", "ending"}:
                 # Cancellation of an active outage is an end request; grid return
                 # must still be confirmed unless the explicit force-end API is used.
-                runtime = update_runtime(
-                    action_id,
-                    cancellation_requested=True,
-                    scheduled_end_overridden_at=_iso(_now()),
-                    last_transition_at=_iso(_now()),
-                )
-                with sqlite3.connect(DB_PATH, timeout=30) as c:
-                    c.execute(
-                        "UPDATE extraordinary_action SET ends_at=?,updated_at=? WHERE action_id=?",
-                        (_iso(_now()), _iso(_now()), int(action_id)),
-                    )
-                return self.decorated_action(get_action(action_id))
+                now_iso = _iso(_now())
 
-            cancelled = cancel_action(action_id)
+                def request_end(conn):
+                    row = conn.execute(
+                        "SELECT runtime_json FROM extraordinary_action WHERE action_id=?",
+                        (int(action_id),),
+                    ).fetchone()
+                    if row is None:
+                        raise KeyError(int(action_id))
+                    runtime = _decode(row[0])
+                    runtime.update({
+                        "cancellation_requested": True,
+                        "scheduled_end_overridden_at": now_iso,
+                        "last_transition_at": now_iso,
+                        "last_error": None,
+                    })
+                    conn.execute(
+                        "UPDATE extraordinary_action SET ends_at=?,runtime_json=?,updated_at=? WHERE action_id=?",
+                        (
+                            now_iso,
+                            json.dumps(runtime, ensure_ascii=False, sort_keys=True, default=str),
+                            now_iso,
+                            int(action_id),
+                        ),
+                    )
+
+                await asyncio.to_thread(_write_action_transaction, request_end)
+                current = await asyncio.to_thread(get_action, action_id)
+                return self.decorated_action(current)
+
+            cancelled = await asyncio.to_thread(cancel_action, action_id)
             runtime = cancelled.get("runtime") or {}
             if runtime.get("auto_activated"):
                 restore = str((cancelled.get("runtime") or {}).get("restore_operator_mode") or (cancelled.get("payload") or {}).get("restore_operator_mode") or "shadow")
@@ -943,6 +1035,10 @@ class ExtraordinaryActionController:
             return {"action": self.decorated_action(get_action(action_id)), "restore": result}
 
     async def reconcile_once(self) -> dict[str, Any]:
+        async with self._transition_lock:
+            return await self._reconcile_once_locked()
+
+    async def _reconcile_once_locked(self) -> dict[str, Any]:
         action = current_scheduled_action()
         if not action:
             return {"status": "idle"}

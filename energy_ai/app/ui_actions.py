@@ -19,6 +19,8 @@ function installActionsTab(){
 }
 function actionLocalIso(v){if(!v)return null;const d=new Date(v);return Number.isNaN(d.getTime())?null:d.toISOString()}
 function actionAssessmentHtml(a){
+  if(a.status==='cancelled')return '<span class="muted">Cancelled</span>';
+  if(a.status==='completed')return '<span class="muted">Completed</span>';
   const x=a.assessment||{};
   if(!x.available)return '<span class="action-risk">'+(x.reason||'Forecast coverage not available yet')+'</span>';
   const target=x.required_start_soc_pct==null?'—':n(x.required_start_soc_pct,1)+'%';
@@ -41,7 +43,7 @@ function renderActions(d){
       if(phase==='active'||phase==='ending')controls+='<button class="btn warn" onclick="forceEndExtraAction('+a.action_id+')">Force end</button>';
       controls+='</div>';
     }
-    const detail=rt.last_error?'<div class="action-error">'+String(rt.last_error).slice(0,180)+'</div>':'';
+    const detail=(rt.last_error&&a.status!=='cancelled'&&a.status!=='completed')?'<div class="action-error">'+String(rt.last_error).slice(0,180)+'</div>':'';
     const conf=rt.grid_confirmations?'<div class="muted">grid confirmations '+rt.grid_confirmations+'/3</div>':'';
     body+='<tr><td>'+s+'<br><span class="muted">→ '+e+'</span></td><td><span class="action-phase '+phase+'">'+phase+'</span>'+conf+'</td><td>'+actionAssessmentHtml(a)+detail+'</td><td>'+controls+'</td></tr>';
   });
