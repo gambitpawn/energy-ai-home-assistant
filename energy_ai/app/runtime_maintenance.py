@@ -9,7 +9,7 @@ from .adaptive_auto import automatic_maintenance_once as adaptive_maintenance_on
 from .adaptive_learning import active_run
 from .evaluation_decomposition import run_pending_evaluation_decomposition
 from .gradient_training import automatic_maintenance_once as gradient_maintenance_once
-from .maintenance_coordination import run_low_priority
+from .maintenance_coordination import LANE_EVALUATION, LANE_HEAVY, run_low_priority
 from .neural_auto import automatic_maintenance_once as neural_maintenance_once
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .pv_auto import automatic_pv_retraining_once
@@ -43,7 +43,7 @@ async def _neural_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=5))
         try:
-            await run_low_priority("neural_maintenance", neural_maintenance_once, cfg)
+            await run_low_priority("neural_maintenance", neural_maintenance_once, cfg, lane=LANE_HEAVY, timeout_seconds=1800)
         except Exception:
             pass
 
@@ -52,7 +52,7 @@ async def _adaptive_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=20))
         try:
-            await run_low_priority("adaptive_maintenance", adaptive_maintenance_once, cfg)
+            await run_low_priority("adaptive_maintenance", adaptive_maintenance_once, cfg, lane=LANE_HEAVY, timeout_seconds=1800)
         except Exception:
             pass
 
@@ -63,7 +63,7 @@ async def _gradient_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=35))
         try:
-            await run_low_priority("gradient_maintenance", gradient_maintenance_once, cfg)
+            await run_low_priority("gradient_maintenance", gradient_maintenance_once, cfg, lane=LANE_HEAVY, timeout_seconds=1800)
         except Exception:
             pass
 
@@ -73,7 +73,7 @@ async def _pv_loop(cfg) -> None:
         await asyncio.sleep(_seconds_until_slot(minute=50, period_hours=6, phase_hour=3))
         try:
             if await asyncio.to_thread(active_run) is None:
-                await run_low_priority("pv_retraining", automatic_pv_retraining_once)
+                await run_low_priority("pv_retraining", automatic_pv_retraining_once, lane=LANE_HEAVY, timeout_seconds=1800)
         except Exception:
             pass
 
@@ -82,7 +82,7 @@ async def _optimizer_day_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=8, period_hours=6, phase_hour=1))
         try:
-            await run_low_priority("optimizer_day_evaluation", evaluate_matured_optimizer_days, cfg, 14)
+            await run_low_priority(\n                "optimizer_day_evaluation",\n                evaluate_matured_optimizer_days,\n                cfg,\n                14,\n                lane=LANE_EVALUATION,\n                timeout_seconds=600,\n            )
         except Exception:
             pass
 
