@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app import runtime_maintenance as maintenance
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FixedDateTime(datetime):
