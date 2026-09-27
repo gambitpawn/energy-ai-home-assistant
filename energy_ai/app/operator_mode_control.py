@@ -14,7 +14,8 @@ from .actuator_timing_v194 import candidate_start_status
 from .dashboard import DASHBOARD_HTML
 from .db import DB_PATH
 from .production_state import set_mode, status as production_status
-from .runtime_ui import CURRENT_UI_EXTENSION
+from . import runtime_ui as runtime_ui_module
+from .extraordinary_actions import control_authority_status
 
 
 OPERATOR_MODE_EXTENSION = r'''
@@ -158,7 +159,7 @@ def install_operator_mode_control(
 
     @app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
     async def current_ui_with_operator_mode():
-        return DASHBOARD_HTML.replace("</body>", CURRENT_UI_EXTENSION + OPERATOR_MODE_EXTENSION + "</body>")
+        return DASHBOARD_HTML.replace("</body>", runtime_ui_module.CURRENT_UI_EXTENSION + OPERATOR_MODE_EXTENSION + "</body>")
 
     def payload(extra: dict[str, Any] | None = None) -> dict[str, Any]:
         prod = production_status()
@@ -189,6 +190,18 @@ def install_operator_mode_control(
 
     @app.post("/control/operator-mode/shadow", tags=["control"])
     async def operator_mode_shadow():
+        authority = control_authority_status()
+        if authority.get("blocking"):
+            action = authority.get("action") or {}
+            raise HTTPException(
+                409,
+                {
+                    "error": "extraordinary_action_has_control_priority",
+                    "action_id": action.get("action_id"),
+                    "phase": authority.get("phase"),
+                    "instruction": "Cancel or end the extraordinary action before switching to Shadow.",
+                },
+            )
         current = production_status()
         if current.get("operating_mode") == "shadow" and not current.get("physical_writes_enabled") and not current.get("actuator_ready"):
             return payload({"transition": "already_shadow"})
