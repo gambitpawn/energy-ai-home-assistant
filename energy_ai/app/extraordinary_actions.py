@@ -150,6 +150,7 @@ def create_self_sufficiency_action(
     ends_at: str,
     *,
     restore_operator_mode: str,
+    prep_horizon_hours: float = PREP_HORIZON_HOURS,
 ) -> dict[str, Any]:
     _init()
     start = _parse(starts_at)
@@ -171,6 +172,7 @@ def create_self_sufficiency_action(
         "authorized_physical_control": True,
         "offgrid_working_mode": OFFGRID_MODE,
         "restore_operator_mode": restore,
+        "prep_horizon_hours": max(1.0, float(prep_horizon_hours)),
         "timezone": str(LOCAL_TZ),
     }
     runtime = {
@@ -267,7 +269,11 @@ def action_phase(action: dict[str, Any], now: datetime | None = None) -> str:
         return "ending"
     if now >= start:
         return "active"
-    if start - now <= timedelta(hours=PREP_HORIZON_HOURS):
+    prep_hours = max(
+        1.0,
+        float((action.get("payload") or {}).get("prep_horizon_hours") or PREP_HORIZON_HOURS),
+    )
+    if start - now <= timedelta(hours=prep_hours):
         return "preparing"
     return "scheduled"
 
@@ -1110,6 +1116,7 @@ def install_extraordinary_actions(*, app: FastAPI, base, runtime_ui_module, ui_e
                 starts_at,
                 ends_at,
                 restore_operator_mode=restore_mode,
+                prep_horizon_hours=float((controller.cfg.get("forecast") or {}).get("horizon_hours", PREP_HORIZON_HOURS)),
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc))
