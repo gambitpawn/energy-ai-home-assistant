@@ -29,8 +29,9 @@ def test_compute_cap_is_applied_before_uvicorn_starts():
         assert run_sh.index(f"export {name}=2") < uvicorn_pos
 
 
-def test_compute_cap_does_not_change_maintenance_serialization_policy():
+def test_compute_cap_does_not_change_per_lane_maintenance_serialization_policy():
     source = (ROOT / "app" / "maintenance_coordination.py").read_text(encoding="utf-8")
-    assert "_LOW_PRIORITY_LOCK = asyncio.Lock()" in source
-    assert "async with _LOW_PRIORITY_LOCK" in source
-    assert "await asyncio.to_thread(fn, *args, **kwargs)" in source
+    assert "_LANE_LOCKS = {lane: asyncio.Lock() for lane in _LANES}" in source
+    assert "async with _LANE_LOCKS[lane]" in source
+    assert "supervised_disposable_worker" in source
+    assert "_apply_low_priority_limits()" in source
