@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+from app.actuator_control_lease import ActuatorControlLease
 from app.extraordinary_actions import (
+    ExtraordinaryActionController,
     OFFGRID_MODE,
     required_start_energy,
     reserve_overlay,
@@ -200,3 +203,81 @@ def test_cancelled_actions_do_not_render_stale_database_errors():
     source = (ROOT / "app" / "ui_actions.py").read_text(encoding="utf-8")
     assert "if(a.status==='cancelled')" in source
     assert "a.status!=='cancelled'" in source
+
+
+def test_restore_zero_lease_matches_verified_physical_zero():
+    lease = ActuatorControlLease()
+    old = {
+        "source": "selector_quarter_control",
+        "source_id": "old",
+        "engine_id": "adaptive_deterministic_v1",
+        "decision_start": "2026-09-29T10:00:00+00:00",
+        "valid_until": "2026-09-29T10:15:00+00:00",
+        "requested_action_kw": 7.36,
+    }
+    lease.acknowledge(
+        old,
+        target_kw=7.36,
+        reason="old_normal_target",
+        readback={"working_mode": "EMS BattCtrl", "battery_power_target_kw": 7.36},
+    )
+    controller = object.__new__(ExtraordinaryActionController)
+    controller.actuator = SimpleNamespace(control_lease=lease)
+    controller.cfg = {
+        "actuator": {
+            "control_working_mode": "EMS BattCtrl",
+            "ack_tolerance_kw": 0.10,
+            "zero_deadband_kw": 0.05,
+        }
+    }
+    action = {
+        "action_id": 17,
+        "kind": "self_sufficiency",
+        "starts_at": "2026-09-29T08:00:00+00:00",
+        "ends_at": "2026-09-29T10:00:00+00:00",
+    }
+    restored = controller._acknowledge_restored_zero_lease(
+        action,
+        {
+            "acknowledged": True,
+            "working_mode": "EMS BattCtrl",
+            "battery_power_target_kw": 0.0,
+        },
+    )
+    current = lease.current_command()
+    assert restored["safe_action_kw"] == 0.0
+    assert current is not None
+    assert current["safe_action_kw"] == 0.0
+    assert current["source"] == "extraordinary_action_restore"
+    assert current["reason"] == "extraordinary_action_restore_zero_acknowledged"
+
+
+def test_active_restore_replaces_lease_before_action_completion_and_does_not_fail_safe_on_refresh_error():
+    source = (ROOT / "app" / "extraordinary_actions.py").read_text(encoding="utf-8")
+    block = source[source.index('if restore == "active":'):source.index('disarm = await self.actuator.disarm')]
+    assert block.index("await self.adapter.enter_control_mode_zero()") < block.index(
+        "self._acknowledge_restored_zero_lease(action, entered)"
+    )
+    assert block.index("self._acknowledge_restored_zero_lease(action, entered)") < block.index(
+        'mark_status(\n                action["action_id"],\n                "completed"'
+    )
+    assert "self.actuator.fail_safe" not in block
+    assert "normal_control_resume_pending=True" in block
+    assert "verified_zero_held_pending_fresh_normal_candidate" in block
+
+
+def test_actions_emit_durable_transition_audit_for_offgrid_and_restore():
+    source = (ROOT / "app" / "extraordinary_actions.py").read_text(encoding="utf-8")
+    assert '"extraordinary_action_offgrid_entered"' in source
+    assert '"verified_ems_offgrid"' in source
+    assert '"extraordinary_action_grid_return_confirmed"' in source
+    assert '"extraordinary_action_control_restored"' in source
+    assert '"verified_zero_control_lease_established"' in source
+    assert '"extraordinary_action_normal_control_resumed"' in source
+
+
+def test_actions_transition_audit_does_not_store_full_optimizer_plan():
+    source = (ROOT / "app" / "extraordinary_actions.py").read_text(encoding="utf-8")
+    active = source[source.index('if restore == "active":'):source.index('disarm = await self.actuator.disarm')]
+    assert '"row_count": len(refresh.get("rows") or [])' in active
+    assert '{"refresh": refresh}' not in active
