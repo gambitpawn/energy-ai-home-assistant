@@ -937,7 +937,11 @@ class ExtraordinaryActionController:
             action,
             "extraordinary_action_preparation_armed",
             "verified_zero_handshake_before_outage",
-            {"arm": arm, "restore_operator_mode": runtime.get("restore_operator_mode")},
+            {
+                "restore_operator_mode": runtime.get("restore_operator_mode"),
+                "control_mode_held": bool(arm.get("control_mode_held")),
+                "handshake_command_id": arm.get("handshake_command_id"),
+            },
         )
         return {
             "ok": True,
@@ -1009,12 +1013,13 @@ class ExtraordinaryActionController:
                     "confirmations": confirmations,
                     "required": _GRID_CONFIRMATIONS_REQUIRED,
                 }
-            self._audit_transition(
-                action,
-                "extraordinary_action_grid_return_confirmed",
-                "three_consecutive_voltage_confirmations",
-                {"grid": grid, "confirmations": confirmations},
-            )
+            if confirmations == _GRID_CONFIRMATIONS_REQUIRED:
+                self._audit_transition(
+                    action,
+                    "extraordinary_action_grid_return_confirmed",
+                    "three_consecutive_voltage_confirmations",
+                    {"grid": grid, "confirmations": confirmations},
+                )
 
         restore = str((action.get("runtime") or {}).get("restore_operator_mode") or (action.get("payload") or {}).get("restore_operator_mode") or "shadow")
         if restore == "active":
@@ -1072,11 +1077,16 @@ class ExtraordinaryActionController:
                     restore_refresh_error=None,
                     last_error=None,
                 )
+                refresh_summary = {
+                    "generated_at": refresh.get("generated_at") if isinstance(refresh, dict) else None,
+                    "planner": refresh.get("planner") if isinstance(refresh, dict) else None,
+                    "row_count": len(refresh.get("rows") or []) if isinstance(refresh, dict) else None,
+                }
                 self._audit_transition(
                     action,
                     "extraordinary_action_normal_control_resumed",
                     "post_action_optimizer_refresh_completed",
-                    {"refresh": refresh},
+                    {"refresh": refresh_summary},
                 )
 
             return {
