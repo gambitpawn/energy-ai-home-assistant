@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from . import deterministic_actuator as actuator_audit
 from .actuator_release_state import release_status
 from .db import DB_PATH, connect_db
 from .optimizer_store import latest_plan
@@ -636,6 +637,77 @@ class ExtraordinaryActionController:
         except Exception:
             return {}
 
+    def _audit_transition(
+        self,
+        action: dict[str, Any],
+        event_type: str,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Best-effort durable audit of extraordinary-action physical transitions."""
+        actuator_audit._event(
+            str(event_type),
+            str(reason),
+            {
+                "action_id": int(action["action_id"]),
+                "action_kind": str(action.get("kind") or ACTION_KIND),
+                "starts_at": action.get("starts_at"),
+                "ends_at": action.get("ends_at"),
+                **(payload or {}),
+            },
+        )
+
+    def _acknowledge_restored_zero_lease(
+        self,
+        action: dict[str, Any],
+        readback: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Make verified zero control truth atomic with the return from Off-Grid.
+
+        The normal watchdog must never regain authority while its process-local
+        lease still describes the pre-action target. The inverter readback is
+        therefore verified first, then the lease is replaced with a fresh zero
+        command, and only after that is the action marked completed.
+        """
+        actuator_cfg = self.cfg.get("actuator") or {}
+        control_mode = str(actuator_cfg.get("control_working_mode") or "EMS BattCtrl")
+        tolerance = max(
+            0.01,
+            float(actuator_cfg.get("ack_tolerance_kw", 0.10)),
+            float(actuator_cfg.get("zero_deadband_kw", 0.05)),
+        )
+        if not readback.get("acknowledged"):
+            raise RuntimeError(f"restore zero handshake was not acknowledged: {readback}")
+        if str(readback.get("working_mode")) != control_mode:
+            raise RuntimeError(
+                f"restore zero handshake ended in {readback.get('working_mode')!r}, "
+                f"expected {control_mode!r}"
+            )
+        target = readback.get("battery_power_target_kw")
+        if target is None or abs(float(target)) > tolerance:
+            raise RuntimeError(
+                f"restore zero handshake target {target!r} outside zero tolerance {tolerance:.3f} kW"
+            )
+
+        lease = getattr(self.actuator, "control_lease", None)
+        if lease is None:
+            raise RuntimeError("actuator_control_lease_unavailable_during_action_restore")
+        now = _now()
+        candidate = {
+            "source": "extraordinary_action_restore",
+            "source_id": f"self_sufficiency:{action['action_id']}:restore",
+            "engine_id": "extraordinary_action",
+            "decision_start": now.isoformat(),
+            "valid_until": (now + timedelta(minutes=15)).isoformat(),
+            "requested_action_kw": 0.0,
+        }
+        return lease.acknowledge(
+            candidate,
+            target_kw=0.0,
+            reason="extraordinary_action_restore_zero_acknowledged",
+            readback=readback,
+        )
+
     def decorated_action(
         self,
         action: dict[str, Any],
@@ -861,6 +933,12 @@ class ExtraordinaryActionController:
             last_transition_at=_iso(_now()),
             last_error=None,
         )
+        self._audit_transition(
+            action,
+            "extraordinary_action_preparation_armed",
+            "verified_zero_handshake_before_outage",
+            {"arm": arm, "restore_operator_mode": runtime.get("restore_operator_mode")},
+        )
         return {
             "ok": True,
             "preflight": preflight,
@@ -887,6 +965,12 @@ class ExtraordinaryActionController:
             verified_working_mode=str(readback.get("working_mode") or OFFGRID_MODE),
             last_transition_at=_iso(_now()),
             last_error=None,
+        )
+        self._audit_transition(
+            action,
+            "extraordinary_action_offgrid_entered",
+            "verified_ems_offgrid",
+            {"readback": readback},
         )
         return {"ok": True, "readback": readback}
 
@@ -925,37 +1009,84 @@ class ExtraordinaryActionController:
                     "confirmations": confirmations,
                     "required": _GRID_CONFIRMATIONS_REQUIRED,
                 }
+            self._audit_transition(
+                action,
+                "extraordinary_action_grid_return_confirmed",
+                "three_consecutive_voltage_confirmations",
+                {"grid": grid, "confirmations": confirmations},
+            )
 
         restore = str((action.get("runtime") or {}).get("restore_operator_mode") or (action.get("payload") or {}).get("restore_operator_mode") or "shadow")
         if restore == "active":
+            # Restore physical control to a verified zero target first. Crucially,
+            # replace the process-local watchdog lease *before* completing the
+            # action; otherwise the normal watchdog can compare zero readback
+            # against the stale pre-action nonzero target and enter PAUSED.
             entered = await self.adapter.enter_control_mode_zero()
+            zero_lease = self._acknowledge_restored_zero_lease(action, entered)
+            restored_at = _iso(_now())
+            self._audit_transition(
+                action,
+                "extraordinary_action_control_restored",
+                "verified_zero_control_lease_established",
+                {"readback": entered, "control_lease": zero_lease, "forced_end": bool(force)},
+            )
             mark_status(
                 action["action_id"],
                 "completed",
                 phase="completed",
-                completed_at=_iso(_now()),
+                completed_at=restored_at,
                 forced_end=bool(force),
-                last_transition_at=_iso(_now()),
+                last_transition_at=restored_at,
                 last_error=None,
+                restore_zero_lease_at=restored_at,
+                normal_control_resume_pending=True,
             )
+
+            # A planning refresh is desirable for immediate normal control, but
+            # failure is not itself a physical hazard: verified EMS BattCtrl at
+            # zero now has a matching process lease, and the watchdog safely
+            # holds zero until a fresh normal candidate arrives.
+            refresh = None
+            refresh_error = None
             try:
                 refresh = await self.base.refresh_optimizer_plan()
             except Exception as exc:
-                await self.actuator.fail_safe(
-                    "extraordinary_action_restore_refresh_failed",
-                    {"action_id": action["action_id"], "error": repr(exc)},
+                refresh_error = repr(exc)
+                update_runtime(
+                    action["action_id"],
+                    normal_control_resume_pending=True,
+                    restore_refresh_error=refresh_error,
+                    last_error=refresh_error,
                 )
-                return {
-                    "ok": False,
-                    "restored_mode": "active",
-                    "entered": entered,
-                    "error": repr(exc),
-                }
+                self._audit_transition(
+                    action,
+                    "extraordinary_action_restore_refresh_deferred",
+                    "verified_zero_held_pending_fresh_normal_candidate",
+                    {"error": refresh_error, "readback": entered},
+                )
+            else:
+                update_runtime(
+                    action["action_id"],
+                    normal_control_resume_pending=False,
+                    restore_refresh_error=None,
+                    last_error=None,
+                )
+                self._audit_transition(
+                    action,
+                    "extraordinary_action_normal_control_resumed",
+                    "post_action_optimizer_refresh_completed",
+                    {"refresh": refresh},
+                )
+
             return {
                 "ok": True,
                 "restored_mode": "active",
                 "entered": entered,
+                "control_lease": zero_lease,
                 "refresh": refresh,
+                "refresh_error": refresh_error,
+                "normal_control_resume_pending": refresh_error is not None,
             }
 
         disarm = await self.actuator.disarm("extraordinary_action_complete_restore_shadow")
@@ -967,6 +1098,12 @@ class ExtraordinaryActionController:
             forced_end=bool(force),
             last_transition_at=_iso(_now()),
             last_error=None,
+        )
+        self._audit_transition(
+            action,
+            "extraordinary_action_control_restored",
+            "restored_to_shadow",
+            {"disarm": disarm, "forced_end": bool(force)},
         )
         return {
             "ok": bool(disarm.get("ok")),
