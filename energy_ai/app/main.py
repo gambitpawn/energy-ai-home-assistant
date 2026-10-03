@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -12,6 +13,7 @@ from .collector import Collector
 from .component_registry import registry_status
 from .config import load_config
 from .db import get_prices, init_db, insert_llm, insert_pv_forecast, latest_pv_forecast, latest_rows, price_day_coverage, rebuild_recent_15m, upsert_prices
+from .diagnostics_store import checkpoint_control_run, new_control_run_id, set_current_control_run, start_control_run
 from .flexible_loads import discover_flexible_load_entities, ev_state, sauna_state
 from .forecast import PVForecaster
 from .llm import LLMExplainer
@@ -125,15 +127,103 @@ def _seconds_to_next_quarter():
 async def _forecast_maintenance_loop():
     while True:
         await asyncio.sleep(_seconds_to_next_quarter())
-        for fn,args in ((evaluate_matured_forecasts,(7,)),(evaluate_matured_load_forecasts,(7,))):
-            try: await asyncio.to_thread(fn,*args)
-            except Exception: pass
-        try: await _refresh_pv_forecast()
-        except Exception: pass
-        try: await _refresh_load_forecast()
-        except Exception: pass
-        try: await _refresh_optimizer_plan()
-        except Exception: pass
+        run_id = new_control_run_id()
+        set_current_control_run(run_id)
+        await asyncio.to_thread(
+            start_control_run,
+            run_id,
+            trigger="scheduled_quarter",
+            payload={"scheduled_offset_seconds": 20},
+        )
+        fatal_error = None
+        try:
+            for stage, fn, args in (
+                ("pv_forecast_evaluation", evaluate_matured_forecasts, (7,)),
+                ("load_forecast_evaluation", evaluate_matured_load_forecasts, (7,)),
+            ):
+                try:
+                    await asyncio.to_thread(fn, *args)
+                    await asyncio.to_thread(checkpoint_control_run, run_id, stage=stage, status="completed")
+                except Exception as exc:
+                    await asyncio.to_thread(
+                        checkpoint_control_run,
+                        run_id,
+                        stage=stage,
+                        status="failed_nonfatal",
+                        error=repr(exc),
+                        payload={"traceback": traceback.format_exc(limit=40)},
+                    )
+            try:
+                pv = await _refresh_pv_forecast()
+                await asyncio.to_thread(
+                    checkpoint_control_run,
+                    run_id,
+                    stage="pv_forecast",
+                    status="completed",
+                    payload={"generated_at": pv.get("generated_at"), "model": pv.get("model")},
+                )
+            except Exception as exc:
+                await asyncio.to_thread(
+                    checkpoint_control_run,
+                    run_id,
+                    stage="pv_forecast",
+                    status="failed_nonfatal",
+                    error=repr(exc),
+                    payload={"traceback": traceback.format_exc(limit=40)},
+                )
+            try:
+                load = await _refresh_load_forecast()
+                await asyncio.to_thread(
+                    checkpoint_control_run,
+                    run_id,
+                    stage="load_forecast",
+                    status="completed",
+                    payload={"generated_at": load.get("generated_at"), "model": load.get("model")},
+                )
+            except Exception as exc:
+                await asyncio.to_thread(
+                    checkpoint_control_run,
+                    run_id,
+                    stage="load_forecast",
+                    status="failed_nonfatal",
+                    error=repr(exc),
+                    payload={"traceback": traceback.format_exc(limit=40)},
+                )
+            try:
+                result = await _refresh_optimizer_plan()
+                actuator_status = str((result.get("actuator") or {}).get("status") or "unknown")
+                selector_status = str((result.get("model_selector") or {}).get("status") or "ok")
+                final_status = (
+                    "degraded"
+                    if actuator_status in {"failed", "no_control_candidate"}
+                    or selector_status in {"failed", "no_information_vintage"}
+                    else "completed"
+                )
+                await asyncio.to_thread(
+                    checkpoint_control_run,
+                    run_id,
+                    stage="quarter_complete",
+                    status=final_status,
+                    payload={
+                        "optimizer_generated_at": result.get("generated_at"),
+                        "actuator_status": actuator_status,
+                        "selector_status": selector_status,
+                    },
+                    completed=True,
+                )
+            except Exception as exc:
+                fatal_error = repr(exc)
+                await asyncio.to_thread(
+                    checkpoint_control_run,
+                    run_id,
+                    stage="optimizer_pipeline",
+                    status="failed",
+                    error=fatal_error,
+                    payload={"traceback": traceback.format_exc(limit=40)},
+                    completed=True,
+                )
+        finally:
+            set_current_control_run(None)
 
 @asynccontextmanager
 async def lifespan(app):
