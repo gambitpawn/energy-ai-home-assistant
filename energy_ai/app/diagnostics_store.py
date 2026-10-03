@@ -262,21 +262,24 @@ def control_history(*, start: str | None = None, end: str | None = None, limit: 
         events_by_run: dict[str, list[dict[str, Any]]] = {}
         if rows:
             ids = [str(r[0]) for r in rows]
-            marks = ",".join("?" for _ in ids)
-            for event_id, run_id, created_at, stage, status, payload_json in c.execute(
-                f"""SELECT event_id,run_id,created_at,stage,status,payload_json
-                    FROM diagnostic_control_event
-                    WHERE run_id IN ({marks})
-                    ORDER BY event_id""",
-                ids,
-            ).fetchall():
-                events_by_run.setdefault(str(run_id), []).append({
-                    "event_id": event_id,
-                    "created_at": created_at,
-                    "stage": stage,
-                    "status": status,
-                    "payload": json.loads(payload_json or "{}"),
-                })
+            for offset in range(0, len(ids), 400):
+                chunk = ids[offset:offset + 400]
+                marks = ",".join("?" for _ in chunk)
+                event_rows = c.execute(
+                    f"""SELECT event_id,run_id,created_at,stage,status,payload_json
+                        FROM diagnostic_control_event
+                        WHERE run_id IN ({marks})
+                        ORDER BY event_id""",
+                    chunk,
+                ).fetchall()
+                for event_id, run_id, created_at, stage, status, payload_json in event_rows:
+                    events_by_run.setdefault(str(run_id), []).append({
+                        "event_id": event_id,
+                        "created_at": created_at,
+                        "stage": stage,
+                        "status": status,
+                        "payload": json.loads(payload_json or "{}"),
+                    })
     result = []
     for r in rows:
         result.append({
