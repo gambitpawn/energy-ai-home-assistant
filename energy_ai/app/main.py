@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -150,6 +151,7 @@ async def _forecast_maintenance_loop():
                         stage=stage,
                         status="failed_nonfatal",
                         error=repr(exc),
+                        payload={"traceback": traceback.format_exc(limit=40)},
                     )
             try:
                 pv = await _refresh_pv_forecast()
@@ -167,6 +169,7 @@ async def _forecast_maintenance_loop():
                     stage="pv_forecast",
                     status="failed_nonfatal",
                     error=repr(exc),
+                    payload={"traceback": traceback.format_exc(limit=40)},
                 )
             try:
                 load = await _refresh_load_forecast()
@@ -206,6 +209,7 @@ async def _forecast_maintenance_loop():
                     stage="optimizer_pipeline",
                     status="failed",
                     error=fatal_error,
+                    payload={"traceback": traceback.format_exc(limit=40)},
                     completed=True,
                 )
         finally:
