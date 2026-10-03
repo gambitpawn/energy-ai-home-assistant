@@ -568,6 +568,7 @@ async def run_low_priority(
                 restart_count=int(lane_state.get("restart_count") or 0),
                 duration_seconds=max(0.0, time.monotonic() - started_monotonic),
                 error=repr(exc),
+                traceback_text=traceback.format_exc(limit=40),
             )
             raise
         finally:
