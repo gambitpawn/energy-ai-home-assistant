@@ -18,6 +18,7 @@ from .engine_contract import ENGINE_DECISION_SCHEMA, ENGINE_INPUT_SCHEMA
 from .engine_input_v2 import input_from_optimizer_plan_v2
 from .engine_registry import BASELINE_ENGINE_ID, baseline_decision_from_plan, registry_status
 from .engine_store import latest_engine_decisions
+from .diagnostics_store import control_history, diagnostic_window, maintenance_history
 from .historical_closed_loop import replay_regression
 from .historical_closed_loop_v2 import compare_closed_loop
 from .maintenance_coordination import status as maintenance_status
@@ -76,6 +77,61 @@ def install_runtime_routes(
     @app.get("/maintenance/status", tags=["maintenance"], summary="Maintenance worker status")
     async def maintenance_status_route():
         return {"runtime_build": runtime_build, **maintenance_status()}
+
+    @app.get("/maintenance/history", tags=["maintenance"], summary="Persistent maintenance job history")
+    async def maintenance_history_route(
+        start: str | None = None,
+        end: str | None = None,
+        lane: str | None = None,
+        label: str | None = None,
+        status: str | None = None,
+        limit: int = Query(200, ge=1, le=1000),
+    ):
+        return {
+            "runtime_build": runtime_build,
+            "runs": await asyncio.to_thread(
+                maintenance_history,
+                start=start,
+                end=end,
+                lane=lane,
+                label=label,
+                status=status,
+                limit=limit,
+            ),
+        }
+
+    @app.get("/diagnostics/control-runs", tags=["diagnostics"], summary="Persistent quarter/control pipeline history")
+    async def control_run_history_route(
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = Query(200, ge=1, le=1000),
+    ):
+        return {
+            "runtime_build": runtime_build,
+            "runs": await asyncio.to_thread(control_history, start=start, end=end, limit=limit),
+        }
+
+    @app.get("/diagnostics/window", tags=["diagnostics"], summary="Correlated control diagnostics for a UTC time window")
+    async def diagnostic_window_route(
+        start: str = Query(..., description="Inclusive UTC ISO timestamp"),
+        end: str = Query(..., description="Inclusive UTC ISO timestamp"),
+        limit: int = Query(500, ge=1, le=1000),
+    ):
+        try:
+            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(400, "start and end must be ISO timestamps") from exc
+        if start_dt.tzinfo is None or end_dt.tzinfo is None:
+            raise HTTPException(400, "start and end must include a timezone offset")
+        if end_dt < start_dt:
+            raise HTTPException(400, "end must be greater than or equal to start")
+        if (end_dt - start_dt).total_seconds() > 7 * 86400:
+            raise HTTPException(400, "diagnostic window is limited to 7 days")
+        return {
+            "runtime_build": runtime_build,
+            **(await asyncio.to_thread(diagnostic_window, start=start, end=end, limit=limit)),
+        }
 
     # ---- Optimizer evaluation / diagnostics ---------------------------------
     @app.get("/optimizer/evaluation/evaluate-now", tags=["optimizer-evaluation"], summary="Evaluate matured optimizer days")
