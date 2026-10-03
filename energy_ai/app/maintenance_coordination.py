@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import uuid4
 
+from .diagnostics_store import finish_maintenance_run, start_maintenance_run
+
 LANE_HEAVY = "heavy"
 LANE_EVALUATION = "evaluation"
 _LANES = (LANE_HEAVY, LANE_EVALUATION)
@@ -42,6 +44,7 @@ def _lane_state() -> dict[str, Any]:
         "deadline_at": None,
         "timeout_seconds": None,
         "active_job_pid": None,
+        "last_job_worker_pid": None,
         "last_completed": None,
         "last_completed_at": None,
         "last_error": None,
@@ -385,6 +388,7 @@ def _validate_lane(lane: str) -> str:
 
 async def _run_in_process(
     lane: str,
+    job_id: str,
     label: str,
     fn: Callable[..., Any],
     args: tuple[Any, ...],
@@ -403,7 +407,6 @@ async def _run_in_process(
         })
         raise RuntimeError(f"Dedicated {lane} maintenance supervisor unavailable: {error}")
 
-    job_id = uuid4().hex
     command = (job_id, str(label), fn, args, kwargs, float(timeout_seconds))
     try:
         await asyncio.wait_for(asyncio.to_thread(command_conn.send, command), timeout=5.0)
@@ -432,6 +435,7 @@ async def _run_in_process(
         if message.get("kind") == "started":
             lane_state.update({
                 "active_job_pid": message.get("pid"),
+                "last_job_worker_pid": message.get("pid"),
                 "timeout_seconds": float(message.get("timeout_seconds") or timeout_seconds),
             })
             continue
@@ -474,17 +478,29 @@ async def run_low_priority(
     )
     lane_state = _STATE["lanes"][lane]
     async with _LANE_LOCKS[lane]:
+        job_id = uuid4().hex
+        started_monotonic = time.monotonic()
         lane_state.update({
             "running": str(label),
             "started_at": _now(),
             "deadline_at": _iso_after(timeout),
             "timeout_seconds": timeout,
             "last_error": None,
+            "last_job_worker_pid": None,
         })
+        await asyncio.to_thread(
+            start_maintenance_run,
+            job_id,
+            lane=lane,
+            label=str(label),
+            timeout_seconds=timeout,
+            payload={"execution_mode": lane_state.get("execution_mode")},
+        )
         try:
             if _PROCESS_REQUIRED:
                 result = await _run_in_process(
                     lane,
+                    job_id,
                     str(label),
                     fn,
                     tuple(args),
@@ -500,6 +516,14 @@ async def run_low_priority(
                 "last_completed": str(label),
                 "last_completed_at": _now(),
             })
+            await asyncio.to_thread(
+                finish_maintenance_run,
+                job_id,
+                status="completed",
+                worker_pid=lane_state.get("last_job_worker_pid"),
+                restart_count=int(lane_state.get("restart_count") or 0),
+                duration_seconds=max(0.0, time.monotonic() - started_monotonic),
+            )
             return result
         except asyncio.TimeoutError as exc:
             error = MaintenanceJobTimeoutError(
@@ -512,9 +536,39 @@ async def run_low_priority(
                 "terminated_worker_pid": None,
             }
             lane_state["last_error"] = repr(error)
+            await asyncio.to_thread(
+                finish_maintenance_run,
+                job_id,
+                status="timeout",
+                worker_pid=lane_state.get("last_job_worker_pid"),
+                restart_count=int(lane_state.get("restart_count") or 0),
+                duration_seconds=max(0.0, time.monotonic() - started_monotonic),
+                error=repr(error),
+            )
             raise error from exc
+        except MaintenanceJobTimeoutError as exc:
+            lane_state["last_error"] = repr(exc)
+            await asyncio.to_thread(
+                finish_maintenance_run,
+                job_id,
+                status="timeout",
+                worker_pid=lane_state.get("last_job_worker_pid"),
+                restart_count=int(lane_state.get("restart_count") or 0),
+                duration_seconds=max(0.0, time.monotonic() - started_monotonic),
+                error=repr(exc),
+            )
+            raise
         except Exception as exc:
             lane_state["last_error"] = repr(exc)
+            await asyncio.to_thread(
+                finish_maintenance_run,
+                job_id,
+                status="failed",
+                worker_pid=lane_state.get("last_job_worker_pid"),
+                restart_count=int(lane_state.get("restart_count") or 0),
+                duration_seconds=max(0.0, time.monotonic() - started_monotonic),
+                error=repr(exc),
+            )
             raise
         finally:
             lane_state.update({
