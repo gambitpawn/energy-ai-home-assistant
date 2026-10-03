@@ -128,9 +128,11 @@ def install_runtime_routes(
             raise HTTPException(400, "end must be greater than or equal to start")
         if (end_dt - start_dt).total_seconds() > 7 * 86400:
             raise HTTPException(400, "diagnostic window is limited to 7 days")
+        start_utc = start_dt.astimezone(timezone.utc).isoformat()
+        end_utc = end_dt.astimezone(timezone.utc).isoformat()
         return {
             "runtime_build": runtime_build,
-            **(await asyncio.to_thread(diagnostic_window, start=start, end=end, limit=limit)),
+            **(await asyncio.to_thread(diagnostic_window, start=start_utc, end=end_utc, limit=limit)),
         }
 
     # ---- Optimizer evaluation / diagnostics ---------------------------------
