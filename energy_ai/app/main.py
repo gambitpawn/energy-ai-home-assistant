@@ -187,17 +187,27 @@ async def _forecast_maintenance_loop():
                     stage="load_forecast",
                     status="failed_nonfatal",
                     error=repr(exc),
+                    payload={"traceback": traceback.format_exc(limit=40)},
                 )
             try:
                 result = await _refresh_optimizer_plan()
+                actuator_status = str((result.get("actuator") or {}).get("status") or "unknown")
+                selector_status = str((result.get("model_selector") or {}).get("status") or "ok")
+                final_status = (
+                    "degraded"
+                    if actuator_status in {"failed", "no_control_candidate"}
+                    or selector_status in {"failed", "no_information_vintage"}
+                    else "completed"
+                )
                 await asyncio.to_thread(
                     checkpoint_control_run,
                     run_id,
                     stage="quarter_complete",
-                    status="completed",
+                    status=final_status,
                     payload={
                         "optimizer_generated_at": result.get("generated_at"),
-                        "actuator_status": (result.get("actuator") or {}).get("status"),
+                        "actuator_status": actuator_status,
+                        "selector_status": selector_status,
                     },
                     completed=True,
                 )
