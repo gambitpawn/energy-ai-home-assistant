@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -243,6 +244,7 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
             stage="engine_contract",
             status="failed_nonfatal",
             error=repr(exc),
+            payload={"traceback": traceback.format_exc(limit=40)},
         )
 
     if engine_input is None:
@@ -255,6 +257,7 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
                 stage="engine_input",
                 status="failed",
                 error=repr(exc),
+                payload={"traceback": traceback.format_exc(limit=40)},
             )
             return {**result, "model_selector": {"status": "failed", "error": repr(exc)}}
 
@@ -330,6 +333,7 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
             stage="selector_route",
             status="failed",
             error=repr(exc),
+            payload={"traceback": traceback.format_exc(limit=40)},
         )
 
     candidate = _candidate_from_selection(routed)
@@ -364,6 +368,7 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
         payload={
             "physical_write_performed": actuation.get("physical_write_performed"),
             "reason": actuation.get("reason"),
+            "error": actuation.get("error"),
         },
     )
     return {**result, "actuator": actuation}
@@ -380,12 +385,24 @@ async def refresh_optimizer_plan() -> dict[str, Any]:
         async with _OPTIMIZER_REFRESH_LOCK:
             result = await _refresh_optimizer_pipeline_unlocked()
         if owned_run:
+            actuator_status = str((result.get("actuator") or {}).get("status") or "unknown")
+            selector_status = str((result.get("model_selector") or {}).get("status") or "ok")
+            final_status = (
+                "degraded"
+                if actuator_status in {"failed", "no_control_candidate"}
+                or selector_status in {"failed", "no_information_vintage"}
+                else "completed"
+            )
             await asyncio.to_thread(
                 checkpoint_control_run,
                 run_id,
                 stage="optimizer_refresh_complete",
-                status="completed",
-                payload={"generated_at": result.get("generated_at")},
+                status=final_status,
+                payload={
+                    "generated_at": result.get("generated_at"),
+                    "actuator_status": actuator_status,
+                    "selector_status": selector_status,
+                },
                 completed=True,
             )
         return result
@@ -397,6 +414,7 @@ async def refresh_optimizer_plan() -> dict[str, Any]:
                 stage="optimizer_refresh",
                 status="failed",
                 error=repr(exc),
+                payload={"traceback": traceback.format_exc(limit=40)},
                 completed=True,
             )
         raise
