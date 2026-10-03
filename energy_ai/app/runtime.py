@@ -25,6 +25,7 @@ from .adaptive_deterministic import AdaptiveDeterministicV1
 from .adaptive_learning import current_parameters, mark_orphaned_running_runs
 from .db import DB_PATH
 from .deterministic_actuator import DeterministicActuator
+from .diagnostics_store import checkpoint_control_run, current_control_run_id, new_control_run_id, set_current_control_run, start_control_run
 from .engine_input_v2 import input_from_optimizer_plan_v2
 from .engine_registry import baseline_decision_from_plan
 from .engine_store import insert_engine_run
@@ -194,9 +195,25 @@ def _candidate_from_live_plan(plan: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
+    run_id = current_control_run_id()
     result = await _BASE_OPTIMIZER_REFRESH()
     plan = await asyncio.to_thread(latest_plan, 500)
+    await asyncio.to_thread(
+        checkpoint_control_run,
+        run_id,
+        stage="optimizer_plan",
+        status="completed",
+        plan_generated_at=plan.get("generated_at"),
+        payload={"planner": plan.get("planner"), "rows": len(plan.get("rows") or [])},
+    )
     if plan.get("generated_at") is None or not plan.get("rows"):
+        await asyncio.to_thread(
+            checkpoint_control_run,
+            run_id,
+            stage="optimizer_plan",
+            status="failed",
+            error="no_information_vintage",
+        )
         return {**result, "model_selector": {"status": "no_information_vintage"}}
 
     engine_input = None
@@ -209,13 +226,36 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
             "decision_id": baseline.decision_id,
             "mirrored": True,
         }
+        await asyncio.to_thread(
+            checkpoint_control_run,
+            run_id,
+            stage="engine_contract",
+            status="completed",
+            decision_start=engine_input.decision_start,
+            information_vintage_id=engine_input.information_vintage_id,
+            payload={"baseline_decision_id": baseline.decision_id},
+        )
     except Exception as exc:
         result["engine_contract"] = {"mirrored": False, "error": repr(exc)}
+        await asyncio.to_thread(
+            checkpoint_control_run,
+            run_id,
+            stage="engine_contract",
+            status="failed_nonfatal",
+            error=repr(exc),
+        )
 
     if engine_input is None:
         try:
             engine_input = input_from_optimizer_plan_v2(plan, core.cfg)
         except Exception as exc:
+            await asyncio.to_thread(
+                checkpoint_control_run,
+                run_id,
+                stage="engine_input",
+                status="failed",
+                error=repr(exc),
+            )
             return {**result, "model_selector": {"status": "failed", "error": repr(exc)}}
 
     neural = await asyncio.to_thread(neural_runtime_status)
@@ -266,6 +306,17 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
             engine_input.decision_start,
         )
         result["model_selector"] = routed
+        await asyncio.to_thread(
+            checkpoint_control_run,
+            run_id,
+            stage="selector_route",
+            status="completed",
+            decision_start=engine_input.decision_start,
+            information_vintage_id=engine_input.information_vintage_id,
+            routed_engine_id=routed.get("routed_engine_id"),
+            requested_action_kw=routed.get("requested_action_kw"),
+            payload={"fallback_used": routed.get("fallback_used"), "reason": routed.get("reason")},
+        )
     except Exception as exc:
         routed = None
         result["model_selector"] = {
@@ -273,8 +324,26 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
             "error": repr(exc),
             "configured_fallback_engine_id": "deterministic_v35",
         }
+        await asyncio.to_thread(
+            checkpoint_control_run,
+            run_id,
+            stage="selector_route",
+            status="failed",
+            error=repr(exc),
+        )
 
     candidate = _candidate_from_selection(routed)
+    await asyncio.to_thread(
+        checkpoint_control_run,
+        run_id,
+        stage="control_candidate",
+        status="completed" if candidate is not None else "failed",
+        decision_start=None if candidate is None else candidate.get("decision_start"),
+        routed_engine_id=None if candidate is None else candidate.get("engine_id"),
+        candidate_valid_until=None if candidate is None else candidate.get("valid_until"),
+        requested_action_kw=None if candidate is None else candidate.get("requested_action_kw"),
+        error=None if candidate is not None else "no_control_candidate",
+    )
     try:
         actuation = (
             {"status": "no_control_candidate", "physical_write_performed": False}
@@ -286,12 +355,54 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
             actuation = await ACTUATOR.fail_safe("quarter_actuation_exception", {"error": repr(exc)})
         else:
             actuation = {"status": "failed", "error": repr(exc), "physical_write_performed": False}
+    await asyncio.to_thread(
+        checkpoint_control_run,
+        run_id,
+        stage="actuator",
+        status="completed" if actuation.get("status") not in {"failed", "no_control_candidate"} else "failed",
+        actuation_status=actuation.get("status"),
+        payload={
+            "physical_write_performed": actuation.get("physical_write_performed"),
+            "reason": actuation.get("reason"),
+        },
+    )
     return {**result, "actuator": actuation}
 
 
 async def refresh_optimizer_plan() -> dict[str, Any]:
-    async with _OPTIMIZER_REFRESH_LOCK:
-        return await _refresh_optimizer_pipeline_unlocked()
+    existing_run_id = current_control_run_id()
+    owned_run = existing_run_id is None
+    run_id = existing_run_id or new_control_run_id()
+    if owned_run:
+        set_current_control_run(run_id)
+        await asyncio.to_thread(start_control_run, run_id, trigger="optimizer_refresh")
+    try:
+        async with _OPTIMIZER_REFRESH_LOCK:
+            result = await _refresh_optimizer_pipeline_unlocked()
+        if owned_run:
+            await asyncio.to_thread(
+                checkpoint_control_run,
+                run_id,
+                stage="optimizer_refresh_complete",
+                status="completed",
+                payload={"generated_at": result.get("generated_at")},
+                completed=True,
+            )
+        return result
+    except Exception as exc:
+        if owned_run:
+            await asyncio.to_thread(
+                checkpoint_control_run,
+                run_id,
+                stage="optimizer_refresh",
+                status="failed",
+                error=repr(exc),
+                completed=True,
+            )
+        raise
+    finally:
+        if owned_run:
+            set_current_control_run(None)
 
 
 core._refresh_optimizer_plan = refresh_optimizer_plan
