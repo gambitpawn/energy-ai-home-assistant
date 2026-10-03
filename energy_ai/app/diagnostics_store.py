@@ -4,13 +4,17 @@ import json
 import sqlite3
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from . import db as db_module
 from .db import connect_db
 
 RETENTION_DAYS = 90
 _CURRENT_CONTROL_RUN_ID: ContextVar[str | None] = ContextVar("energy_ai_control_run_id", default=None)
+_TABLES_LOCK = RLock()
+_TABLES_INITIALIZED_PATH: str | None = None
 
 
 def _now() -> str:
@@ -22,64 +26,69 @@ def _cutoff() -> str:
 
 
 def _init_tables() -> None:
-    with connect_db(timeout=1.0) as c:
-        c.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS diagnostic_control_run(
-                run_id TEXT PRIMARY KEY,
-                trigger TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                completed_at TEXT,
-                status TEXT NOT NULL,
-                stage TEXT NOT NULL,
-                decision_start TEXT,
-                plan_generated_at TEXT,
-                information_vintage_id TEXT,
-                routed_engine_id TEXT,
-                candidate_valid_until TEXT,
-                requested_action_kw REAL,
-                actuation_status TEXT,
-                error TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_diagnostic_control_run_started
-                ON diagnostic_control_run(started_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_diagnostic_control_run_decision_start
-                ON diagnostic_control_run(decision_start);
+    global _TABLES_INITIALIZED_PATH
+    path = str(db_module.DB_PATH)
+    with _TABLES_LOCK:
+        if _TABLES_INITIALIZED_PATH == path:
+            return
+        with connect_db(timeout=1.0) as c:
+            c.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS diagnostic_control_run(
+                    run_id TEXT PRIMARY KEY,
+                    trigger TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    decision_start TEXT,
+                    plan_generated_at TEXT,
+                    information_vintage_id TEXT,
+                    routed_engine_id TEXT,
+                    candidate_valid_until TEXT,
+                    requested_action_kw REAL,
+                    actuation_status TEXT,
+                    error TEXT,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_diagnostic_control_run_started
+                    ON diagnostic_control_run(started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_diagnostic_control_run_decision_start
+                    ON diagnostic_control_run(decision_start);
 
-            CREATE TABLE IF NOT EXISTS diagnostic_control_event(
-                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                stage TEXT NOT NULL,
-                status TEXT NOT NULL,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_diagnostic_control_event_run
-                ON diagnostic_control_event(run_id,event_id);
+                CREATE TABLE IF NOT EXISTS diagnostic_control_event(
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_diagnostic_control_event_run
+                    ON diagnostic_control_event(run_id,event_id);
 
-            CREATE TABLE IF NOT EXISTS diagnostic_maintenance_run(
-                job_id TEXT PRIMARY KEY,
-                lane TEXT NOT NULL,
-                label TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                completed_at TEXT,
-                status TEXT NOT NULL,
-                timeout_seconds REAL,
-                worker_pid INTEGER,
-                restart_count INTEGER,
-                duration_seconds REAL,
-                error TEXT,
-                traceback TEXT,
-                payload_json TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_diagnostic_maintenance_started
-                ON diagnostic_maintenance_run(started_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_diagnostic_maintenance_label
-                ON diagnostic_maintenance_run(label,started_at DESC);
-            """
-        )
-
+                CREATE TABLE IF NOT EXISTS diagnostic_maintenance_run(
+                    job_id TEXT PRIMARY KEY,
+                    lane TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL,
+                    timeout_seconds REAL,
+                    worker_pid INTEGER,
+                    restart_count INTEGER,
+                    duration_seconds REAL,
+                    error TEXT,
+                    traceback TEXT,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_diagnostic_maintenance_started
+                    ON diagnostic_maintenance_run(started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_diagnostic_maintenance_label
+                    ON diagnostic_maintenance_run(label,started_at DESC);
+                """
+            )
+        _TABLES_INITIALIZED_PATH = path
 
 def new_control_run_id() -> str:
     return uuid4().hex
