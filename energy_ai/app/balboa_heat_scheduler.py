@@ -98,6 +98,15 @@ class BalboaHeatScheduler:
             if self.last_command_at and _now() - self.last_command_at < timedelta(minutes=MIN_COMMAND_SPACING_MINUTES) and desired == "off":
                 desired = "heat" if hvac_mode == "heat" else "off"
                 decision["reason"] = "minimum_switch_interval"
+            # Ready is required for continuous heating outside filter cycles.
+            # Changing this preset does not change the user-selected target.
+            preset = attrs.get("preset_mode")
+            if preset not in ("ready", "rest", "ready_in_rest"):
+                raise ValueError("Unexpected Balboa heating preset")
+            if preset != "ready":
+                if "ready" not in (attrs.get("preset_modes") or []):
+                    raise ValueError("Balboa Ready preset unavailable")
+                await self.comfort._set_preset("ready")
             if desired != hvac_mode:
                 await self._set_mode(desired)
                 self.last_command_at = _now()
