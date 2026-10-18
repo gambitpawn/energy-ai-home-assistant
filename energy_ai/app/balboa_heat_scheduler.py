@@ -50,6 +50,9 @@ def calculate_heat_plan(now, temperature, target, hvac_mode, rows, *, override=F
     if len(upcoming) < 3:
         return {"desired": "heat", "reason": "insufficient_near_term_coverage", "slots": slots}
     cutoff = median(r["score"] for r in upcoming)
+    for slot in slots:
+        neighbors = [r["score"] for r in slots if slot["start"] <= r["start"] < slot["start"] + timedelta(minutes=MAX_OFF_MINUTES)]
+        slot["scheduled_mode"] = "heat" if slot["score"] <= (median(neighbors) if neighbors else cutoff) else "off"
     desired = "heat" if valid_current["score"] <= cutoff else "off"
     # Never claim the requested temperature is reached just because heating is enabled.
     return {"desired": desired, "reason": "cost_window", "slots": slots}
@@ -127,7 +130,7 @@ class BalboaHeatScheduler:
                 "forecast_generated_at": plan.get("generated_at"),
                 "next_windows": [
                     {"start": s["start"].isoformat(), "price_ore_kwh": s["price"],
-                     "forecast_grid_kw": s["grid_kw"], "score": round(s["score"], 2)}
+                     "forecast_grid_kw": s["grid_kw"], "score": round(s["score"], 2), "scheduled_mode": s.get("scheduled_mode", "heat")}
                     for s in decision["slots"][:48]
                 ]
             }
