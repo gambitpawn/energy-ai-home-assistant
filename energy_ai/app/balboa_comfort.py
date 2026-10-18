@@ -129,7 +129,9 @@ class BalboaComfort:
             except HTTPException:
                 raise
             except Exception as exc:
-                await asyncio.to_thread(_save, "error", s.get("ends_at"), s.get("previous_preset"), str(exc))
+                current = await asyncio.to_thread(_state)
+                if current["state"] == "active":
+                    await asyncio.to_thread(_save, "error", current["ends_at"], current["previous_preset"], str(exc))
                 raise HTTPException(503, "Could not enable Balboa Ready mode") from exc
 
     async def finish(self):
