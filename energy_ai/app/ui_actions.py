@@ -84,7 +84,7 @@ async function loadSpaHeatingPlan(){
     const state=p.desired_mode==='heat'?'Värme tillåten':p.desired_mode==='off'?'Värme av':'Väntar på prognos';
     const note=data.last_error?'<div class="action-error">'+String(data.last_error).slice(0,180)+'</div>':'';
     let html='<strong>'+state+'</strong> · '+(p.reason||'—')+' · vatten '+(p.current_temperature??'—')+' °C / mål '+(p.target_temperature??'—')+' °C'+note;
-    if(rows.length)html+='<div class="table-wrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>Tid</th><th>Elpris</th><th>Planerad nätimport</th></tr></thead><tbody>'+rows.map(r=>'<tr><td>'+new Date(r.start).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'})+'</td><td>'+n(r.price_ore_kwh,1)+' öre/kWh</td><td>'+n(r.forecast_grid_kw,1)+' kW</td></tr>').join('')+'</tbody></table></div>';
+    if(rows.length)html+='<div class="table-wrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>Tid</th><th>Värme</th><th>Elpris</th><th>Planerad nätimport</th></tr></thead><tbody>'+rows.map(r=>'<tr><td>'+new Date(r.start).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'})+'</td><td>'+(r.scheduled_mode==='off'?'Av':'På')+'</td><td>'+n(r.price_ore_kwh,1)+' öre/kWh</td><td>'+n(r.forecast_grid_kw,1)+' kW</td></tr>').join('')+'</tbody></table></div>';
     $('spaHeatPlan').innerHTML=html;
   }catch(e){$('spaHeatPlan').textContent='Ingen uppvärmningsplan: '+e.message}
 }
