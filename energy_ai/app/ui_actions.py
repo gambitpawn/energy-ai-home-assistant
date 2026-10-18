@@ -3,6 +3,7 @@ from __future__ import annotations
 ACTIONS_EXTENSION = r'''
 <style>
 .actions-grid{display:grid;grid-template-columns:minmax(320px,.8fr) minmax(420px,1.2fr);gap:12px}.action-form{display:grid;gap:12px}.action-form label{display:grid;gap:5px;color:var(--muted);font-size:12px}.action-form input[type=datetime-local]{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:9px;padding:9px 10px}.action-warning{border-color:#5b4930;background:#1e1a13}.action-status-line{font-size:12px;color:var(--muted);margin-top:8px}.action-risk{color:var(--warn)}.action-error{color:var(--bad)}.action-buttons{display:flex;gap:7px;flex-wrap:wrap}.btn.danger{border-color:#6a3434;color:#ff9b9b}.btn.warn{border-color:#6f582a;color:#ffd178}.action-meta{font-size:11px;color:var(--muted);line-height:1.5}.action-phase{font-weight:750}.action-phase.active{color:var(--good)}.action-phase.ending,.action-phase.preparing{color:var(--warn)}@media(max-width:900px){.actions-grid{grid-template-columns:1fr}}
+.spa-bathing{margin-top:12px}.spa-live{font-size:12px;color:var(--muted);margin-top:8px}
 </style>
 <script>
 let actionsTimer=null;
@@ -12,6 +13,21 @@ function installActionsTab(){
   tabs.insertAdjacentHTML('beforeend','<button class="tab" data-view="actions">Actions</button>');
   const footer=document.querySelector('.footer');if(!footer)return;
   footer.insertAdjacentHTML('beforebegin','<section id="actions" class="view"><div class="notice action-warning" style="margin-bottom:12px"><strong>Extraordinary actions have control priority.</strong> A scheduled self-sufficiency window authorizes battery preparation and Solinteg <code>EMS Off-Grid</code>. A PAUSED fault is never auto-cleared. Normal operation resumes only after three grid-voltage confirmations.</div><div class="actions-grid"><div class="card"><h2>Schedule self-sufficiency</h2><div class="action-form"><label>Start (Europe/Stockholm)<input id="actionStart" type="datetime-local"></label><label>End (Europe/Stockholm)<input id="actionEnd" type="datetime-local"></label><div class="action-meta">Use for a planned power outage. Before the window, normal engine decisions are constrained by a hard battery-readiness floor. During the window, normal battery commands are suppressed.</div><div><button class="btn" id="scheduleSelfSufficiency">Schedule action</button></div><div id="actionFormStatus" class="action-status-line"></div></div></div><div class="card"><h2>Scheduled & recent actions</h2><div id="actionsList" class="table-wrap"><div class="empty">Loading actions…</div></div></div></div></section>');
+  const spaPanel=document.createElement('div');
+  spaPanel.className='card spa-bathing';
+  spaPanel.innerHTML='<h2>Spabad</h2><div class="action-meta">Bada nu ger Balboa tillfälligt Ready-läge i tre timmar, utan ändring av måltemperatur eller pumpar.</div><div class="action-buttons" style="margin-top:10px"><button class="btn" id="spaBathNow">Bada nu · 3 h</button><button class="btn danger" id="spaBathCancel" style="display:none">Avsluta nu</button></div><div id="spaBathStatus" class="spa-live">Läser status…</div>';
+  const grid=document.querySelector('#actions .actions-grid');
+  if(grid)grid.insertAdjacentElement('beforebegin',spaPanel);
+  $('spaBathNow').addEventListener('click',async()=>{
+    $('spaBathNow').disabled=true;
+    try{await api('spa/bada-nu',{method:'POST'});await loadSpaBath()}catch(e){$('spaBathStatus').textContent='Kunde inte starta: '+e.message}
+    finally{$('spaBathNow').disabled=false}
+  });
+  $('spaBathCancel').addEventListener('click',async()=>{
+    $('spaBathCancel').disabled=true;
+    try{await api('spa/bada-nu',{method:'DELETE'});await loadSpaBath()}catch(e){$('spaBathStatus').textContent='Kunde inte avsluta: '+e.message}
+    finally{$('spaBathCancel').disabled=false}
+  });
   const now=new Date(),start=new Date(now.getTime()+60*60*1000),end=new Date(now.getTime()+3*60*60*1000);
   start.setMinutes(Math.ceil(start.getMinutes()/15)*15,0,0);end.setMinutes(Math.ceil(end.getMinutes()/15)*15,0,0);
   $('actionStart').value=actionDateValue(start);$('actionEnd').value=actionDateValue(end);
@@ -60,6 +76,21 @@ function paintActionPlanNotice(d){
   }
   notice.innerHTML='<strong>Extraordinary action has control priority.</strong> The normal Plan remains a model view; battery commands may be reserve-constrained during preparation and are suppressed while EMS Off-Grid is active. See Actions for the authoritative outage state.';
 }
+async function loadSpaBath(){
+  if(!$('spaBathStatus'))return;
+  try{
+    const s=await api('spa/bada-nu');
+    const active=Boolean(s.active);
+    $('spaBathNow').disabled=active||s.state==='restoring'||s.state==='error';
+    $('spaBathCancel').style.display=active?'':'none';
+    if(active){
+      const minutes=Math.max(0,Math.ceil((new Date(s.ends_at).getTime()-Date.now())/60000));
+      $('spaBathStatus').textContent='Bada nu aktivt · '+minutes+' minuter återstår · till '+new Date(s.ends_at).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'});
+    }else if(s.state==='error'){
+      $('spaBathStatus').textContent='Återställning kräver kontroll: '+(s.last_error||'okänt fel');
+    }else $('spaBathStatus').textContent='Inte aktivt';
+  }catch(e){$('spaBathStatus').textContent='Balboa-status ej tillgänglig: '+e.message}
+}
 async function loadActions(){try{const d=await api('actions');renderActions(d);paintActionPlanNotice(d)}catch(e){if($('actionsList'))$('actionsList').innerHTML='<div class="empty action-error">Could not load actions: '+e.message+'</div>'}}
 async function scheduleSelfSufficiency(){
   const status=$('actionFormStatus'),start=actionLocalIso($('actionStart').value),end=actionLocalIso($('actionEnd').value);
@@ -77,8 +108,8 @@ async function forceEndExtraAction(id){
   if(!confirm('Force end bypasses grid-voltage confirmation. Continue only if you know the grid has returned.'))return;
   try{await api('actions/'+id+'/force-end',{method:'POST'});await loadActions()}catch(e){alert('Force end failed: '+e.message)}
 }
-installActionsTab();loadActions();
+installActionsTab();loadActions();loadSpaBath();
 $('tabs')?.addEventListener('click',e=>{if(e.target.closest('.tab')?.dataset.view==='actions')loadActions()});
-if(actionsTimer)clearInterval(actionsTimer);actionsTimer=setInterval(()=>{if(document.querySelector('#actions.view.active'))loadActions()},10000);
+if(actionsTimer)clearInterval(actionsTimer);actionsTimer=setInterval(()=>{if(document.querySelector('#actions.view.active')){loadActions();loadSpaBath()}},10000);
 </script>
 '''

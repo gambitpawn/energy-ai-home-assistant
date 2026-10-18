@@ -1400,6 +1400,8 @@ def install_extraordinary_actions(*, app: FastAPI, base, runtime_ui_module, ui_e
                 await controller.stop()
 
     app.router.lifespan_context = actions_lifespan
+    from .balboa_comfort import install_balboa_comfort
+    install_balboa_comfort(app)
     app.state.extraordinary_actions_installed = True
     app.openapi_schema = None
     return {
