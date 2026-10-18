@@ -189,6 +189,12 @@ def install_balboa_comfort(app):
     if getattr(app.state, "balboa_comfort_installed", False):
         return
     comfort = BalboaComfort()
+    from .balboa_heat_scheduler import BalboaHeatScheduler
+    scheduler = BalboaHeatScheduler(comfort)
+
+    @app.get("/spa/heating-plan")
+    async def spa_heating_plan():
+        return scheduler.status()
 
     @app.get("/spa/bada-nu")
     async def get_spa_comfort():
@@ -209,9 +215,11 @@ def install_balboa_comfort(app):
     async def spa_lifespan(application):
         async with previous_lifespan(application) as state:
             comfort.start()
+            scheduler.start()
             try:
                 yield state
             finally:
+                await scheduler.stop()
                 await comfort.stop()
 
     app.router.lifespan_context = spa_lifespan
