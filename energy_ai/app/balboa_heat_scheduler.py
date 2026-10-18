@@ -8,12 +8,24 @@ from statistics import median
 import httpx
 
 from .optimizer_store import latest_plan
+from .db import connect_db
 from .balboa_comfort import ENTITY, _now, _state, BalboaComfort
 
 MIN_TARGET_MARGIN_C = 1.0
 MAX_OFF_MINUTES = 90
 MIN_COMMAND_SPACING_MINUTES = 15
 POLL_SECONDS = 60
+
+def control_enabled():
+    with connect_db(timeout=10) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS balboa_heat_settings (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0)')
+        db.execute('INSERT OR IGNORE INTO balboa_heat_settings(id,enabled) VALUES(1,0)')
+        return bool(db.execute('SELECT enabled FROM balboa_heat_settings WHERE id=1').fetchone()[0])
+
+def set_control_enabled(enabled):
+    control_enabled()
+    with connect_db(timeout=10) as db:
+        db.execute('UPDATE balboa_heat_settings SET enabled=? WHERE id=1', (int(bool(enabled)),))
 
 
 def calculate_heat_plan(now, temperature, target, hvac_mode, rows, *, override=False):
@@ -67,6 +79,7 @@ class BalboaHeatScheduler:
         self.last_off_at = None
         self.last_error = None
         self.last_plan = {}
+        self.enabled = False
 
     async def _set_mode(self, mode):
         base, headers = self.comfort._connection()
@@ -78,6 +91,7 @@ class BalboaHeatScheduler:
             result.raise_for_status()
 
     async def tick(self):
+        self.enabled = await asyncio.to_thread(control_enabled)
         async with self.comfort.lock:
             data = await self.comfort._read()
             attrs = data.get("attributes") or {}
@@ -106,11 +120,11 @@ class BalboaHeatScheduler:
             preset = attrs.get("preset_mode")
             if preset not in ("ready", "rest", "ready_in_rest"):
                 raise ValueError("Unexpected Balboa heating preset")
-            if preset != "ready":
+            if self.enabled and preset != "ready":
                 if "ready" not in (attrs.get("preset_modes") or []):
                     raise ValueError("Balboa Ready preset unavailable")
                 await self.comfort._set_preset("ready")
-            if desired != hvac_mode and (not self.last_command_at or _now() - self.last_command_at >= timedelta(minutes=MIN_COMMAND_SPACING_MINUTES) or decision["reason"] in ("temperature_guard", "bada_nu", "max_off_duration")):
+            if self.enabled and desired != hvac_mode and (not self.last_command_at or _now() - self.last_command_at >= timedelta(minutes=MIN_COMMAND_SPACING_MINUTES) or decision["reason"] in ("temperature_guard", "bada_nu", "max_off_duration")):
                 await self._set_mode(desired)
                 self.last_command_at = _now()
                 if desired == "off":
@@ -124,7 +138,7 @@ class BalboaHeatScheduler:
                 # assume that the OFF period started recently.
                 self.last_off_at = _now() - timedelta(minutes=MAX_OFF_MINUTES + 1)
             self.last_plan = {
-                "updated_at": _now().isoformat(), "current_temperature": temperature,
+                "updated_at": _now().isoformat(), "control_enabled": self.enabled, "current_temperature": temperature,
                 "target_temperature": target, "observed_mode": hvac_mode,
                 "desired_mode": desired, "reason": decision["reason"],
                 "forecast_generated_at": plan.get("generated_at"),
@@ -147,8 +161,11 @@ class BalboaHeatScheduler:
                 self.last_error = repr(exc)
                 # Fail open: restore heating when possible; never set OFF on error.
                 try:
-                    data = await self.comfort._read()
-                    if data.get("state") == "off":
+                    if await asyncio.to_thread(control_enabled):
+                        data = await self.comfort._read()
+                    else:
+                        data = None
+                    if data and data.get("state") == "off":
                         await self._set_mode("heat")
                 except Exception:
                     pass
@@ -170,6 +187,8 @@ class BalboaHeatScheduler:
             self.task = None
         # On shutdown, leave heater enabled; HA/Balboa handles target.
         try:
+            if not await asyncio.to_thread(control_enabled):
+                return
             data = await self.comfort._read()
             if data.get("state") == "off":
                 await self._set_mode("heat")
@@ -177,5 +196,5 @@ class BalboaHeatScheduler:
             pass
 
     def status(self):
-        return {"policy": "heat_off_guarded_v1", "last_error": self.last_error,
+        return {"policy": "heat_off_guarded_v1", "enabled": self.enabled, "last_error": self.last_error,
                 "plan": self.last_plan}
