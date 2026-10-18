@@ -192,6 +192,18 @@ def install_balboa_comfort(app):
     from .balboa_heat_scheduler import BalboaHeatScheduler
     scheduler = BalboaHeatScheduler(comfort)
 
+    @app.post("/spa/heating-control")
+    async def enable_spa_heat_control():
+        from .balboa_heat_scheduler import set_control_enabled
+        await asyncio.to_thread(set_control_enabled, True)
+        return {"enabled": True}
+
+    @app.delete("/spa/heating-control")
+    async def disable_spa_heat_control():
+        from .balboa_heat_scheduler import set_control_enabled
+        await asyncio.to_thread(set_control_enabled, False)
+        return {"enabled": False}
+
     @app.get("/spa/heating-plan")
     async def spa_heating_plan():
         return scheduler.status()
