@@ -107,7 +107,7 @@ class BalboaHeatScheduler:
                 if "ready" not in (attrs.get("preset_modes") or []):
                     raise ValueError("Balboa Ready preset unavailable")
                 await self.comfort._set_preset("ready")
-            if desired != hvac_mode:
+            if desired != hvac_mode and (not self.last_command_at or _now() - self.last_command_at >= timedelta(minutes=MIN_COMMAND_SPACING_MINUTES) or decision["reason"] in ("temperature_guard", "bada_nu", "max_off_duration")):
                 await self._set_mode(desired)
                 self.last_command_at = _now()
                 if desired == "off":
