@@ -18,6 +18,14 @@ function installActionsTab(){
   spaPanel.innerHTML='<h2>Spabad</h2><div class="action-meta">Bada nu ger Balboa tillfälligt Ready-läge i tre timmar, utan ändring av måltemperatur eller pumpar.</div><div class="action-buttons" style="margin-top:10px"><button class="btn" id="spaBathNow">Bada nu · 3 h</button><button class="btn danger" id="spaBathCancel" style="display:none">Avsluta nu</button></div><div id="spaBathStatus" class="spa-live">Läser status…</div>';
   const grid=document.querySelector('#actions .actions-grid');
   if(grid)grid.insertAdjacentElement('beforebegin',spaPanel);
+  spaPanel.insertAdjacentHTML('beforeend','<h3 style="margin-top:12px">Uppvärmningsplan</h3><div class="action-buttons"><button class="btn" id="spaHeatEnable">Aktivera värmestyrning</button><button class="btn danger" id="spaHeatDisable" style="display:none">Stäng av optimering</button></div><div class="action-meta">Avstängd tills den aktiveras här. Säkerhetsregler kan kräva värme även under dyra timmar.</div><div id="spaHeatPlan" class="action-meta">Läser prognos…</div>');
+  $('spaHeatEnable').addEventListener('click',async()=>{
+    if(!confirm('Aktivera Balboa värme/av-styrning? Kontrollera att spaets temperatur och heat/off fungerar korrekt.'))return;
+    try{await api('spa/heating-control',{method:'POST'});await loadSpaHeatingPlan()}catch(e){alert('Kunde inte aktivera: '+e.message)}
+  });
+  $('spaHeatDisable').addEventListener('click',async()=>{
+    try{await api('spa/heating-control',{method:'DELETE'});await loadSpaHeatingPlan()}catch(e){alert('Kunde inte avaktivera: '+e.message)}
+  });
   $('spaBathNow').addEventListener('click',async()=>{
     $('spaBathNow').disabled=true;
     try{await api('spa/bada-nu',{method:'POST'});await loadSpaBath()}catch(e){$('spaBathStatus').textContent='Kunde inte starta: '+e.message}
@@ -76,6 +84,19 @@ function paintActionPlanNotice(d){
   }
   notice.innerHTML='<strong>Extraordinary action has control priority.</strong> The normal Plan remains a model view; battery commands may be reserve-constrained during preparation and are suppressed while EMS Off-Grid is active. See Actions for the authoritative outage state.';
 }
+async function loadSpaHeatingPlan(){
+  if(!$('spaHeatPlan'))return;
+  try{
+    const data=await api('spa/heating-plan'),p=data.plan||{},rows=(p.next_windows||[]).slice(0,24);
+    $('spaHeatEnable').style.display=data.enabled?'none':'';
+    $('spaHeatDisable').style.display=data.enabled?'':'none';
+    const state=p.desired_mode==='heat'?'Värme tillåten':p.desired_mode==='off'?'Värme av':'Väntar på prognos';
+    const note=data.last_error?'<div class="action-error">'+String(data.last_error).slice(0,180)+'</div>':'';
+    let html='<strong>'+(data.enabled?'Aktiv styrning':'Förhandsplan – styrning ej aktiv')+' · '+state+'</strong> · '+(p.reason||'—')+' · vatten '+(p.current_temperature??'—')+' °C / mål '+(p.target_temperature??'—')+' °C'+note;
+    if(rows.length)html+='<div class="table-wrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>Tid</th><th>Värme</th><th>Elpris</th><th>Planerad nätimport</th></tr></thead><tbody>'+rows.map(r=>'<tr><td>'+new Date(r.start).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'})+'</td><td>'+(r.scheduled_mode==='off'?'Av':'På')+'</td><td>'+n(r.price_ore_kwh,1)+' öre/kWh</td><td>'+n(r.forecast_grid_kw,1)+' kW</td></tr>').join('')+'</tbody></table></div>';
+    $('spaHeatPlan').innerHTML=html;
+  }catch(e){$('spaHeatPlan').textContent='Ingen uppvärmningsplan: '+e.message}
+}
 async function loadSpaBath(){
   if(!$('spaBathStatus'))return;
   try{
@@ -108,8 +129,8 @@ async function forceEndExtraAction(id){
   if(!confirm('Force end bypasses grid-voltage confirmation. Continue only if you know the grid has returned.'))return;
   try{await api('actions/'+id+'/force-end',{method:'POST'});await loadActions()}catch(e){alert('Force end failed: '+e.message)}
 }
-installActionsTab();loadActions();loadSpaBath();
+installActionsTab();loadActions();loadSpaBath();loadSpaHeatingPlan();
 $('tabs')?.addEventListener('click',e=>{if(e.target.closest('.tab')?.dataset.view==='actions')loadActions()});
-if(actionsTimer)clearInterval(actionsTimer);actionsTimer=setInterval(()=>{if(document.querySelector('#actions.view.active')){loadActions();loadSpaBath()}},10000);
+if(actionsTimer)clearInterval(actionsTimer);actionsTimer=setInterval(()=>{if(document.querySelector('#actions.view.active')){loadActions();loadSpaBath();loadSpaHeatingPlan()}},10000);
 </script>
 '''

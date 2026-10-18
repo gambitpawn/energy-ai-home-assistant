@@ -189,6 +189,31 @@ def install_balboa_comfort(app):
     if getattr(app.state, "balboa_comfort_installed", False):
         return
     comfort = BalboaComfort()
+    from .balboa_heat_scheduler import BalboaHeatScheduler
+    scheduler = BalboaHeatScheduler(comfort)
+
+    @app.post("/spa/heating-control")
+    async def enable_spa_heat_control():
+        from .balboa_heat_scheduler import set_control_enabled
+        await asyncio.to_thread(set_control_enabled, True)
+        return {"enabled": True}
+
+    @app.delete("/spa/heating-control")
+    async def disable_spa_heat_control():
+        from .balboa_heat_scheduler import set_control_enabled
+        async with comfort.lock:
+            await asyncio.to_thread(set_control_enabled, False)
+            try:
+                data = await comfort._read()
+                if data.get("state") == "off":
+                    await scheduler._set_mode("heat")
+            except Exception as exc:
+                raise HTTPException(503, "Spa control disabled, but restore-to-heat could not be verified") from exc
+        return {"enabled": False}
+
+    @app.get("/spa/heating-plan")
+    async def spa_heating_plan():
+        return scheduler.status()
 
     @app.get("/spa/bada-nu")
     async def get_spa_comfort():
@@ -209,9 +234,11 @@ def install_balboa_comfort(app):
     async def spa_lifespan(application):
         async with previous_lifespan(application) as state:
             comfort.start()
+            scheduler.start()
             try:
                 yield state
             finally:
+                await scheduler.stop()
                 await comfort.stop()
 
     app.router.lifespan_context = spa_lifespan
