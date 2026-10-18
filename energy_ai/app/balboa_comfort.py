@@ -201,7 +201,14 @@ def install_balboa_comfort(app):
     @app.delete("/spa/heating-control")
     async def disable_spa_heat_control():
         from .balboa_heat_scheduler import set_control_enabled
-        await asyncio.to_thread(set_control_enabled, False)
+        async with comfort.lock:
+            await asyncio.to_thread(set_control_enabled, False)
+            try:
+                data = await comfort._read()
+                if data.get("state") == "off":
+                    await scheduler._set_mode("heat")
+            except Exception as exc:
+                raise HTTPException(503, "Spa control disabled, but restore-to-heat could not be verified") from exc
         return {"enabled": False}
 
     @app.get("/spa/heating-plan")
