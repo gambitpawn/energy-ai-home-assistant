@@ -19,6 +19,25 @@ function installActionsTab(){
   const grid=document.querySelector('#actions .actions-grid');
   if(grid)grid.insertAdjacentElement('beforebegin',spaPanel);
   spaPanel.insertAdjacentHTML('beforeend','<h3 style="margin-top:12px">Uppvärmningsplan</h3><div class="action-buttons"><button class="btn" id="spaHeatEnable">Aktivera värmestyrning</button><button class="btn danger" id="spaHeatDisable" style="display:none">Stäng av all spastyrning</button></div><div class="action-meta">Avstängd tills den aktiveras här. Säkerhetsregler kan kräva värme även under dyra timmar.</div><div id="spaControlFeedback" class="action-status-line" role="status" aria-live="polite">Kontrollerar skrivspärr…</div><div id="spaHeatPlan" class="action-meta">Läser prognos…</div>');
+  spaPanel.insertAdjacentHTML('beforeend','<div class="card" style="margin-top:12px"><h3>Värmepaus</h3><div class="action-meta">Sänk tillfälligt Balboas börvärde till 10 °C. Cirkulation och filtercykler påverkas inte. Detta är inte ett fysiskt värmarstopp.</div><label class="action-meta" for="spaPauseHours">Längd (timmar)</label> <select id="spaPauseHours"><option value="3">3</option><option value="6" selected>6</option><option value="12">12</option><option value="24">24</option></select><div class="action-buttons" style="margin-top:8px"><button class="btn warn" id="spaPauseStart">Pausa värmning</button><button class="btn" id="spaPauseStop" style="display:none">Återställ temperatur</button></div><div id="spaPauseStatus" class="spa-live" role="status" aria-live="polite">Läser status…</div></div>');
+  $('spaPauseStart').addEventListener('click',async()=>{
+    if(!confirm('Sänk spabadets börvärde till 10 °C under vald tid? Ordinarie spaoptimering lämnas avstängd.'))return;
+    $('spaPauseStart').disabled=true;
+    try{
+      await api('spa/heat-pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hours:Number($('spaPauseHours').value)})});
+      await loadSpaHeatPause();
+    }catch(e){$('spaPauseStatus').textContent='Värmepaus misslyckades: '+e.message}
+    finally{$('spaPauseStart').disabled=false}
+  });
+  $('spaPauseStop').addEventListener('click',async()=>{
+    $('spaPauseStop').disabled=true;
+    try{
+      const response=await api('spa/heat-pause',{method:'DELETE'});
+      await loadSpaHeatPause();
+      if(response.restored===false)$('spaPauseStatus').textContent='Manuell temperaturändring upptäckt: inget börvärde skrevs över.';
+    }catch(e){$('spaPauseStatus').textContent='Återställning misslyckades: '+e.message}
+    finally{$('spaPauseStop').disabled=false}
+  });
   $('spaHeatEnable').addEventListener('click',async()=>{
     if(!confirm('Aktivera Balboa värme/av-styrning? Kontrollera att spaets temperatur och heat/off fungerar korrekt.'))return;
     try{await api('spa/heating-control',{method:'POST'});await loadSpaHeatingPlan()}catch(e){alert('Kunde inte aktivera: '+e.message)}
@@ -115,6 +134,17 @@ async function loadSpaHeatingPlan(){
     $('spaHeatPlan').innerHTML=html;
   }catch(e){$('spaHeatPlan').textContent='Ingen uppvärmningsplan: '+e.message}
 }
+async function loadSpaHeatPause(){
+  if(!$('spaPauseStatus'))return;
+  try{
+    const p=await api('spa/heat-pause');
+    const isActive=['active','starting','restoring'].includes(p.status);
+    $('spaPauseStart').style.display=p.status==='idle'?'':'none';
+    $('spaPauseStop').style.display=isActive?'':'none';
+    const end=p.expires_at?new Date(p.expires_at).toLocaleString('sv-SE'):'—';
+    $('spaPauseStatus').textContent=p.status==='active'?'Värmepaus aktiv till '+end+' · tidigare börvärde '+p.original_target+' °C':p.status==='idle'?'Ingen värmepaus aktiv':p.status==='error'?'Värmepaus kräver kontroll i HA: '+(p.last_error||'okänt fel'):'Värmepaus håller på att ändras';
+  }catch(e){$('spaPauseStatus').textContent='Status saknas: '+e.message}
+}
 async function loadSpaBath(){
   if(!$('spaBathStatus'))return;
   try{
@@ -148,8 +178,8 @@ async function forceEndExtraAction(id){
   if(!confirm('Force end bypasses grid-voltage confirmation. Continue only if you know the grid has returned.'))return;
   try{await api('actions/'+id+'/force-end',{method:'POST'});await loadActions()}catch(e){alert('Force end failed: '+e.message)}
 }
-installActionsTab();loadActions();loadSpaBath();loadSpaHeatingPlan();
+installActionsTab();loadActions();loadSpaBath();loadSpaHeatingPlan();loadSpaHeatPause();
 $('tabs')?.addEventListener('click',e=>{if(e.target.closest('.tab')?.dataset.view==='actions')loadActions()});
-if(actionsTimer)clearInterval(actionsTimer);actionsTimer=setInterval(()=>{if(document.querySelector('#actions.view.active')){loadActions();loadSpaBath();loadSpaHeatingPlan()}},10000);
+if(actionsTimer)clearInterval(actionsTimer);actionsTimer=setInterval(()=>{if(document.querySelector('#actions.view.active')){loadActions();loadSpaBath();loadSpaHeatingPlan();loadSpaHeatPause()}},10000);
 </script>
 '''
