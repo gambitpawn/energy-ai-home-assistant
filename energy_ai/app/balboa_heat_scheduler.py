@@ -163,12 +163,11 @@ class BalboaHeatScheduler:
                 self.last_error = repr(exc)
                 # Fail open: restore heating when possible; never set OFF on error.
                 try:
-                    if await asyncio.to_thread(authorized) and await asyncio.to_thread(control_enabled):
-                        data = await self.comfort._read()
-                    else:
-                        data = None
-                    if data and data.get("state") == "off":
-                        await self._set_mode("heat")
+                    async with self.comfort.lock:
+                        if await asyncio.to_thread(authorized) and await asyncio.to_thread(control_enabled):
+                            data = await self.comfort._read()
+                            if data.get("state") == "off":
+                                await self._set_mode("heat")
                 except Exception:
                     pass
             try:
@@ -187,15 +186,16 @@ class BalboaHeatScheduler:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
-        # On shutdown, leave heater enabled; HA/Balboa handles target.
-        try:
+        # Disable is a strict no-write state, including during shutdown.
+        async with self.comfort.lock:
             if not await asyncio.to_thread(authorized) or not await asyncio.to_thread(control_enabled):
                 return
-            data = await self.comfort._read()
-            if data.get("state") == "off":
-                await self._set_mode("heat")
-        except Exception:
-            pass
+            try:
+                data = await self.comfort._read()
+                if data.get("state") == "off":
+                    await self._set_mode("heat")
+            except Exception:
+                pass
 
     def status(self):
         return {"policy": "heat_off_guarded_v1", "enabled": self.enabled, "write_authorized": authorized(), "last_error": self.last_error,
