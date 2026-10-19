@@ -30,6 +30,7 @@ def fixture(monkeypatch, initial="rest"):
         writes.append(preset)
         ha["preset_mode"] = preset
 
+    monkeypatch.setattr(spa, "authorized", lambda: True)
     monkeypatch.setattr(spa, "_state", state)
     monkeypatch.setattr(spa, "_save", save)
     monkeypatch.setattr(spa.BalboaComfort, "_read", lambda self: read())
