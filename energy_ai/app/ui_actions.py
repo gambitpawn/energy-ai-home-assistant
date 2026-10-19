@@ -18,13 +18,26 @@ function installActionsTab(){
   spaPanel.innerHTML='<h2>Spabad</h2><div class="action-meta">Bada nu ger Balboa tillfälligt Ready-läge i tre timmar, utan ändring av måltemperatur eller pumpar.</div><div class="action-buttons" style="margin-top:10px"><button class="btn" id="spaBathNow">Bada nu · 3 h</button><button class="btn danger" id="spaBathCancel" style="display:none">Avsluta nu</button></div><div id="spaBathStatus" class="spa-live">Läser status…</div>';
   const grid=document.querySelector('#actions .actions-grid');
   if(grid)grid.insertAdjacentElement('beforebegin',spaPanel);
-  spaPanel.insertAdjacentHTML('beforeend','<h3 style="margin-top:12px">Uppvärmningsplan</h3><div class="action-buttons"><button class="btn" id="spaHeatEnable">Aktivera värmestyrning</button><button class="btn danger" id="spaHeatDisable" style="display:none">Stäng av all spastyrning</button></div><div class="action-meta">Avstängd tills den aktiveras här. Säkerhetsregler kan kräva värme även under dyra timmar.</div><div id="spaHeatPlan" class="action-meta">Läser prognos…</div>');
+  spaPanel.insertAdjacentHTML('beforeend','<h3 style="margin-top:12px">Uppvärmningsplan</h3><div class="action-buttons"><button class="btn" id="spaHeatEnable">Aktivera värmestyrning</button><button class="btn danger" id="spaHeatDisable" style="display:none">Stäng av all spastyrning</button></div><div class="action-meta">Avstängd tills den aktiveras här. Säkerhetsregler kan kräva värme även under dyra timmar.</div><div id="spaControlFeedback" class="action-status-line" role="status" aria-live="polite">Kontrollerar skrivspärr…</div><div id="spaHeatPlan" class="action-meta">Läser prognos…</div>');
   $('spaHeatEnable').addEventListener('click',async()=>{
     if(!confirm('Aktivera Balboa värme/av-styrning? Kontrollera att spaets temperatur och heat/off fungerar korrekt.'))return;
     try{await api('spa/heating-control',{method:'POST'});await loadSpaHeatingPlan()}catch(e){alert('Kunde inte aktivera: '+e.message)}
   });
   $('spaHeatDisable').addEventListener('click',async()=>{
-    try{await api('spa/heating-control',{method:'DELETE'});await loadSpaHeatingPlan()}catch(e){alert('Kunde inte avaktivera: '+e.message)}
+    const btn=$('spaHeatDisable'),feedback=$('spaControlFeedback');
+    btn.disabled=true;
+    feedback.textContent='Begär avstängning av Energy AI:s skrivrätt…';
+    try{
+      const result=await api('spa/heating-control',{method:'DELETE'});
+      const permission=await api('spa/control-permission');
+      if(result.write_authorized!==false||permission.write_authorized!==false||permission.scheduler_enabled){
+        throw new Error('Skrivspärren kunde inte verifieras');
+      }
+      feedback.textContent='Bekräftat: Energy AI får inte styra Balboa. Detta stänger INTE av Balboas värmare.';
+      feedback.className='action-status-line';
+      await loadSpaHeatingPlan();
+    }catch(e){feedback.textContent='Avstängning ej verifierad: '+e.message;feedback.className='action-status-line action-error'}
+    finally{btn.disabled=false}
   });
   $('spaBathNow').addEventListener('click',async()=>{
     $('spaBathNow').disabled=true;
@@ -88,13 +101,16 @@ async function loadSpaHeatingPlan(){
   if(!$('spaHeatPlan'))return;
   try{
     const data=await api('spa/heating-plan'),p=data.plan||{},rows=(p.next_windows||[]).slice(0,24);
-    $('spaHeatEnable').style.display=data.enabled?'none':'';
+    const permission=await api('spa/control-permission');
+    $('spaHeatEnable').style.display=permission.write_authorized&&permission.scheduler_enabled?'none':'';
     $('spaHeatDisable').style.display='';
-    $('spaHeatDisable').textContent=data.write_authorized?'Stäng av all spastyrning':'Bekräfta manuell kontroll';
-    $('spaBathNow').disabled=!data.write_authorized;
+    $('spaHeatDisable').textContent=permission.write_authorized?'Koppla bort Energy AI från Balboa':'Skrivspärr redan aktiv';
+    $('spaBathNow').disabled=!permission.write_authorized;
     const state=p.desired_mode==='heat'?'Värme tillåten':p.desired_mode==='off'?'Värme av':'Väntar på prognos';
     const note=data.last_error?'<div class="action-error">'+String(data.last_error).slice(0,180)+'</div>':'';
-    let html='<strong>'+(data.enabled?'Aktiv styrning':'Manuell kontroll – inga Balboa-kommandon')+' · '+state+'</strong> · '+(p.reason||'—')+' · vatten '+(p.current_temperature??'—')+' °C / mål '+(p.target_temperature??'—')+' °C'+note;
+    const balboa=permission.balboa||{};
+    const physical='Balboa rapporterar: '+(balboa.state||'okänt driftläge')+' · värmarstatus '+(balboa.hvac_action||'okänd')+' · '+(balboa.current_temperature??'—')+' °C';
+    let html='<strong>'+(permission.write_authorized&&permission.scheduler_enabled?'Energy AI:s styrning aktiv':'Energy AI:s skrivspärr aktiv – Balboa styr sig själv')+' · '+state+'</strong><div class="action-meta">'+physical+'</div><div class="action-meta">Skrivspärren är inte en värmarbrytare. Använd Home Assistants climate-kontroll om du vill begära Av.</div> · '+(p.reason||'—')+' · vatten '+(p.current_temperature??'—')+' °C / mål '+(p.target_temperature??'—')+' °C'+note;
     if(rows.length)html+='<div class="table-wrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>Tid</th><th>Värme</th><th>Elpris</th><th>Planerad nätimport</th></tr></thead><tbody>'+rows.map(r=>'<tr><td>'+new Date(r.start).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'})+'</td><td>'+(r.scheduled_mode==='off'?'Av':'På')+'</td><td>'+n(r.price_ore_kwh,1)+' öre/kWh</td><td>'+n(r.forecast_grid_kw,1)+' kW</td></tr>').join('')+'</tbody></table></div>';
     $('spaHeatPlan').innerHTML=html;
   }catch(e){$('spaHeatPlan').textContent='Ingen uppvärmningsplan: '+e.message}

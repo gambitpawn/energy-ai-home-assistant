@@ -219,7 +219,28 @@ def install_balboa_comfort(app):
 
     @app.get("/spa/control-permission")
     async def spa_control_permission():
-        return {"write_authorized": await asyncio.to_thread(authorized)}
+        permission = await asyncio.to_thread(authorized)
+        from .balboa_heat_scheduler import control_enabled
+        heating_enabled = await asyncio.to_thread(control_enabled)
+        result = {
+            "write_authorized": permission,
+            "scheduler_enabled": heating_enabled and permission,
+            "balboa": None,
+            "readback_error": None,
+        }
+        try:
+            data = await comfort._read()
+            attrs = data.get("attributes") or {}
+            result["balboa"] = {
+                "state": data.get("state"),
+                "hvac_action": attrs.get("hvac_action"),
+                "preset_mode": attrs.get("preset_mode"),
+                "current_temperature": attrs.get("current_temperature"),
+                "target_temperature": attrs.get("temperature"),
+            }
+        except Exception as exc:
+            result["readback_error"] = str(exc)
+        return result
 
     @app.get("/spa/heating-plan")
     async def spa_heating_plan():
