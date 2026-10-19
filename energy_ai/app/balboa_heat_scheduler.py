@@ -9,6 +9,7 @@ import httpx
 
 from .optimizer_store import latest_plan
 from .db import connect_db
+from .balboa_permission import authorized, require_authorized
 from .balboa_comfort import ENTITY, _now, _state, BalboaComfort
 
 MIN_TARGET_MARGIN_C = 1.0
@@ -82,6 +83,7 @@ class BalboaHeatScheduler:
         self.enabled = False
 
     async def _set_mode(self, mode):
+        await asyncio.to_thread(require_authorized)
         base, headers = self.comfort._connection()
         async with httpx.AsyncClient(timeout=8.0) as client:
             result = await client.post(
@@ -91,7 +93,7 @@ class BalboaHeatScheduler:
             result.raise_for_status()
 
     async def tick(self):
-        self.enabled = await asyncio.to_thread(control_enabled)
+        self.enabled = await asyncio.to_thread(control_enabled) and await asyncio.to_thread(authorized)
         async with self.comfort.lock:
             data = await self.comfort._read()
             attrs = data.get("attributes") or {}
@@ -161,7 +163,7 @@ class BalboaHeatScheduler:
                 self.last_error = repr(exc)
                 # Fail open: restore heating when possible; never set OFF on error.
                 try:
-                    if await asyncio.to_thread(control_enabled):
+                    if await asyncio.to_thread(authorized) and await asyncio.to_thread(control_enabled):
                         data = await self.comfort._read()
                     else:
                         data = None
@@ -187,7 +189,7 @@ class BalboaHeatScheduler:
             self.task = None
         # On shutdown, leave heater enabled; HA/Balboa handles target.
         try:
-            if not await asyncio.to_thread(control_enabled):
+            if not await asyncio.to_thread(authorized) or not await asyncio.to_thread(control_enabled):
                 return
             data = await self.comfort._read()
             if data.get("state") == "off":
@@ -196,5 +198,5 @@ class BalboaHeatScheduler:
             pass
 
     def status(self):
-        return {"policy": "heat_off_guarded_v1", "enabled": self.enabled, "last_error": self.last_error,
+        return {"policy": "heat_off_guarded_v1", "enabled": self.enabled, "write_authorized": authorized(), "last_error": self.last_error,
                 "plan": self.last_plan}
