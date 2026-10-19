@@ -18,7 +18,7 @@ function installActionsTab(){
   spaPanel.innerHTML='<h2>Spabad</h2><div class="action-meta">Bada nu ger Balboa tillfälligt Ready-läge i tre timmar, utan ändring av måltemperatur eller pumpar.</div><div class="action-buttons" style="margin-top:10px"><button class="btn" id="spaBathNow">Bada nu · 3 h</button><button class="btn danger" id="spaBathCancel" style="display:none">Avsluta nu</button></div><div id="spaBathStatus" class="spa-live">Läser status…</div>';
   const grid=document.querySelector('#actions .actions-grid');
   if(grid)grid.insertAdjacentElement('beforebegin',spaPanel);
-  spaPanel.insertAdjacentHTML('beforeend','<h3 style="margin-top:12px">Uppvärmningsplan</h3><div class="action-buttons"><button class="btn" id="spaHeatEnable">Aktivera värmestyrning</button><button class="btn danger" id="spaHeatDisable" style="display:none">Stäng av optimering</button></div><div class="action-meta">Avstängd tills den aktiveras här. Säkerhetsregler kan kräva värme även under dyra timmar.</div><div id="spaHeatPlan" class="action-meta">Läser prognos…</div>');
+  spaPanel.insertAdjacentHTML('beforeend','<h3 style="margin-top:12px">Uppvärmningsplan</h3><div class="action-buttons"><button class="btn" id="spaHeatEnable">Aktivera värmestyrning</button><button class="btn danger" id="spaHeatDisable" style="display:none">Stäng av all spastyrning</button></div><div class="action-meta">Avstängd tills den aktiveras här. Säkerhetsregler kan kräva värme även under dyra timmar.</div><div id="spaHeatPlan" class="action-meta">Läser prognos…</div>');
   $('spaHeatEnable').addEventListener('click',async()=>{
     if(!confirm('Aktivera Balboa värme/av-styrning? Kontrollera att spaets temperatur och heat/off fungerar korrekt.'))return;
     try{await api('spa/heating-control',{method:'POST'});await loadSpaHeatingPlan()}catch(e){alert('Kunde inte aktivera: '+e.message)}
@@ -89,10 +89,12 @@ async function loadSpaHeatingPlan(){
   try{
     const data=await api('spa/heating-plan'),p=data.plan||{},rows=(p.next_windows||[]).slice(0,24);
     $('spaHeatEnable').style.display=data.enabled?'none':'';
-    $('spaHeatDisable').style.display=data.enabled?'':'none';
+    $('spaHeatDisable').style.display='';
+    $('spaHeatDisable').textContent=data.write_authorized?'Stäng av all spastyrning':'Bekräfta manuell kontroll';
+    $('spaBathNow').disabled=!data.write_authorized;
     const state=p.desired_mode==='heat'?'Värme tillåten':p.desired_mode==='off'?'Värme av':'Väntar på prognos';
     const note=data.last_error?'<div class="action-error">'+String(data.last_error).slice(0,180)+'</div>':'';
-    let html='<strong>'+(data.enabled?'Aktiv styrning':'Förhandsplan – styrning ej aktiv')+' · '+state+'</strong> · '+(p.reason||'—')+' · vatten '+(p.current_temperature??'—')+' °C / mål '+(p.target_temperature??'—')+' °C'+note;
+    let html='<strong>'+(data.enabled?'Aktiv styrning':'Manuell kontroll – inga Balboa-kommandon')+' · '+state+'</strong> · '+(p.reason||'—')+' · vatten '+(p.current_temperature??'—')+' °C / mål '+(p.target_temperature??'—')+' °C'+note;
     if(rows.length)html+='<div class="table-wrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>Tid</th><th>Värme</th><th>Elpris</th><th>Planerad nätimport</th></tr></thead><tbody>'+rows.map(r=>'<tr><td>'+new Date(r.start).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'})+'</td><td>'+(r.scheduled_mode==='off'?'Av':'På')+'</td><td>'+n(r.price_ore_kwh,1)+' öre/kWh</td><td>'+n(r.forecast_grid_kw,1)+' kW</td></tr>').join('')+'</tbody></table></div>';
     $('spaHeatPlan').innerHTML=html;
   }catch(e){$('spaHeatPlan').textContent='Ingen uppvärmningsplan: '+e.message}
@@ -102,7 +104,8 @@ async function loadSpaBath(){
   try{
     const s=await api('spa/bada-nu');
     const active=Boolean(s.active);
-    $('spaBathNow').disabled=active||s.state==='restoring'||s.state==='error';
+    const p=await api('spa/control-permission');
+    $('spaBathNow').disabled=!p.write_authorized||active||s.state==='restoring'||s.state==='error';
     $('spaBathCancel').style.display=active?'':'none';
     if(active){
       const minutes=Math.max(0,Math.ceil((new Date(s.ends_at).getTime()-Date.now())/60000));
