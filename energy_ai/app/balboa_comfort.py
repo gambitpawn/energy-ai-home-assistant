@@ -10,6 +10,7 @@ import httpx
 from fastapi import HTTPException
 
 from .db import connect_db
+from .balboa_permission import authorized, set_authorized, require_authorized, BalboaControlDisabled
 
 ENTITY = "climate.bp6013g1"
 DURATION = timedelta(hours=3)
@@ -91,6 +92,7 @@ class BalboaComfort:
         return data
 
     async def _set_preset(self, preset):
+        await asyncio.to_thread(require_authorized)
         if preset not in ("ready", "rest"):
             raise ValueError("Unsupported preset")
         base, headers = self._connection()
@@ -110,6 +112,8 @@ class BalboaComfort:
     async def activate(self):
         async with self.lock:
             s = await asyncio.to_thread(_state)
+            if not await asyncio.to_thread(authorized):
+                raise HTTPException(409, "Balboa control manually disabled")
             if s["state"] in ("active", "restoring", "error"):
                 raise HTTPException(409, "Previous spa override must be resolved first")
             try:
@@ -139,6 +143,9 @@ class BalboaComfort:
             s = await asyncio.to_thread(_state)
             if s["state"] == "idle":
                 return s
+            if not await asyncio.to_thread(authorized):
+                await asyncio.to_thread(_save, "idle")
+                return await self.status()
             if s["state"] not in ("active", "restoring", "error"):
                 raise HTTPException(409, "Unknown spa override state")
             await asyncio.to_thread(_save, "restoring", s["ends_at"], s["previous_preset"])
@@ -195,21 +202,24 @@ def install_balboa_comfort(app):
     @app.post("/spa/heating-control")
     async def enable_spa_heat_control():
         from .balboa_heat_scheduler import set_control_enabled
-        await asyncio.to_thread(set_control_enabled, True)
-        return {"enabled": True}
+        async with comfort.lock:
+            await asyncio.to_thread(set_control_enabled, True)
+            await asyncio.to_thread(set_authorized, True)
+        return {"enabled": True, "write_authorized": True}
 
     @app.delete("/spa/heating-control")
     async def disable_spa_heat_control():
         from .balboa_heat_scheduler import set_control_enabled
         async with comfort.lock:
+            # No new writes can start after this handler holds the shared lock.
+            await asyncio.to_thread(set_authorized, False)
             await asyncio.to_thread(set_control_enabled, False)
-            try:
-                data = await comfort._read()
-                if data.get("state") == "off":
-                    await scheduler._set_mode("heat")
-            except Exception as exc:
-                raise HTTPException(503, "Spa control disabled, but restore-to-heat could not be verified") from exc
-        return {"enabled": False}
+            await asyncio.to_thread(_save, "idle")
+        return {"enabled": False, "write_authorized": False}
+
+    @app.get("/spa/control-permission")
+    async def spa_control_permission():
+        return {"write_authorized": await asyncio.to_thread(authorized)}
 
     @app.get("/spa/heating-plan")
     async def spa_heating_plan():
@@ -233,6 +243,9 @@ def install_balboa_comfort(app):
     @asynccontextmanager
     async def spa_lifespan(application):
         async with previous_lifespan(application) as state:
+            # Preserve explicit opt-in only; stale Bada nu must never restart writes.
+            if not await asyncio.to_thread(authorized):
+                await asyncio.to_thread(_save, "idle")
             comfort.start()
             scheduler.start()
             try:
