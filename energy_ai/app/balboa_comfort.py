@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from .db import connect_db
 from .balboa_permission import authorized, set_authorized, require_authorized, BalboaControlDisabled
@@ -198,9 +198,29 @@ def install_balboa_comfort(app):
     comfort = BalboaComfort()
     from .balboa_heat_scheduler import BalboaHeatScheduler
     scheduler = BalboaHeatScheduler(comfort)
+    from .balboa_heat_pause import BalboaHeatPause
+    heat_pause = BalboaHeatPause(comfort)
+
+    @app.get("/spa/heat-pause")
+    async def heat_pause_status():
+        return await heat_pause.status()
+
+    @app.post("/spa/heat-pause")
+    async def heat_pause_start(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await heat_pause.activate((body or {}).get("hours", 6))
+
+    @app.delete("/spa/heat-pause")
+    async def heat_pause_end():
+        return await heat_pause.finish()
 
     @app.post("/spa/heating-control")
     async def enable_spa_heat_control():
+        if (await heat_pause.status())["status"] != "idle":
+            raise HTTPException(409, "Värmepaus pågår; avsluta den först")
         from .balboa_heat_scheduler import set_control_enabled
         async with comfort.lock:
             await asyncio.to_thread(set_control_enabled, True)
@@ -269,9 +289,11 @@ def install_balboa_comfort(app):
                 await asyncio.to_thread(_save, "idle")
             comfort.start()
             scheduler.start()
+            heat_pause.start()
             try:
                 yield state
             finally:
+                await heat_pause.stop()
                 await scheduler.stop()
                 await comfort.stop()
 
