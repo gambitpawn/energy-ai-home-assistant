@@ -38,6 +38,12 @@ class Collector:
         self.persistence_dropped=0
         self.persistence_written=0
         self.persistence_retried=0
+        self.persistence_raw_written=0
+        self.persistence_aggregated=0
+        self.last_raw_error=None
+        self.last_aggregation_error=None
+        self.last_raw_saved_at=None
+        self.last_aggregated_at=None
 
     def _ensure_runtime_state(self):
         # Tests and a few legacy construction paths instantiate Collector via
@@ -49,43 +55,69 @@ class Collector:
         if not hasattr(self,"persistence_dropped"): self.persistence_dropped=0
         if not hasattr(self,"persistence_written"): self.persistence_written=0
         if not hasattr(self,"persistence_retried"): self.persistence_retried=0
+        if not hasattr(self,"persistence_raw_written"): self.persistence_raw_written=0
+        if not hasattr(self,"persistence_aggregated"): self.persistence_aggregated=0
+        if not hasattr(self,"last_raw_error"): self.last_raw_error=None
+        if not hasattr(self,"last_aggregation_error"): self.last_aggregation_error=None
+        if not hasattr(self,"last_raw_saved_at"): self.last_raw_saved_at=None
+        if not hasattr(self,"last_aggregated_at"): self.last_aggregated_at=None
 
-    def _persist_state(self,state):
-        payload=state.model_dump()
-        insert_raw(state.collected_at,payload)
-        bucket_start=quarter_bucket(state.collected_at)
-        bucket_end=bucket_start+timedelta(minutes=15)
-        expected_samples=max(1,round(900/self.poll_seconds))
-        rebuild_15m_bucket(
+    def _persist_raw_state(self, state):
+        # DB insert is idempotent by collected_at, including after an interrupted
+        # retry. Never rewrite a successful raw sample just to rebuild its bucket.
+        insert_raw(state.collected_at, state.model_dump())
+
+    def _aggregate_state(self, state):
+        bucket_start = quarter_bucket(state.collected_at)
+        bucket_end = bucket_start + timedelta(minutes=15)
+        expected_samples = max(1, round(900 / self.poll_seconds))
+        result = rebuild_15m_bucket(
             bucket_start.isoformat(),
             bucket_end.isoformat(),
             expected_samples=expected_samples,
         )
+        if result is None:
+            raise RuntimeError("15-minute bucket not rebuilt despite a saved raw sample")
 
     async def _persistence_loop(self):
         try:
             while True:
-                state,attempt=await self._persistence_queue.get()
+                state, attempt, raw_saved = await self._persistence_queue.get()
                 try:
-                    await asyncio.to_thread(self._persist_state,state)
-                    self.persistence_written+=1
-                    self.last_persistence_error=None
+                    if not raw_saved:
+                        try:
+                            await asyncio.to_thread(self._persist_raw_state, state)
+                        except Exception as exc:
+                            self.last_raw_error = repr(exc)
+                            raise
+                        raw_saved = True
+                        self.persistence_raw_written += 1
+                        self.last_raw_saved_at = state.collected_at
+                        self.last_raw_error = None
+                    try:
+                        await asyncio.to_thread(self._aggregate_state, state)
+                    except Exception as exc:
+                        self.last_aggregation_error = repr(exc)
+                        raise
+                    self.persistence_aggregated += 1
+                    self.last_aggregated_at = state.collected_at
+                    self.last_aggregation_error = None
+                    self.persistence_written += 1
+                    self.last_persistence_error = None
                 except Exception as exc:
-                    # Persistence is deliberately not allowed to make the live
-                    # safety snapshot stale. A later poll still proceeds.
-                    self.last_persistence_error=repr(exc)
+                    self.last_persistence_error = repr(exc)
                     if attempt < 3:
                         if self._persistence_queue.full():
                             try:
                                 self._persistence_queue.get_nowait()
                                 self._persistence_queue.task_done()
-                                self.persistence_dropped+=1
+                                self.persistence_dropped += 1
                             except asyncio.QueueEmpty:
                                 pass
-                        self._persistence_queue.put_nowait((state,attempt+1))
-                        self.persistence_retried+=1
+                        self._persistence_queue.put_nowait((state, attempt + 1, raw_saved))
+                        self.persistence_retried += 1
                     else:
-                        self.persistence_dropped+=1
+                        self.persistence_dropped += 1
                 finally:
                     self._persistence_queue.task_done()
         except asyncio.CancelledError:
@@ -107,7 +139,7 @@ class Collector:
                 self.persistence_dropped+=1
             except asyncio.QueueEmpty:
                 pass
-        self._persistence_queue.put_nowait((state,0))
+        self._persistence_queue.put_nowait((state,0,False))
 
     async def run_once(self):
         state=await self.ha.snapshot()
@@ -154,6 +186,12 @@ class Collector:
             "pending":self._persistence_queue.qsize(),
             "capacity":self.persistence_queue_max,
             "written":self.persistence_written,
+            "raw_written":self.persistence_raw_written,
+            "aggregated":self.persistence_aggregated,
+            "last_raw_saved_at":self.last_raw_saved_at,
+            "last_aggregated_at":self.last_aggregated_at,
+            "last_raw_error":self.last_raw_error,
+            "last_aggregation_error":self.last_aggregation_error,
             "retried":self.persistence_retried,
             "dropped":self.persistence_dropped,
             "last_error":self.last_persistence_error,
