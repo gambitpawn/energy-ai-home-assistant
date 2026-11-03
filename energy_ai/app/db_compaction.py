@@ -158,9 +158,17 @@ def compact_before_server_start(database: Path | None = None) -> dict:
     """
     source = database or db.DB_PATH
     marker, report, target, rollback = _paths(source)
+    # Recover an interrupted rename before main.py can create a fresh empty DB.
+    if not source.exists() and rollback.exists():
+        os.replace(rollback, source)
+        result = {"status": "interrupted_swap_recovered", "last_result": "restored_original"}
+        marker.unlink(missing_ok=True)
+        _write_json(report, result)
+        return result
     if not marker.exists():
         return {"status": "not_requested"}
     if not source.exists():
+        # Explicit failure: never silently initialize a new empty database.
         return {"status": "database_missing"}
     if rollback.exists():
         result = {"status": "rollback_file_exists", "error": "manual inspection required"}
@@ -182,7 +190,7 @@ def compact_before_server_start(database: Path | None = None) -> dict:
         with sqlite3.connect(source, timeout=5, isolation_level=None) as old:
             # WAL can hold committed writes; checkpoint before snapshot and swap.
             checkpoint = old.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if checkpoint is None or int(checkpoint[0]) != 0:
+            if checkpoint is None or int(checkpoint[0]) != 0 or int(checkpoint[1]) != int(checkpoint[2]):
                 raise RuntimeError("could not checkpoint SQLite WAL")
             before = _row_counts(old)
             # VACUUM INTO creates a logically compact, consistent output.
@@ -197,6 +205,12 @@ def compact_before_server_start(database: Path | None = None) -> dict:
         # No server process is running now. Rename is atomic within /data.
         os.replace(source, rollback)
         try:
+            # All committed WAL frames were checkpointed while no other
+            # process existed. Remove old sidecars before opening the new DB.
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(source) + suffix)
+                if sidecar.exists():
+                    sidecar.unlink()
             os.replace(target, source)
             promoted = True
             with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as check:
@@ -209,11 +223,6 @@ def compact_before_server_start(database: Path | None = None) -> dict:
             os.replace(rollback, source)
             promoted = False
             raise
-        # Remove only checkpointed, zero-length WAL files, never nonempty WAL.
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(str(source) + suffix)
-            if sidecar.exists() and sidecar.stat().st_size == 0:
-                sidecar.unlink()
         compact_bytes = source.stat().st_size
         rollback.unlink()
         marker.unlink(missing_ok=True)
