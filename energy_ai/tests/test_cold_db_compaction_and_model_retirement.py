@@ -18,6 +18,8 @@ def _database(path: Path) -> None:
             CREATE TABLE state_15m(bucket_start TEXT PRIMARY KEY,payload_json TEXT);
             CREATE TABLE neural_training_sample(id INTEGER PRIMARY KEY,features_json TEXT);
             CREATE TABLE adaptive_parameter_state(id INTEGER PRIMARY KEY,payload_json TEXT);
+            CREATE TABLE production_state(singleton INTEGER PRIMARY KEY,operating_mode TEXT,physical_writes_enabled INTEGER,actuator_ready INTEGER);
+            INSERT INTO production_state VALUES (1,'shadow',0,0);
             INSERT INTO neural_training_sample VALUES (1,'{"learning":true}');
             INSERT INTO adaptive_parameter_state VALUES (1,'{"preserved":true}');
         """)
