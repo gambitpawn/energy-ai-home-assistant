@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 from . import model_selector as selector
 from .adaptive_auto import automatic_maintenance_once as adaptive_maintenance_once
 from .adaptive_learning import active_run
+from .db import repair_missing_15m
 from .evaluation_decomposition import run_pending_evaluation_decomposition
 from .gradient_training import automatic_maintenance_once as gradient_maintenance_once
 from .maintenance_coordination import LANE_EVALUATION, LANE_HEAVY, run_low_priority
@@ -97,6 +98,43 @@ async def _pv_loop(cfg) -> None:
                     lane=LANE_HEAVY,
                     timeout_seconds=1800,
                 )
+        except Exception:
+            pass
+
+
+async def _history_repair_loop(cfg) -> None:
+    """Repair historical raw samples off the control path in bounded batches.
+
+    Run twice per hour, away from quarter-hour actuation. A disposable worker
+    isolates SQLite pressure and the shared maintenance gate limits concurrency.
+    """
+    poll_seconds = int((cfg.get("collector") or {}).get("poll_seconds") or 60)
+    while True:
+        # 12/42 UTC; no synchronous rebuild during startup or HTTP requests.
+        await asyncio.sleep(_seconds_until_slot(minute=12, period_hours=1))
+        try:
+            await run_low_priority(
+                "history_bucket_repair",
+                repair_missing_15m,
+                poll_seconds,
+                48,
+                48,
+                lane=LANE_HEAVY,
+                timeout_seconds=180,
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(_seconds_until_slot(minute=42, period_hours=1))
+        try:
+            await run_low_priority(
+                "history_bucket_repair",
+                repair_missing_15m,
+                poll_seconds,
+                48,
+                48,
+                lane=LANE_HEAVY,
+                timeout_seconds=180,
+            )
         except Exception:
             pass
 
@@ -198,6 +236,7 @@ async def combined_maintenance_loop(
         _adaptive_loop(cfg),
         _gradient_loop(cfg),
         _pv_loop(cfg),
+        _history_repair_loop(cfg),
         _optimizer_day_loop(cfg),
         _evaluation_decomposition_loop(cfg),
         _selector_loop(cfg),

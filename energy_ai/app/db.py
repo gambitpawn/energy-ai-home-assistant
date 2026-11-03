@@ -33,6 +33,7 @@ def init_db():
         c.execute("PRAGMA wal_autocheckpoint=1000")
         c.executescript('''
         CREATE TABLE IF NOT EXISTS raw_state(id INTEGER PRIMARY KEY AUTOINCREMENT,collected_at TEXT NOT NULL,payload_json TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_raw_state_collected_at ON raw_state(collected_at);
         CREATE TABLE IF NOT EXISTS state_15m(bucket_start TEXT PRIMARY KEY,collected_at TEXT NOT NULL,payload_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS price_15m(area TEXT NOT NULL,start_utc TEXT NOT NULL,end_utc TEXT NOT NULL,price_ore_kwh REAL NOT NULL,source_currency TEXT NOT NULL,source_price_per_mwh REAL NOT NULL,fetched_at TEXT NOT NULL,PRIMARY KEY(area,start_utc));
         CREATE TABLE IF NOT EXISTS pv_forecast_15m(generated_at TEXT NOT NULL,start_utc TEXT NOT NULL,forecast_kw REAL NOT NULL,uncertainty_kw REAL NOT NULL,irradiance_w_m2 REAL NOT NULL,cloud_cover_pct REAL,temperature_c REAL,model TEXT NOT NULL,radiation_feature TEXT NOT NULL,payload_json TEXT,PRIMARY KEY(generated_at,start_utc));
@@ -48,7 +49,18 @@ def init_db():
 
 
 def insert_raw(ts,payload):
-    with connect_db() as c: c.execute("INSERT INTO raw_state(collected_at,payload_json) VALUES (?,?)",(ts,json.dumps(payload,ensure_ascii=False)))
+    """Idempotent raw persistence, including retries after a successful commit.
+
+    Older raw_state rows may already contain duplicate timestamps, so a unique
+    index cannot be added safely without rewriting user history.
+    """
+    with connect_db() as c:
+        c.execute(
+            """INSERT INTO raw_state(collected_at,payload_json)
+               SELECT ?, ? WHERE NOT EXISTS
+               (SELECT 1 FROM raw_state WHERE collected_at=?)""",
+            (ts, json.dumps(payload, ensure_ascii=False), ts),
+        )
 
 
 def upsert_15m(bucket,ts,payload):
@@ -77,7 +89,11 @@ def _usable_core_sample(payload): return any(_numeric_state(payload,key) is not 
 def rebuild_15m_bucket(bucket_start,bucket_end,expected_samples=None):
     with connect_db() as c: rows=c.execute("SELECT collected_at,payload_json FROM raw_state WHERE collected_at>=? AND collected_at<? ORDER BY collected_at ASC",(bucket_start,bucket_end)).fetchall()
     if not rows: return None
-    parsed=[(ts,json.loads(pj)) for ts,pj in rows]; usable=[(ts,p) for ts,p in parsed if _usable_core_sample(p)]
+    # Older retry logic could insert the same collected_at more than once.
+    # Deduplicate within a bucket to avoid biased means and false completeness.
+    unique = dict(rows)
+    parsed=[(ts,json.loads(pj)) for ts,pj in sorted(unique.items())]
+    usable=[(ts,p) for ts,p in parsed if _usable_core_sample(p)]
     if not usable: return None
     avg_keys=["pv_power_kw","house_load_kw","grid_power_kw","battery_power_kw","spot_price_ore_kwh","ev_power_kw","pool_power_kw","pool_temperature_c"]
     means={}; mins={}; maxs={}; counts={}
@@ -104,6 +120,55 @@ def rebuild_recent_15m(poll_seconds,lookback_hours=48):
     for start in sorted(buckets):
         if rebuild_15m_bucket(start.isoformat(),(start+timedelta(minutes=15)).isoformat(),expected) is not None: rebuilt+=1
     return rebuilt
+
+
+def repair_missing_15m(poll_seconds, lookback_hours=48, max_buckets=48):
+    """Repair missing 15-minute aggregates from persisted raw samples.
+
+    Read only a bounded recent window; write at most max_buckets. The caller
+    runs this inside a disposable low-priority maintenance worker, never in the
+    collector, request handler, startup, or actuator control path.
+    """
+    hours = max(1, min(168, int(lookback_hours)))
+    budget = max(1, min(96, int(max_buckets)))
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with connect_db() as c:
+        timestamps = [r[0] for r in c.execute(
+            "SELECT DISTINCT collected_at FROM raw_state WHERE collected_at>=? ORDER BY collected_at DESC",
+            (cutoff,),
+        )]
+        existing = {r[0] for r in c.execute(
+            "SELECT bucket_start FROM state_15m WHERE bucket_start>=?", (cutoff[:13] + ":00:00+00:00",),
+        )}
+    candidates = set()
+    for ts in timestamps:
+        try:
+            d = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        candidates.add(d.replace(minute=(d.minute // 15) * 15, second=0, microsecond=0).isoformat())
+    missing = sorted(candidates - existing, reverse=True)
+    repaired = 0
+    failed = 0
+    expected = max(1, round(900 / max(1, int(poll_seconds))))
+    for bucket in missing[:budget]:
+        start = datetime.fromisoformat(bucket)
+        try:
+            if rebuild_15m_bucket(bucket, (start + timedelta(minutes=15)).isoformat(), expected) is not None:
+                repaired += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+            # Avoid hammering SQLite when a writer lock or disk fault persists.
+            break
+    return {
+        "repaired": repaired,
+        "failed": failed,
+        "remaining_missing": max(0, len(missing) - repaired),
+        "lookback_hours": hours,
+        "max_buckets": budget,
+    }
 
 
 def upsert_prices(area,rows,fetched_at):
