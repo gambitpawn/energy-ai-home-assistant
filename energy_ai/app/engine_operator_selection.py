@@ -59,7 +59,7 @@ def registered_engine_ids() -> list[str]:
     return [
         str(row.get("engine_id"))
         for row in rows
-        if row.get("engine_id")
+        if row.get("engine_id") and row.get("available", False)
     ]
 
 
