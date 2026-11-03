@@ -39,11 +39,11 @@ def _engine_input() -> EngineInput:
     )
 
 
-def test_registry_marks_gradient_as_trainable_available_challenger():
+def test_registry_marks_gradient_as_retired():
     item = descriptor("gradient_v1")
-    assert item.available is True
-    assert item.trainable is True
-    assert item.learning_enabled is True
+    assert item.available is False
+    assert item.trainable is False
+    assert item.learning_enabled is False
     assert item.baseline is False
 
 
