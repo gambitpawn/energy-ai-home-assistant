@@ -155,10 +155,10 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
                 ids = []
                 held = 0
                 for rowid, timestamp in candidates:
+                    if not _older_than(timestamp, cutoff):
+                        continue
                     if latest_plan_generation is not None and timestamp == latest_plan_generation:
                         held += 1
-                        continue
-                    if not _older_than(timestamp, cutoff):
                         continue
                     if table == "raw_state" and not _safe_raw_row(c, str(timestamp)):
                         held += 1
