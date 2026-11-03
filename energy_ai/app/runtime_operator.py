@@ -38,6 +38,7 @@ from .pool_installation_profile import install_pool_installation_profile
 from .pv_surplus_runtime import install_pv_surplus_capture
 from .release_version import RELEASE_VERSION
 from .selected_engine_authority import install_selected_engine_authority
+from .retired_models import install_retired_selector_guard
 from .settings_store import delete_setting_overrides
 from .stochastic_runtime import stochastic_runtime_status, install_stochastic_runtime_patch
 from .ui_actions import ACTIONS_EXTENSION
@@ -78,25 +79,8 @@ install_actuator_watchdog_patch()
 # at verified zero power during the first 15 minutes after a successful arm.
 install_actuator_mode_recovery_patch()
 
-# Continuous learned-model training and race qualification are separate. Neural
-# + hybrid share one frozen neural candidate; gradient_v1 has its own independently
-# frozen candidate and can retrain in the background without resetting robust10.
-QUALIFICATION_RUNTIME = install_qualification_candidate_runtime()
-GRADIENT_QUALIFICATION_RUNTIME = install_gradient_qualification_runtime()
-install_gradient_selector_qualification()
-_ORIGINAL_NEURAL_RUNTIME_STATUS = base.neural_runtime_status
-
-
-def _qualification_aware_neural_runtime_status():
-    status = _ORIGINAL_NEURAL_RUNTIME_STATUS()
-    candidate = qualification_status()
-    status["latest_model_shadow_ready"] = bool(status.get("shadow_ready"))
-    status["qualification_candidate"] = candidate
-    status["shadow_ready"] = bool(candidate.get("candidate_ready"))
-    return status
-
-
-base.neural_runtime_status = _qualification_aware_neural_runtime_status
+# Exclude retired learned engines before operator/automatic routing is installed.
+install_retired_selector_guard()
 
 # Operator engine selection is a routing override only. Install it before the
 # challenger preparation wrappers so all challengers are written for the same
@@ -116,10 +100,8 @@ SELECTED_ENGINE_AUTHORITY = install_selected_engine_authority(
 # installed last, so the call order is gradient -> refined deterministic ->
 # stochastic -> hybrid -> operator routing -> robust selector. All decisions
 # still share one information vintage.
-install_hybrid_runtime_patch(base.core.cfg)
 install_stochastic_runtime_patch(base.core.cfg)
 install_refined_runtime_patch(base.core.cfg)
-install_gradient_runtime_patch(base.core.cfg)
 
 # Cheap real-time residual control runs in the existing lightweight SOC loop.
 # It preserves the selected engine's intended export and only diverts export
