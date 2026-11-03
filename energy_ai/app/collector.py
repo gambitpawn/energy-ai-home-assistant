@@ -71,13 +71,11 @@ class Collector:
         bucket_start = quarter_bucket(state.collected_at)
         bucket_end = bucket_start + timedelta(minutes=15)
         expected_samples = max(1, round(900 / self.poll_seconds))
-        result = rebuild_15m_bucket(
+        rebuild_15m_bucket(
             bucket_start.isoformat(),
             bucket_end.isoformat(),
             expected_samples=expected_samples,
         )
-        if result is None:
-            raise RuntimeError("15-minute bucket not rebuilt despite a saved raw sample")
 
     async def _persistence_loop(self):
         try:
