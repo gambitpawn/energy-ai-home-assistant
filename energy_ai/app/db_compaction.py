@@ -150,6 +150,22 @@ def _integrity(connection: sqlite3.Connection) -> None:
         raise RuntimeError("SQLite foreign_key_check failed: " + repr(foreign_key_errors))
 
 
+def _cold_start_safe(source: Path) -> bool:
+    """Fail closed: a pending job cannot compact a database last used in active mode."""
+    try:
+        with sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=2) as c:
+            row = c.execute(
+                "SELECT operating_mode,physical_writes_enabled,actuator_ready "
+                "FROM production_state WHERE singleton=1"
+            ).fetchone()
+        return bool(
+            row and row[0] in {"shadow", "paused", "off"}
+            and not bool(row[1]) and not bool(row[2])
+        )
+    except (sqlite3.Error, OSError):
+        return False
+
+
 def compact_before_server_start(database: Path | None = None) -> dict:
     """Run only at cold process startup, with no other DB connections alive.
 
@@ -177,6 +193,8 @@ def compact_before_server_start(database: Path | None = None) -> dict:
         result = {"status": "interrupted_swap_rolled_back", "last_result": "restored_original"}
         _write_json(report, result)
         return result
+    if not _cold_start_safe(source):
+        return {"status": "unsafe_control_state_deferred"}
     sufficient, free = _space_ok(source)
     if not sufficient:
         marker.unlink(missing_ok=True)
