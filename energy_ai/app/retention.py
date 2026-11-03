@@ -90,21 +90,28 @@ def _safe_raw_row(connection: sqlite3.Connection, timestamp: str) -> bool:
         return False
 
 
-def _evaluated_plan_row(connection: sqlite3.Connection, timestamp: str) -> bool:
+def _evaluated_plan_row(connection: sqlite3.Connection, timestamp: str, cache: dict[str, bool] | None = None) -> bool:
     """Keep plan rows if the day-level evaluator has not produced an artifact."""
     try:
         dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             return False
         local_date = dt.astimezone(_STOCKHOLM).date().isoformat()
+        if cache is not None and local_date in cache:
+            return cache[local_date]
         row = connection.execute(
             "SELECT payload_json FROM optimizer_day_eval WHERE local_date=?",
             (local_date,),
         ).fetchone()
         if not row:
+            if cache is not None:
+                cache[local_date] = False
             return False
         payload = json.loads(row[0])
-        return payload.get("status") in {"ok", "partial_plan_coverage"}
+        evaluated = payload.get("status") in {"ok", "partial_plan_coverage"}
+        if cache is not None:
+            cache[local_date] = evaluated
+        return evaluated
     except (ValueError, TypeError, sqlite3.Error):
         return False
 
@@ -154,6 +161,7 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
                         latest_plan_generation = latest[0] if latest else None
                 ids = []
                 held = 0
+                evaluation_cache: dict[str, bool] = {}
                 for rowid, timestamp in candidates:
                     if not _older_than(timestamp, cutoff):
                         continue
@@ -163,7 +171,7 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
                     if table == "raw_state" and not _safe_raw_row(c, str(timestamp)):
                         held += 1
                         continue
-                    if table == "optimizer_plan" and not _evaluated_plan_row(c, str(timestamp)):
+                    if table == "optimizer_plan" and not _evaluated_plan_row(c, str(timestamp), evaluation_cache):
                         held += 1
                         continue
                     if table == "engine_information_vintage":
