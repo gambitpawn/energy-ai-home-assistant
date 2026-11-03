@@ -13,6 +13,7 @@ from .gradient_training import automatic_maintenance_once as gradient_maintenanc
 from .maintenance_coordination import LANE_EVALUATION, LANE_HEAVY, run_low_priority
 from .neural_auto import automatic_maintenance_once as neural_maintenance_once
 from .optimizer_evaluation import evaluate_matured_optimizer_days
+from .retention import run_retention_batch
 from .pv_auto import automatic_pv_retraining_once
 
 
@@ -139,6 +140,33 @@ async def _history_repair_loop(cfg) -> None:
             pass
 
 
+async def _retention_loop() -> None:
+    """Stagger small database-deletion batches across the quiet UTC night.
+
+    Never run during startup or quarter-boundary planning. Each job is isolated
+    by the common heavy maintenance worker and shares its memory guard.
+    """
+    slots = [(hour, minute) for hour in range(0, 6) for minute in (10, 30, 50)]
+    while True:
+        delay, _, _ = min(
+            (_seconds_until_daily_utc(hour=hour, minute=minute), hour, minute)
+            for hour, minute in slots
+        )
+        await asyncio.sleep(delay)
+        try:
+            await run_low_priority(
+                "bounded_retention",
+                run_retention_batch,
+                batch_size=512,
+                lane=LANE_HEAVY,
+                timeout_seconds=180,
+            )
+        except Exception:
+            # The maintenance lane records the failure; live control continues.
+            pass
+        await asyncio.sleep(1)
+
+
 async def _optimizer_day_loop(cfg) -> None:
     """Keep core day evaluation independent of heavyweight hindsight/model work."""
     while True:
@@ -237,6 +265,7 @@ async def combined_maintenance_loop(
         _gradient_loop(cfg),
         _pv_loop(cfg),
         _history_repair_loop(cfg),
+        _retention_loop(),
         _optimizer_day_loop(cfg),
         _evaluation_decomposition_loop(cfg),
         _selector_loop(cfg),
