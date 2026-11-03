@@ -22,6 +22,8 @@ export OMP_NUM_THREADS=2
 export OPENBLAS_NUM_THREADS=2
 export MKL_NUM_THREADS=2
 
+/opt/energy-ai/venv/bin/python -m app.cold_start_maintenance
+
 exec /opt/energy-ai/venv/bin/uvicorn app.runtime_operator:app \
   --app-dir /opt/energy-ai \
   --host 0.0.0.0 \
