@@ -66,10 +66,11 @@ def test_plans_only_retire_after_completed_daily_evaluation(monkeypatch, tmp_pat
         c.execute("INSERT INTO optimizer_plan VALUES (?,?,?)", (date_old, date_old, "{}"))
         c.execute("INSERT INTO optimizer_plan VALUES (?,?,?)", (_stamp(2), _stamp(2), "{}"))
         c.execute("INSERT INTO optimizer_plan_summary VALUES (?,?)", (_stamp(45), "{}"))
+        c.execute("INSERT INTO optimizer_plan_summary VALUES (?,?)", (_stamp(2), "{}"))
     first = retention.run_retention_batch(now=NOW)
     assert first["protected"]["optimizer_plan"] == 1
     assert _count("optimizer_plan") == 2
-    assert _count("optimizer_plan_summary") == 0
+    assert _count("optimizer_plan_summary") == 1
     with db.connect_db() as c:
         c.execute("INSERT INTO optimizer_day_eval VALUES (?,?)", (local_day, '{"status":"ok"}'))
     second = retention.run_retention_batch(now=NOW)
@@ -125,3 +126,26 @@ def test_no_large_live_write_path_deletions():
     assert "_retention_loop()" in maintenance
     assert 'lane=LANE_HEAVY' in maintenance
     assert 'timeout_seconds=180' in maintenance
+
+def test_last_known_plan_survives_even_if_optimizer_stops_generating(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    old = _stamp(90)
+    local_day = datetime.fromisoformat(old).astimezone(ZoneInfo("Europe/Stockholm")).date().isoformat()
+    with db.connect_db() as c:
+        c.execute("INSERT INTO optimizer_plan_summary VALUES (?,?)", (old, '{"rows": []}'))
+        c.execute("INSERT INTO optimizer_plan VALUES (?,?,?)", (old, old, "{}"))
+        c.execute("INSERT INTO optimizer_day_eval VALUES (?,?)", (local_day, '{"status":"ok"}'))
+    result = retention.run_retention_batch(now=NOW)
+    assert result["protected"]["optimizer_plan_summary"] == 1
+    assert result["protected"]["optimizer_plan"] == 1
+    assert _count("optimizer_plan_summary") == 1
+    assert _count("optimizer_plan") == 1
+
+
+def test_invalid_date_is_never_treated_as_old(monkeypatch, tmp_path):
+    _setup(monkeypatch, tmp_path)
+    with db.connect_db() as c:
+        c.execute("INSERT INTO load_forecast_15m VALUES (?)", ("malformed-timestamp",))
+    result = retention.run_retention_batch(now=NOW)
+    assert result["removed"]["load_forecast_15m"] == 0
+    assert _count("load_forecast_15m") == 1
