@@ -64,6 +64,17 @@ def _save_status(report: dict) -> None:
     os.replace(tmp, path)
 
 
+def _older_than(value: object, cutoff: datetime) -> bool:
+    """Fail closed on invalid or timezone-naive timestamps."""
+    if not isinstance(value, str):
+        return False
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return stamp.tzinfo is not None and stamp.astimezone(timezone.utc) < cutoff
+    except ValueError:
+        return False
+
+
 def _safe_raw_row(connection: sqlite3.Connection, timestamp: str) -> bool:
     """Never discard a raw observation without a materialized 15-min bucket."""
     try:
@@ -93,7 +104,7 @@ def _evaluated_plan_row(connection: sqlite3.Connection, timestamp: str) -> bool:
         if not row:
             return False
         payload = json.loads(row[0])
-        return payload.get("status") == "ok"
+        return payload.get("status") in {"ok", "partial_plan_coverage"}
     except (ValueError, TypeError, sqlite3.Error):
         return False
 
@@ -120,7 +131,7 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
     errors: dict[str, str] = {}
     cursors = dict(read_retention_status().get("cursors") or {})
     for table, days in RETENTION_DAYS.items():
-        cutoff = (now - timedelta(days=days)).isoformat()
+        cutoff = now - timedelta(days=days)
         try:
             with db.connect_db(timeout=2.0) as c:
                 available = c.execute(
@@ -137,7 +148,7 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
                 ids = []
                 held = 0
                 for rowid, timestamp in candidates:
-                    if str(timestamp) >= cutoff:
+                    if not _older_than(timestamp, cutoff):
                         continue
                     if table == "raw_state" and not _safe_raw_row(c, str(timestamp)):
                         held += 1
