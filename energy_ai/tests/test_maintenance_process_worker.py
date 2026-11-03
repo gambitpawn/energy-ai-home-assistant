@@ -26,8 +26,9 @@ def _probe_worker() -> dict[str, object]:
 
 
 def _sleep_probe(seconds: float) -> dict[str, object]:
+    started = time.monotonic()
     time.sleep(float(seconds))
-    return _probe_worker()
+    return {**_probe_worker(), "started": started, "finished": time.monotonic()}
 
 
 def _reset_worker_state():
@@ -88,7 +89,9 @@ def test_worker_lanes_are_independent_and_serialized_per_lane():
     assert 'LANE_EVALUATION = "evaluation"' in source
     assert "_LANE_LOCKS" in source
     assert "async with _LANE_LOCKS[lane]" in source
-    assert "dual_lane_supervised_job_workers_v3" in source
+    assert "dual_lane_serialized_memory_guard_v4" in source
+    assert "_WORKER_ADMISSION_LOCK" in source
+    assert "async with _LANE_LOCKS[lane], _WORKER_ADMISSION_LOCK" in source
     assert "energy-ai-maintenance-{lane}-job" in source
     assert "ProcessPoolExecutor" not in source
 
@@ -135,3 +138,37 @@ def test_runtime_exposes_maintenance_status_route():
     assert 'from .maintenance_coordination import status as maintenance_status' in source
     assert '@app.get("/maintenance/status"' in source
     assert "**maintenance_status()" in source
+
+
+def test_heavy_and_evaluation_workers_do_not_overlap():
+    if os.name != "posix":
+        return
+    _reset_worker_state()
+    try:
+        mc.install_process_worker(startup_timeout_seconds=5)
+        async def run_both():
+            return await asyncio.gather(
+                mc.run_low_priority("heavy_probe", _sleep_probe, 0.5, lane=mc.LANE_HEAVY, timeout_seconds=5),
+                mc.run_low_priority("evaluation_probe", _sleep_probe, 0.5, lane=mc.LANE_EVALUATION, timeout_seconds=5),
+            )
+        a, b = asyncio.run(run_both())
+        assert a["finished"] <= b["started"] or b["finished"] <= a["started"]
+    finally:
+        _reset_worker_state()
+
+
+def test_low_memory_prevents_worker_submission(monkeypatch):
+    if os.name != "posix":
+        return
+    _reset_worker_state()
+    try:
+        mc.install_process_worker(startup_timeout_seconds=5)
+        monkeypatch.setattr(mc, "_memory_headroom_bytes", lambda: 64 * 1024 * 1024)
+        with pytest.raises(mc.MaintenanceResourcePressureError, match="memory headroom"):
+            asyncio.run(mc.run_low_priority("memory_guard_probe", _probe_worker))
+        state = mc.status()["lanes"][mc.LANE_HEAVY]
+        assert state["last_job_worker_pid"] is None
+        assert state["last_resource_pressure"]["label"] == "memory_guard_probe"
+        assert state["supervisor_alive"] is True
+    finally:
+        _reset_worker_state()
