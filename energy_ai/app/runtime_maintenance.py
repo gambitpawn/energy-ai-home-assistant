@@ -8,10 +8,10 @@ from . import model_selector as selector
 from .adaptive_auto import automatic_maintenance_once as adaptive_maintenance_once
 from .adaptive_learning import active_run
 from .db import repair_missing_15m
+from .db_compaction import prepare_restart_if_safe, ask_supervisor_to_restart
+from .production_state import status as production_status
 from .evaluation_decomposition import run_pending_evaluation_decomposition
-from .gradient_training import automatic_maintenance_once as gradient_maintenance_once
 from .maintenance_coordination import LANE_EVALUATION, LANE_HEAVY, run_low_priority
-from .neural_auto import automatic_maintenance_once as neural_maintenance_once
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .retention import run_retention_batch
 from .pv_auto import automatic_pv_retraining_once
@@ -41,21 +41,6 @@ def _seconds_until_daily_utc(*, hour: int, minute: int) -> float:
     return max(0.0, (target - now).total_seconds())
 
 
-async def _neural_loop(cfg) -> None:
-    while True:
-        await asyncio.sleep(_seconds_until_slot(minute=5))
-        try:
-            await run_low_priority(
-                "neural_maintenance",
-                neural_maintenance_once,
-                cfg,
-                lane=LANE_HEAVY,
-                timeout_seconds=1800,
-            )
-        except Exception:
-            pass
-
-
 async def _adaptive_loop(cfg) -> None:
     while True:
         await asyncio.sleep(_seconds_until_slot(minute=20))
@@ -63,23 +48,6 @@ async def _adaptive_loop(cfg) -> None:
             await run_low_priority(
                 "adaptive_maintenance",
                 adaptive_maintenance_once,
-                cfg,
-                lane=LANE_HEAVY,
-                timeout_seconds=1800,
-            )
-        except Exception:
-            pass
-
-
-async def _gradient_loop(cfg) -> None:
-    # Neural sample collection runs first. Gradient training consumes the same
-    # current-schema teacher samples but maintains its own model revisions.
-    while True:
-        await asyncio.sleep(_seconds_until_slot(minute=35))
-        try:
-            await run_low_priority(
-                "gradient_maintenance",
-                gradient_maintenance_once,
                 cfg,
                 lane=LANE_HEAVY,
                 timeout_seconds=1800,
@@ -165,6 +133,23 @@ async def _retention_loop() -> None:
             # The maintenance lane records the failure; live control continues.
             pass
         await asyncio.sleep(1)
+
+
+async def _monthly_compaction_loop() -> None:
+    """Daily off-peak eligibility check; restart at most once per 28 days.
+
+    The heavy work runs exclusively at cold start before uvicorn. This task
+    only checks state/disk space and calls Supervisor when actuation is off.
+    """
+    while True:
+        await asyncio.sleep(_seconds_until_daily_utc(hour=4, minute=7))
+        try:
+            prod = await asyncio.to_thread(production_status)
+            prepared = await asyncio.to_thread(prepare_restart_if_safe, production=prod)
+            if prepared.get("status") == "restart_requested":
+                await asyncio.to_thread(ask_supervisor_to_restart)
+        except Exception:
+            pass
 
 
 async def _optimizer_day_loop(cfg) -> None:
@@ -260,12 +245,11 @@ async def combined_maintenance_loop(
 ) -> None:
     await asyncio.gather(
         base_loop(),
-        _neural_loop(cfg),
         _adaptive_loop(cfg),
-        _gradient_loop(cfg),
         _pv_loop(cfg),
         _history_repair_loop(cfg),
         _retention_loop(),
+        _monthly_compaction_loop(),
         _optimizer_day_loop(cfg),
         _evaluation_decomposition_loop(cfg),
         _selector_loop(cfg),

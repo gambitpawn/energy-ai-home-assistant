@@ -99,7 +99,7 @@ def test_worker_lanes_are_independent_and_serialized_per_lane():
 def test_worker_is_forked_after_model_patches_but_before_persistent_lifecycle_wrapper():
     source = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
     worker = source.index("MAINTENANCE_PROCESS = install_process_worker(app=app)")
-    last_model_patch = source.index("install_gradient_runtime_patch(base.core.cfg)")
+    last_model_patch = source.index("install_refined_runtime_patch(base.core.cfg)")
     persistent = source.index("PERSISTENT_OPERATING_MODE = install_persistent_operating_mode(")
     assert last_model_patch < worker < persistent
 

@@ -261,26 +261,7 @@ async def _refresh_optimizer_pipeline_unlocked() -> dict[str, Any]:
             )
             return {**result, "model_selector": {"status": "failed", "error": repr(exc)}}
 
-    neural = await asyncio.to_thread(neural_runtime_status)
-    if neural.get("shadow_ready"):
-        try:
-            decision = await asyncio.to_thread(NeuralV1Engine(core.cfg).decide, engine_input)
-            await asyncio.to_thread(insert_engine_run, engine_input, [decision])
-            result["neural_v1"] = {
-                "shadow_decision": True,
-                "information_vintage_id": engine_input.information_vintage_id,
-                "decision_id": decision.decision_id,
-                "requested_action_kw": decision.requested_action_kw,
-                "confidence": decision.diagnostics.get("classification_confidence"),
-            }
-        except Exception as exc:
-            result["neural_v1"] = {"shadow_decision": False, "status": "failed", "error": repr(exc)}
-    else:
-        result["neural_v1"] = {
-            "shadow_decision": False,
-            "status": "model_not_ready",
-            "samples": neural.get("samples"),
-        }
+    result["neural_v1"] = {"status": "retired", "shadow_decision": False}
 
     try:
         params = await asyncio.to_thread(current_parameters, "candidate")

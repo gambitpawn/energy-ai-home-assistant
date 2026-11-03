@@ -33,6 +33,7 @@ from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .optimizer_store import latest_plan
 from .retention import read_retention_status
 from .db import DB_PATH
+from .db_compaction import status as compaction_status
 from .price_economics import CURRENT_ECONOMICS, HISTORICAL_ECONOMICS, economics_for_timestamp, economics_payload, economics_signature, economics_versions, effective_prices
 from .production_state import cancel_override, create_override, scheduled_overrides, set_mode, status as production_status
 from .pv_auto import automatic_pv_retraining_once, pv_auto_status
@@ -88,6 +89,10 @@ def install_runtime_routes(
         except OSError:
             db_bytes = None
         return {"runtime_build": runtime_build, "database_bytes": db_bytes, **report}
+
+    @app.get("/storage/compaction/status", tags=["maintenance"])
+    async def compaction_status_route():
+        return await asyncio.to_thread(compaction_status)
 
     @app.get("/maintenance/history", tags=["maintenance"], summary="Persistent maintenance job history")
     async def maintenance_history_route(
@@ -275,15 +280,15 @@ def install_runtime_routes(
 
     @app.post("/engines/neural/build-samples", tags=["engines-neural"])
     async def neural_build_samples(max_new: int = Query(32, ge=1, le=256), candidate_limit: int = Query(1500, ge=10, le=10000)):
-        return await asyncio.to_thread(build_training_samples, core.cfg, max_new, candidate_limit)
+        raise HTTPException(status_code=410, detail="Neural engine is retired; training disabled")
 
     @app.post("/engines/neural/train", tags=["engines-neural"])
-    async def neural_train(): return await asyncio.to_thread(train_model)
+    async def neural_train():
+        raise HTTPException(status_code=410, detail="Neural engine is retired; training disabled")
 
     @app.post("/engines/neural/bootstrap", tags=["engines-neural"])
     async def neural_bootstrap(max_new: int = Query(64, ge=1, le=256), candidate_limit: int = Query(2000, ge=10, le=10000)):
-        samples = await asyncio.to_thread(build_training_samples, core.cfg, max_new, candidate_limit); training = await asyncio.to_thread(train_model)
-        return {"samples": samples, "training": training, "status": await asyncio.to_thread(neural_runtime_status)}
+        raise HTTPException(status_code=410, detail="Neural engine is retired; training disabled")
 
     @app.get("/engines/neural/latest", tags=["engines-neural"])
     async def neural_latest(limit: int = Query(5, ge=1, le=100)):
@@ -293,7 +298,7 @@ def install_runtime_routes(
     async def neural_auto_status_route(): return await asyncio.to_thread(neural_auto_status)
 
     @app.post("/engines/neural/auto/run", tags=["engines-neural"])
-    async def neural_auto_run(): return await asyncio.to_thread(neural_maintenance_once, core.cfg)
+    async def neural_auto_run(): raise HTTPException(status_code=410, detail="Neural engine is retired; automatic training disabled")
 
     @app.get("/engines/neural/models", tags=["engines-neural"])
     async def neural_models(limit: int = Query(20, ge=1, le=100)): return {"engine_id": "neural_v1", "models": await asyncio.to_thread(model_history, limit)}
