@@ -98,16 +98,12 @@ def _evaluated_plan_row(connection: sqlite3.Connection, timestamp: str) -> bool:
         return False
 
 
-def _candidate_rows(connection: sqlite3.Connection, table: str, cutoff: str, limit: int):
-    """Always sample oldest rowids, avoiding a full scan of multi-GB tables.
-
-    Retention uses insertion ordering, which is chronological for live writes.
-    Late backfills can persist longer rather than risking heavy full scans.
-    """
+def _candidate_rows(connection: sqlite3.Connection, table: str, cursor: int, limit: int):
+    """Scan a bounded rowid window, advancing past protected old rows."""
     column = TABLE_DATE_COLUMNS[table]
     return connection.execute(
-        f"SELECT rowid,{column} FROM {table} ORDER BY rowid ASC LIMIT ?",
-        (limit,),
+        f"SELECT rowid,{column} FROM {table} WHERE rowid>? ORDER BY rowid ASC LIMIT ?",
+        (cursor, limit),
     ).fetchall()
 
 
@@ -122,6 +118,7 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
     removed: dict[str, int] = {}
     protected: dict[str, int] = {}
     errors: dict[str, str] = {}
+    cursors = dict(read_retention_status().get("cursors") or {})
     for table, days in RETENTION_DAYS.items():
         cutoff = (now - timedelta(days=days)).isoformat()
         try:
@@ -132,7 +129,11 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
                 if not available:
                     continue
                 # No expensive index creation or full-table counting.
-                candidates = _candidate_rows(c, table, cutoff, limit)
+                cursor = int(cursors.get(table) or 0)
+                candidates = _candidate_rows(c, table, cursor, limit)
+                if not candidates and cursor:
+                    candidates = _candidate_rows(c, table, 0, limit)
+                cursors[table] = candidates[-1][0] if len(candidates) == limit else 0
                 ids = []
                 held = 0
                 for rowid, timestamp in candidates:
@@ -173,6 +174,7 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
         "removed": removed,
         "protected": protected,
         "errors": errors,
+        "cursors": cursors,
         "automatic_vacuum": False,
         "note": "SQLite file size is not reduced by DELETE; offline rebuild required",
     }
