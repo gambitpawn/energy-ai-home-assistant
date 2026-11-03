@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from .collector import Collector
 from .component_registry import registry_status
 from .config import load_config
-from .db import get_prices, init_db, insert_llm, insert_pv_forecast, latest_pv_forecast, latest_rows, price_day_coverage, rebuild_recent_15m, upsert_prices
+from .db import get_prices, init_db, insert_llm, insert_pv_forecast, latest_pv_forecast, latest_rows, price_day_coverage, upsert_prices
 from .diagnostics_store import checkpoint_control_run, new_control_run_id, set_current_control_run, start_control_run
 from .flexible_loads import discover_flexible_load_entities, ev_state, sauna_state
 from .forecast import PVForecaster
@@ -229,7 +229,8 @@ async def _forecast_maintenance_loop():
 async def lifespan(app):
     global collector_task,maintenance_task,price_retry_task
     init_db()
-    try: await collector.run_once(); rebuild_recent_15m(collector.poll_seconds,lookback_hours=48)
+    # Historical bucket repair runs in a bounded maintenance worker after startup.
+    try: await collector.run_once()
     except Exception as exc: collector.last_error=repr(exc)
     for coro in (_refresh_price_horizon,_refresh_pv_forecast,_refresh_load_forecast,_refresh_optimizer_plan):
         try: await coro()
@@ -358,7 +359,8 @@ async def discover_json():
 @app.get("/health")
 async def health():
     plan=latest_plan(1)
-    return {"ok":collector.last_error is None,"runtime_build":RUNTIME_VERSION,"read_only":True,"collector_running":collector.running,"forecast_evaluation_running":maintenance_task is not None and not maintenance_task.done(),"price_retry_running":price_retry_task is not None and not price_retry_task.done(),"price_refresh":_price_status(),"ha_api_authenticated":collector.ha.authenticated,"last_error":collector.last_error,"component_count":len(registry_status(cfg)["active_ids"]),"optimizer_mode":"shadow_read_only","optimizer_latest_plan":plan.get("generated_at"),"openai_configured":explainer.client is not None,"llm_model":explainer.model}
+    persistence=collector.persistence_status()
+    return {"ok":collector.last_error is None and persistence["last_error"] is None,"persistence":persistence,"runtime_build":RUNTIME_VERSION,"read_only":True,"collector_running":collector.running,"forecast_evaluation_running":maintenance_task is not None and not maintenance_task.done(),"price_retry_running":price_retry_task is not None and not price_retry_task.done(),"price_refresh":_price_status(),"ha_api_authenticated":collector.ha.authenticated,"last_error":collector.last_error,"component_count":len(registry_status(cfg)["active_ids"]),"optimizer_mode":"shadow_read_only","optimizer_latest_plan":plan.get("generated_at"),"openai_configured":explainer.client is not None,"llm_model":explainer.model}
 @app.get("/config")
 async def config(): return cfg
 @app.get("/state")
