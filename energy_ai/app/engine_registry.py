@@ -71,6 +71,8 @@ DESCRIPTORS: tuple[EngineDescriptor, ...] = (
         available=False,
         trainable=False,
         learning_enabled=False,
+        supports_shadow=False,
+        supports_active=False,
     ),
     EngineDescriptor(
         engine_id="neural_v1",
@@ -82,6 +84,8 @@ DESCRIPTORS: tuple[EngineDescriptor, ...] = (
         available=False,
         trainable=False,
         learning_enabled=False,
+        supports_shadow=False,
+        supports_active=False,
     ),
     EngineDescriptor(
         engine_id="hybrid_v1",
@@ -93,6 +97,8 @@ DESCRIPTORS: tuple[EngineDescriptor, ...] = (
         available=False,
         trainable=False,
         learning_enabled=False,
+        supports_shadow=False,
+        supports_active=False,
     ),
 )
 
