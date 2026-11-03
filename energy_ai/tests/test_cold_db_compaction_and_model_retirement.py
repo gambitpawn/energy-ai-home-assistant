@@ -112,3 +112,39 @@ def test_no_live_retired_model_training_or_decisions():
     assert "install_gradient_runtime_patch(base.core.cfg)" not in operator
     assert "install_retired_selector_guard()" in operator
     assert "app.cold_start_maintenance" in (root.parent / "run.sh").read_text()
+
+def test_failed_integrity_validation_keeps_original(tmp_path, monkeypatch):
+    from app import db_compaction as compaction
+
+    source = tmp_path / "energy_ai.db"
+    _database(source)
+    original = source.read_bytes()
+    marker, _, target, rollback = _paths(source)
+    marker.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(compaction, "MIN_FREE_PADDING_BYTES", 0)
+
+    def reject(_connection):
+        raise RuntimeError("simulated validation failure")
+
+    monkeypatch.setattr(compaction, "_integrity", reject)
+    result = compact_before_server_start(source)
+    assert result["status"] == "failed"
+    assert source.read_bytes() == original
+    assert not target.exists()
+    assert not rollback.exists()
+
+
+def test_interrupted_swap_rolls_back_compacted_candidate(tmp_path):
+    import shutil
+
+    source = tmp_path / "energy_ai.db"
+    _database(source)
+    marker, _, _, rollback = _paths(source)
+    shutil.copy2(source, rollback)
+    marker.write_text("{}", encoding="utf-8")
+    with sqlite3.connect(source) as c:
+        c.execute("DELETE FROM neural_training_sample")
+    result = compact_before_server_start(source)
+    assert result["status"] == "interrupted_swap_rolled_back"
+    with sqlite3.connect(source) as c:
+        assert c.execute("SELECT COUNT(*) FROM neural_training_sample").fetchone()[0] == 1
