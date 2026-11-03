@@ -33,6 +33,7 @@ from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .optimizer_store import latest_plan
 from .retention import read_retention_status
 from .db import DB_PATH
+from .db_compaction import status as compaction_status
 from .price_economics import CURRENT_ECONOMICS, HISTORICAL_ECONOMICS, economics_for_timestamp, economics_payload, economics_signature, economics_versions, effective_prices
 from .production_state import cancel_override, create_override, scheduled_overrides, set_mode, status as production_status
 from .pv_auto import automatic_pv_retraining_once, pv_auto_status
@@ -88,6 +89,10 @@ def install_runtime_routes(
         except OSError:
             db_bytes = None
         return {"runtime_build": runtime_build, "database_bytes": db_bytes, **report}
+
+    @app.get("/storage/compaction/status", tags=["maintenance"])
+    async def compaction_status_route():
+        return await asyncio.to_thread(compaction_status)
 
     @app.get("/maintenance/history", tags=["maintenance"], summary="Persistent maintenance job history")
     async def maintenance_history_route(
