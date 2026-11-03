@@ -145,9 +145,19 @@ def run_retention_batch(*, batch_size: int = BATCH_SIZE, now: datetime | None = 
                 if not candidates and cursor:
                     candidates = _candidate_rows(c, table, 0, limit)
                 cursors[table] = candidates[-1][0] if len(candidates) == limit else 0
+                latest_plan_generation = None
+                if table in {"optimizer_plan", "optimizer_plan_summary"}:
+                    if c.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='optimizer_plan_summary'"
+                    ).fetchone():
+                        latest = c.execute("SELECT MAX(generated_at) FROM optimizer_plan_summary").fetchone()
+                        latest_plan_generation = latest[0] if latest else None
                 ids = []
                 held = 0
                 for rowid, timestamp in candidates:
+                    if latest_plan_generation is not None and timestamp == latest_plan_generation:
+                        held += 1
+                        continue
                     if not _older_than(timestamp, cutoff):
                         continue
                     if table == "raw_state" and not _safe_raw_row(c, str(timestamp)):
