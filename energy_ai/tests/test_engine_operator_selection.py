@@ -129,8 +129,9 @@ def test_models_extension_uses_named_series_and_leaves_overview_outside_extensio
     assert "overviewPlan" not in source
 
 
-def test_runtime_installs_operator_routing_before_hybrid_wrapper():
+def test_retired_learned_wrappers_are_not_installed():
     source = (ROOT / "app" / "runtime_operator.py").read_text(encoding="utf-8")
-    operator_pos = source.index("install_operator_engine_routing()")
-    hybrid_pos = source.index("install_hybrid_runtime_patch(base.core.cfg)")
-    assert operator_pos < hybrid_pos
+    assert "install_retired_selector_guard()" in source
+    assert "install_operator_engine_routing()" in source
+    assert "install_hybrid_runtime_patch(base.core.cfg)" not in source
+    assert "install_gradient_runtime_patch(base.core.cfg)" not in source
