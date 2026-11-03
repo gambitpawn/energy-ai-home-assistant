@@ -171,8 +171,10 @@ def compact_before_server_start(database: Path | None = None) -> dict:
         # Explicit failure: never silently initialize a new empty database.
         return {"status": "database_missing"}
     if rollback.exists():
-        result = {"status": "rollback_file_exists", "error": "manual inspection required"}
-        _write_json(report, {**status(source), "last_result": result["status"]})
+        os.replace(rollback, source)
+        marker.unlink(missing_ok=True)
+        result = {"status": "interrupted_swap_rolled_back", "last_result": "restored_original"}
+        _write_json(report, result)
         return result
     sufficient, free = _space_ok(source)
     if not sufficient:
