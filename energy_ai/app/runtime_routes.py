@@ -275,15 +275,15 @@ def install_runtime_routes(
 
     @app.post("/engines/neural/build-samples", tags=["engines-neural"])
     async def neural_build_samples(max_new: int = Query(32, ge=1, le=256), candidate_limit: int = Query(1500, ge=10, le=10000)):
-        return await asyncio.to_thread(build_training_samples, core.cfg, max_new, candidate_limit)
+        raise HTTPException(status_code=410, detail="Neural engine is retired; training disabled")
 
     @app.post("/engines/neural/train", tags=["engines-neural"])
-    async def neural_train(): return await asyncio.to_thread(train_model)
+    async def neural_train():
+        raise HTTPException(status_code=410, detail="Neural engine is retired; training disabled")
 
     @app.post("/engines/neural/bootstrap", tags=["engines-neural"])
     async def neural_bootstrap(max_new: int = Query(64, ge=1, le=256), candidate_limit: int = Query(2000, ge=10, le=10000)):
-        samples = await asyncio.to_thread(build_training_samples, core.cfg, max_new, candidate_limit); training = await asyncio.to_thread(train_model)
-        return {"samples": samples, "training": training, "status": await asyncio.to_thread(neural_runtime_status)}
+        raise HTTPException(status_code=410, detail="Neural engine is retired; training disabled")
 
     @app.get("/engines/neural/latest", tags=["engines-neural"])
     async def neural_latest(limit: int = Query(5, ge=1, le=100)):
@@ -293,7 +293,7 @@ def install_runtime_routes(
     async def neural_auto_status_route(): return await asyncio.to_thread(neural_auto_status)
 
     @app.post("/engines/neural/auto/run", tags=["engines-neural"])
-    async def neural_auto_run(): return await asyncio.to_thread(neural_maintenance_once, core.cfg)
+    async def neural_auto_run(): raise HTTPException(status_code=410, detail="Neural engine is retired; automatic training disabled")
 
     @app.get("/engines/neural/models", tags=["engines-neural"])
     async def neural_models(limit: int = Query(20, ge=1, le=100)): return {"engine_id": "neural_v1", "models": await asyncio.to_thread(model_history, limit)}
