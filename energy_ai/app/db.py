@@ -210,7 +210,7 @@ def insert_pv_forecast(forecast):
         if remaining is not None:
             g=datetime.fromisoformat(generated_at.replace("Z","+00:00")); local_date=g.astimezone(STOCKHOLM).date().isoformat(); u=forecast.get("pv_remaining_energy_uncertainty") or {}
             c.execute("INSERT OR REPLACE INTO pv_remaining_day_forecast(generated_at,local_date,remaining_energy_kwh,p80_kwh,p95_kwh,model) VALUES (?,?,?,?,?,?)",(generated_at,local_date,float(remaining),u.get("p80_kwh"),u.get("p95_kwh"),model))
-        cutoff=(datetime.now(timezone.utc)-timedelta(days=180)).isoformat(); c.execute("DELETE FROM pv_forecast_15m WHERE generated_at < ?",(cutoff,)); c.execute("DELETE FROM pv_remaining_day_forecast WHERE generated_at < ?",(cutoff,))
+        # Retention is handled in bounded off-peak maintenance workers.
 
 
 def latest_pv_forecast(limit=144):
