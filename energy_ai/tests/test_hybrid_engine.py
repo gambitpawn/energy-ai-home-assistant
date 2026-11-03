@@ -91,11 +91,11 @@ def _prior(*, top=2.0, strength=20.0):
     )
 
 
-def test_registry_marks_hybrid_as_available_learning_challenger():
+def test_registry_marks_neural_dependent_hybrid_as_retired():
     item = descriptor("hybrid_v1")
     assert item.family == "hybrid"
-    assert item.available is True
-    assert item.learning_enabled is True
+    assert item.available is False
+    assert item.learning_enabled is False
     assert item.baseline is False
 
 
