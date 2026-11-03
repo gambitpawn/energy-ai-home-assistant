@@ -238,6 +238,8 @@ def compact_before_server_start(database: Path | None = None) -> dict:
     except Exception as exc:
         if target.exists():
             target.unlink()
+        if rollback.exists():
+            os.replace(rollback, source)
         marker.unlink(missing_ok=True)
         result = {"status": "failed", "last_started_at": started,
                   "last_result": "failed", "last_error": repr(exc)}
