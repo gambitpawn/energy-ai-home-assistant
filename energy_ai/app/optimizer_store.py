@@ -85,9 +85,7 @@ def insert_plan(plan: dict[str, Any]) -> int:
                 json.dumps(plan, ensure_ascii=False),
             ),
         )
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
-        c.execute("DELETE FROM optimizer_plan WHERE generated_at < ?", (cutoff,))
-        c.execute("DELETE FROM optimizer_plan_summary WHERE generated_at < ?", (cutoff,))
+        # Retention is handled in bounded off-peak maintenance workers.
     return len(rows)
 
 

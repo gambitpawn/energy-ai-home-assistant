@@ -103,13 +103,7 @@ def insert_engine_run(engine_input: EngineInput, decisions: Iterable[EngineDecis
                     json.dumps(payload, ensure_ascii=False),
                 ),
             )
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
-        c.execute("DELETE FROM engine_decision WHERE generated_at < ?", (cutoff,))
-        c.execute(
-            "DELETE FROM engine_information_vintage WHERE generated_at < ? "
-            "AND information_vintage_id NOT IN (SELECT DISTINCT information_vintage_id FROM engine_decision)",
-            (cutoff,),
-        )
+        # Retention is handled in bounded off-peak maintenance workers.
     return len(decision_list)
 
 

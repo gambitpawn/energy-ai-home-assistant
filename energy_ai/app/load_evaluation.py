@@ -83,8 +83,7 @@ def insert_load_forecast(forecast: dict[str, Any]) -> int:
                 json.dumps(r, ensure_ascii=False),
             ) for r in rows],
         )
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat()
-        c.execute("DELETE FROM load_forecast_15m WHERE generated_at < ?", (cutoff,))
+        # Retention is handled in bounded off-peak maintenance workers.
     return len(rows)
 
 

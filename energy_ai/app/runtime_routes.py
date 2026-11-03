@@ -31,6 +31,8 @@ from .neural_training_v2 import training_maturity_status
 from .optimizer_contract_v189 import contract_status
 from .optimizer_evaluation import evaluate_matured_optimizer_days
 from .optimizer_store import latest_plan
+from .retention import read_retention_status
+from .db import DB_PATH
 from .price_economics import CURRENT_ECONOMICS, HISTORICAL_ECONOMICS, economics_for_timestamp, economics_payload, economics_signature, economics_versions, effective_prices
 from .production_state import cancel_override, create_override, scheduled_overrides, set_mode, status as production_status
 from .pv_auto import automatic_pv_retraining_once, pv_auto_status
@@ -77,6 +79,15 @@ def install_runtime_routes(
     @app.get("/maintenance/status", tags=["maintenance"], summary="Maintenance worker status")
     async def maintenance_status_route():
         return {"runtime_build": runtime_build, **maintenance_status()}
+
+    @app.get("/storage/retention/status", tags=["maintenance"], summary="Database retention progress")
+    async def storage_retention_status():
+        report = await asyncio.to_thread(read_retention_status)
+        try:
+            db_bytes = DB_PATH.stat().st_size
+        except OSError:
+            db_bytes = None
+        return {"runtime_build": runtime_build, "database_bytes": db_bytes, **report}
 
     @app.get("/maintenance/history", tags=["maintenance"], summary="Persistent maintenance job history")
     async def maintenance_history_route(
