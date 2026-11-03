@@ -130,14 +130,15 @@ def ask_supervisor_to_restart(*, opener=None) -> dict:
 
 
 def _row_counts(connection: sqlite3.Connection) -> dict[str, int]:
-    tables = {row[0] for row in connection.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )}
-    counts = {}
-    for table in CONTROL_TABLES:
-        if table in tables:
-            counts[table] = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-    return counts
+    tables = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    result = {}
+    for (table,) in tables:
+        if not table.replace("_", "").isalnum():
+            raise RuntimeError("unrecognized table name in SQLite schema")
+        result[table] = int(connection.execute("SELECT COUNT(*) FROM " + table).fetchone()[0])
+    return result
 
 
 def _integrity(connection: sqlite3.Connection) -> None:
