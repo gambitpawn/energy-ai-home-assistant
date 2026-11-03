@@ -4,6 +4,7 @@ import asyncio
 import ctypes
 import multiprocessing as mp
 import os
+from pathlib import Path
 import signal
 import threading
 import time
@@ -23,6 +24,10 @@ _DEFAULT_TIMEOUT_SECONDS = {
     LANE_EVALUATION: 600.0,
 }
 _LANE_LOCKS = {lane: asyncio.Lock() for lane in _LANES}
+# Both lanes retain separate supervisors, but only one memory-heavy job may run.
+_WORKER_ADMISSION_LOCK = asyncio.Lock()
+_MIN_START_HEADROOM_BYTES = 384 * 1024 * 1024
+_MIN_RUNNING_HEADROOM_BYTES = 192 * 1024 * 1024
 _SUPERVISORS: dict[str, Any] = {lane: None for lane in _LANES}
 _COMMAND_CONNECTIONS: dict[str, Any] = {lane: None for lane in _LANES}
 _RESULT_CONNECTIONS: dict[str, Any] = {lane: None for lane in _LANES}
@@ -31,6 +36,44 @@ _PROCESS_REQUIRED = False
 
 class MaintenanceJobTimeoutError(RuntimeError):
     """Raised when a maintenance job exceeds its configured runtime deadline."""
+
+
+class MaintenanceResourcePressureError(RuntimeError):
+    """Raised when a maintenance job would endanger runtime memory headroom."""
+
+
+def _memory_headroom_bytes() -> int | None:
+    """Conservative Linux host/cgroup headroom; None if no reliable reading.
+
+    This is an admission/safety signal, not an estimate of Python heap size.
+    Reading files is cheap and works without privileged kernel-log access.
+    """
+    readings: list[int] = []
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemAvailable:"):
+                readings.append(int(line.split()[1]) * 1024)
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        max_raw = Path("/sys/fs/cgroup/memory.max").read_text(encoding="ascii").strip()
+        if max_raw != "max":
+            limit = int(max_raw)
+            usage = int(Path("/sys/fs/cgroup/memory.current").read_text(encoding="ascii").strip())
+            readings.append(max(0, limit - usage))
+    except (OSError, ValueError):
+        pass
+    return min(readings) if readings else None
+
+
+def _require_memory_headroom(required_bytes: int) -> None:
+    available = _memory_headroom_bytes()
+    if available is not None and available < required_bytes:
+        raise MaintenanceResourcePressureError(
+            f"maintenance deferred: only {available // (1024 * 1024)} MiB memory headroom "
+            f"(minimum {required_bytes // (1024 * 1024)} MiB)"
+        )
 
 
 def _lane_state() -> dict[str, Any]:
@@ -49,12 +92,13 @@ def _lane_state() -> dict[str, Any]:
         "last_completed_at": None,
         "last_error": None,
         "last_timeout": None,
+        "last_resource_pressure": None,
         "restart_count": 0,
     }
 
 
 _STATE: dict[str, Any] = {
-    "policy": "dual_lane_supervised_job_workers_v3",
+    "policy": "dual_lane_serialized_memory_guard_v4",
     "watchdog_policy": "per_job_deadline_kill_and_fresh_worker",
     "lanes": {lane: _lane_state() for lane in _LANES},
 }
@@ -188,12 +232,14 @@ def _supervisor_main(command_conn, result_conn, lane: str) -> None:
         deadline = time.monotonic() + timeout_seconds
         payload = None
         timed_out = False
+        resource_pressure = False
+        low_memory_checks = 0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
                 break
-            if job_result_recv.poll(min(1.0, remaining)):
+            if job_result_recv.poll(min(0.5, remaining)):
                 try:
                     payload = job_result_recv.recv()
                 except EOFError:
@@ -201,8 +247,22 @@ def _supervisor_main(command_conn, result_conn, lane: str) -> None:
                 break
             if not process.is_alive():
                 break
+            available = _memory_headroom_bytes()
+            low_memory_checks = low_memory_checks + 1 if available is not None and available < _MIN_RUNNING_HEADROOM_BYTES else 0
+            if low_memory_checks >= 2:
+                resource_pressure = True
+                break
 
-        if timed_out:
+        if resource_pressure:
+            worker_pid = process.pid
+            _terminate_job_process(process)
+            result_conn.send({
+                "kind": "result", "job_id": job_id, "lane": lane, "label": label,
+                "ok": False, "resource_pressure": True, "worker_pid": worker_pid,
+                "restart_count": restart_count,
+                "error": "maintenance worker stopped to preserve system memory headroom",
+            })
+        elif timed_out:
             timed_out_pid = process.pid
             _terminate_job_process(process)
             restart_count += 1
@@ -444,6 +504,9 @@ async def _run_in_process(
 
         lane_state["restart_count"] = int(message.get("restart_count") or lane_state.get("restart_count") or 0)
         lane_state["active_job_pid"] = None
+        if message.get("resource_pressure"):
+            lane_state["last_resource_pressure"] = {"label": str(label), "at": _now(), "terminated_worker_pid": message.get("worker_pid")}
+            raise MaintenanceResourcePressureError(str(message.get("error") or "maintenance worker memory guard triggered"))
         if message.get("timeout"):
             timeout_info = {
                 "label": str(label),
@@ -477,7 +540,7 @@ async def run_low_priority(
         else max(1.0, float(timeout_seconds))
     )
     lane_state = _STATE["lanes"][lane]
-    async with _LANE_LOCKS[lane]:
+    async with _LANE_LOCKS[lane], _WORKER_ADMISSION_LOCK:
         job_id = uuid4().hex
         started_monotonic = time.monotonic()
         lane_state.update({
@@ -497,6 +560,7 @@ async def run_low_priority(
             payload={"execution_mode": lane_state.get("execution_mode")},
         )
         try:
+            _require_memory_headroom(_MIN_START_HEADROOM_BYTES)
             if _PROCESS_REQUIRED:
                 result = await _run_in_process(
                     lane,
@@ -546,6 +610,19 @@ async def run_low_priority(
                 error=repr(error),
             )
             raise error from exc
+        except MaintenanceResourcePressureError as exc:
+            lane_state["last_error"] = repr(exc)
+            lane_state["last_resource_pressure"] = {"label": str(label), "at": _now(), "error": repr(exc), "worker_pid": lane_state.get("last_job_worker_pid")}
+            await asyncio.to_thread(
+                finish_maintenance_run,
+                job_id,
+                status="failed",
+                worker_pid=lane_state.get("last_job_worker_pid"),
+                restart_count=int(lane_state.get("restart_count") or 0),
+                duration_seconds=max(0.0, time.monotonic() - started_monotonic),
+                error=repr(exc),
+            )
+            raise
         except MaintenanceJobTimeoutError as exc:
             lane_state["last_error"] = repr(exc)
             await asyncio.to_thread(
