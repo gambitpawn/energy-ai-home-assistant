@@ -75,6 +75,16 @@ def due(database: Path | None = None, now: datetime | None = None) -> bool:
     if info.get("pending"):
         return False
     raw = info.get("last_success_at")
+    if info.get("last_result") == "failed":
+        # Prevent repeated multi-GB retries on consecutive nights.
+        attempt = info.get("last_attempt_at")
+        if attempt:
+            try:
+                previous_attempt = datetime.fromisoformat(str(attempt))
+                if previous_attempt.tzinfo is not None and current - previous_attempt.astimezone(timezone.utc) < timedelta(days=7):
+                    return False
+            except ValueError:
+                pass
     if not raw:
         return True
     try:
@@ -260,6 +270,7 @@ def compact_before_server_start(database: Path | None = None) -> dict:
             os.replace(rollback, source)
         marker.unlink(missing_ok=True)
         result = {"status": "failed", "last_started_at": started,
+                  "last_attempt_at": _stamp(),
                   "last_result": "failed", "last_error": repr(exc)}
         _write_json(report, {**status(source), **result})
         return result
